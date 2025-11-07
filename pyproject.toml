@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "max"
+version = "0.1.0"
+description = "A JAX-based Reinforcement Learning library for model-based and model-free control"
+readme = "README.md"
+requires-python = ">=3.8,<3.14"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+keywords = ["reinforcement learning", "JAX", "model-based RL", "IPPO", "PPO"]
+
+dependencies = [
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+    "flax>=0.8.0",
+    "optax>=0.2.0",
+    "numpy>=1.20.0",
+    "matplotlib>=3.5.0",
+    "scipy>=1.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=22.0.0",
+    "isort>=5.0.0",
+]
+wandb = [
+    "wandb>=0.15.0",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py38", "py39", "py310", "py311"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 88
