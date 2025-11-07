@@ -4,8 +4,8 @@ setup(
     name="max",
     version="0.1.0",
     description="A JAX-based Reinforcement Learning library for model-based and model-free control",
-    author="Your Name",
-    author_email="your.email@example.com",
+    author="Fernando Palafox",
+    author_email="fernandopalafox@utexas.edu",
     packages=find_packages(),
     python_requires=">=3.8,<3.14",
     install_requires=[
