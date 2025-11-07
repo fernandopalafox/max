@@ -1,14 +1,14 @@
-# MAX: A JAX-based Reinforcement Learning Library
+# ⚠️ MAX: A JAX-based **Research** Library for Online RL ⚠️
 
-MAX is a modular reinforcement learning library built on JAX, designed for both model-based and model-free control with first-class support for multi-agent systems.
+**MAX** is a highly **experimental and rapidly evolving** modular reinforcement learning library built on JAX. It is **primarily designed** to prioritize **online adaptation algorithms** and **information-gathering strategies** in reinforcement learning, with a focus on both model-based and model-free control, and first-class support for multi-agent systems.
 
 ## Features
 
-- **Pure JAX Implementation**: Leverage JIT compilation, automatic differentiation, and GPU/TPU acceleration
-- **Multi-Agent RL**: Built-in support for IPPO (Independent PPO) and multi-agent environments
-- **Model-Based & Model-Free**: Combine learned dynamics models with planning or use pure policy optimization
-- **Modular Design**: Mix and match components (environments, policies, trainers, normalizers)
-- **Production-Ready**: Includes state normalization, replay buffers, and evaluation utilities
+- **Pure JAX Implementation**: Leverage JIT compilation, automatic differentiation, and GPU/TPU acceleration for fast iteration.
+- **Emphasis on Online Adaptation**: Core design centers around algorithms and components for efficient **adaptation to changing or uncertain dynamics**.
+- **Model-Based Algorithms with Parameter Belief**: Supports model-based control where the dynamics components **maintain a distribution or belief over uncertain parameters** (e.g., in a Bayesian context).
+- **Multi-Agent RL**: Built-in support for IPPO (Independent PPO) and multi-agent environments.
+- **Modular Design**: Mix and match components (environments, policies, trainers, normalizers) for rapid prototyping of novel online algorithms.
 
 ## Installation
 
@@ -18,50 +18,6 @@ MAX is a modular reinforcement learning library built on JAX, designed for both 
 git clone <repository-url>
 cd max
 pip install -e .
-```
-
-### With optional dependencies
-
-```bash
-# For Weights & Biases logging
-pip install -e ".[wandb]"
-
-# For development
-pip install -e ".[dev]"
-```
-
-## Quick Start
-
-### Training IPPO on Pursuit-Evasion
-
-```python
-from max import (
-    init_env,
-    init_policy,
-    init_policy_trainer,
-    init_normalizer,
-    init_jax_buffers,
-)
-import jax
-
-# Initialize environment
-key = jax.random.PRNGKey(0)
-env = init_env("pursuit_evasion", config)
-
-# Create policy and trainer
-policy, policy_state = init_policy(config, key)
-trainer, train_state = init_policy_trainer(config, policy, key)
-
-# Initialize replay buffer
-buffers = init_jax_buffers(config)
-
-# Training loop (see scripts/ippo_pe.py for complete example)
-```
-
-### Visualizing Trained Policies
-
-```bash
-python scripts/visualize_pe.py --policy-path trained_policies/my_policy.pkl
 ```
 
 ## Library Structure
@@ -81,13 +37,18 @@ python scripts/visualize_pe.py --policy-path trained_policies/my_policy.pkl
 
 ### Auxiliary Modules
 
-- **`estimators`**: Extended Kalman Filter for state estimation
-- **`solvers`**: LQR and other optimal control solvers
-- **`utils`**: Visualization and utility functions
+- **`estimators`**: Extended Kalman Filter for online Bayesian optimization
 
 ## Examples
 
-### Training Scripts
+### Pursuit-Evasion
+
+<div style="text-align: center;">
+  <img src="figures/readme_pursuit_evasion.gif" alt="Multi-agent pursuit-evasion policy visualization" width=400 style="display: block; margin: 0 auto;"/>
+  <p style="text-align: center; font-style: italic;">
+    <strong>Figure 1:</strong> Multi-agent pursuit-evasion policy
+  </p>
+</div>
 
 - **`scripts/ippo_pe.py`**: Train IPPO agents on pursuit-evasion task
   - Multi-agent coordination
@@ -130,55 +91,6 @@ policy = create_actor_critic_policy(config)
 trainer = init_policy_trainer(config, policy)
 ```
 
-## Configuration
-
-All components use dictionary-based configuration for flexibility. See `scripts/ippo_pe.py` for a complete example configuration.
-
-## Requirements
-
-- Python >= 3.8, < 3.14
-- JAX >= 0.4.0
-- Flax >= 0.8.0
-- Optax >= 0.2.0
-- NumPy >= 1.20.0
-- Matplotlib >= 3.5.0
-- SciPy >= 1.7.0
-
-## Development
-
-### Running tests
-
-```bash
-pytest tests/
-```
-
-### Code formatting
-
-```bash
-black max/ scripts/
-isort max/ scripts/
-```
-
-## Citation
-
-If you use MAX in your research, please cite:
-
-```bibtex
-@software{max2024,
-  title={MAX: A JAX-based Reinforcement Learning Library},
-  author={Your Name},
-  year={2024},
-  url={https://github.com/yourusername/max}
-}
-```
-
 ## License
 
-MIT License - see LICENSE file for details
-
-## Acknowledgments
-
-This library builds on research in:
-- Model-based reinforcement learning
-- Multi-agent coordination
-- JAX ecosystem tools (Flax, Optax)
+MIT License
