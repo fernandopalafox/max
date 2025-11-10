@@ -517,45 +517,61 @@ def make_blocker_goal_seeker_env(params: EnvParams):
         truncated = next_step_count >= params.max_episode_steps
 
         # 3. Compute rewards
-        d_p2_g = dist_seeker_goal_fn(next_state)
+
+        # Potential-based shaping rewards
+        d_p2_g_prev = dist_seeker_goal_fn(state)
+        d_p2_g_next = dist_seeker_goal_fn(next_state)
+
+        potential_1_prev = +params.reward_shaping_k2 * d_p2_g_prev
+        potential_1_next = +params.reward_shaping_k2 * d_p2_g_next
+        
+        potential_2_prev = -params.reward_shaping_k1 * d_p2_g_prev
+        potential_2_next = -params.reward_shaping_k1 * d_p2_g_next
+
+        shaping_r1 = potential_1_next - potential_1_prev  # A1: Area Denial
+        shaping_r2 = potential_2_next - potential_2_prev  # A2: Potential
+
+        shaping_rewards = jnp.array([shaping_r1, shaping_r2])
+
+        # Other rewards
         collision = is_collision_fn(next_state)
         r_win = params.reward_win
         c_collide = params.reward_collision_penalty
-
-        # 3a. Shaping + Non-Terminal Collision Penalty
-        shaping_r1 = +params.reward_shaping_k2 * d_p2_g  # A1: Area Denial
-        shaping_r2 = -params.reward_shaping_k1 * d_p2_g  # A2: Potential
-        # Mutual collision penalty
         collision_penalty = jnp.where(collision, -c_collide, 0.0)
-        
-        shaping_rewards = jnp.array([
-            shaping_r1 + collision_penalty,
-            shaping_r2 + collision_penalty
-        ])
 
-        # 3b. Terminal Rewards
-        # A1 (Blocker) terminal reward:
+        # terminal rewards
         terminal_r1 = jnp.where(
             terminated, -r_win, jnp.where(truncated, +r_win, 0.0)
         )
-        # A2 (Seeker) terminal reward:
         terminal_r2 = jnp.where(
             terminated, +r_win, jnp.where(truncated, -r_win, 0.0)
         )
-        
+
         terminal_rewards = jnp.array([terminal_r1, terminal_r2])
 
-        # 3c. OOB Penalties (from pursuit-evasion)
+        # out-of-bounds rewards
         agent_states_next = next_state[:-2].reshape(2, 4)
         positions = agent_states_next[:, :2]  # (2, 2)
         oob_penalties = jax.vmap(compute_oob_penalty)(positions)  # (2,)
-        
-        # 3d. Total Rewards
-        rewards = shaping_rewards + terminal_rewards + oob_penalties
+
+        rewards = shaping_rewards + collision_penalty + terminal_rewards +\
+            oob_penalties
 
         # 4. Get observations and info
         observations = get_obs_fn(next_state)
-        info = {}
+
+        # 5. Construct info dict
+        info = {
+            "total_reward_agent_0": rewards[0],
+            "total_reward_agent_1": rewards[1],
+            "collision": collision,
+            "shaping_reward_agent_0": shaping_r1,
+            "shaping_reward_agent_1": shaping_r2,
+            "terminal_reward_agent_0": terminal_r1,
+            "terminal_reward_agent_1": terminal_r2,
+            "oob_penalty_agent_0": oob_penalties[0],
+            "oob_penalty_agent_1": oob_penalties[1],
+        }
 
         return (
             next_state,
