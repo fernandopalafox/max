@@ -22,7 +22,7 @@ import os
 import pickle
 
 CONFIG = {
-    "env_name": "pursuit_evasion",
+    "env_name": "blocker_goal_seeker",
     "env_params": {
         "num_agents": 2,
         "box_half_width": 1.0,
@@ -36,7 +36,7 @@ CONFIG = {
         "pursuer_size": 0.075,
         "evader_size": 0.05,
     },
-    "total_steps": 150_000,
+    "total_steps": 1_000_000,
     "num_agents": 2,
     "dim_state": 10,
     "dim_action": 2,
@@ -105,7 +105,7 @@ CONFIG = {
 
 def main(config, save_dir):
     wandb.init(
-        project="pe",
+        project="blocker",
         config=config,
         group=config.get("wandb_group"),
         name=config.get("wandb_run_name"),
@@ -465,7 +465,7 @@ def main(config, save_dir):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run IPPO multi-agent tracking experiments."
+        description="Run IPPO"
     )
     parser.add_argument(
         "--run-name",
@@ -503,12 +503,12 @@ if __name__ == "__main__":
         print(f"--- Starting run for seed #{seed} ---")
         run_config = copy.deepcopy(CONFIG)
         run_config["seed"] = int(seed)
-        run_config["wandb_group"] = "ippo-multi-agent-tracking"
+        run_config["wandb_group"] = "ippo"
 
         if args.run_name:
             run_name_base = args.run_name
         else:
-            run_name_base = "ippo-multi-agent-tracking"
+            run_name_base = "ippo"
 
         if args.num_seeds > 1:
             run_config["wandb_run_name"] = f"{run_name_base}_seed_{seed_idx}"
