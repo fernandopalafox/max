@@ -1,4 +1,4 @@
-# ippo_pe.py
+# run_ippo.py
 
 import jax
 import jax.numpy as jnp
@@ -27,16 +27,10 @@ CONFIG = {
         "num_agents": 2,
         "box_half_width": 1.0,
         "max_episode_steps": 25,
-        "dt": 0.1,
-        "max_accel": 2.0,
-        "pursuer_max_accel": 3.0,
-        "evader_max_accel": 4.0,
-        "pursuer_max_speed": 1.0,
-        "evader_max_speed": 1.3,
-        "pursuer_size": 0.075,
-        "evader_size": 0.05,
+        "reward_shaping_k1": 1.0,
+        "reward_shaping_k2": 1.0,
     },
-    "total_steps": 1_000_000,
+    "total_steps": 150_000,
     "num_agents": 2,
     "dim_state": 10,
     "dim_action": 2,
