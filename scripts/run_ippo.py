@@ -24,7 +24,7 @@ import pickle
 CONFIG = {
     "env_name": "blocker_goal_seeker",
     "env_params": {
-       "num_agents": 2,
+       "num_agents": 3,
        "box_half_width": 1.0,
        "max_episode_steps": 100,
        "dt": 0.1,
@@ -39,9 +39,9 @@ CONFIG = {
        "reward_shaping_k2": 1.0,
        "reward_collision_penalty": 1.0,
     },
-    "total_steps": 150_000,
-    "num_agents": 2,
-    "dim_state": 10,
+    "total_steps": 200_000,
+    "num_agents": 3,
+    "dim_state": 14,
     "dim_action": 2,
     "train_freq": 1,
     "train_policy_freq": 2048,
@@ -62,8 +62,16 @@ CONFIG = {
                 -1.5,
                 -1.0,
                 -1.0,
+                -1.5,
+                -1.5,
+                -1.0,
+                -1.0,
             ],
             "max": [
+                1.0,
+                1.0,
+                1.5,
+                1.5,
                 1.0,
                 1.0,
                 1.5,
@@ -108,7 +116,7 @@ CONFIG = {
 
 def main(config, save_dir):
     wandb.init(
-        project="blocker",
+        project="blockers",
         config=config,
         group=config.get("wandb_group"),
         name=config.get("wandb_run_name"),
