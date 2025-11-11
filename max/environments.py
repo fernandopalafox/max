@@ -54,9 +54,7 @@ def make_env(params: EnvParams):
     # --- Core env logic (bound to params) ---
 
     @jax.jit
-    def _step_dynamics(
-        state: jnp.ndarray, actions: jnp.ndarray
-    ) -> jnp.ndarray:
+    def _step_dynamics(state: jnp.ndarray, actions: jnp.ndarray) -> jnp.ndarray:
         """
         Double integrator dynamics
         """
@@ -82,9 +80,7 @@ def make_env(params: EnvParams):
         goal = state[-2:]
         agent_states = state[:-2].reshape(num_agents, 4)
         positions = agent_states[:, :2]  # (num_agents, 2)
-        dist_to_goal = jnp.linalg.norm(
-            positions - goal, axis=1
-        )  # (num_agents,)
+        dist_to_goal = jnp.linalg.norm(positions - goal, axis=1)  # (num_agents,)
         normalized_dist = dist_to_goal / max_dist
         potential = 1.0 - normalized_dist
         return potential
@@ -141,9 +137,7 @@ def make_env(params: EnvParams):
             dtype=jnp.float32,
         )
         agent_velocities = jnp.zeros((num_agents, 2), dtype=jnp.float32)
-        agent_states = jnp.concatenate(
-            [agent_positions, agent_velocities], axis=1
-        )
+        agent_states = jnp.concatenate([agent_positions, agent_velocities], axis=1)
         state = jnp.concatenate([agent_states.flatten(), goal_pos])
         return state
 
@@ -189,24 +183,16 @@ def make_pursuit_evasion_env(params: EnvParams):
     """
 
     if params.num_agents != 2:
-        raise ValueError(
-            "Pursuit-Evasion environment requires exactly 2 agents."
-        )
+        raise ValueError("Pursuit-Evasion environment requires exactly 2 agents.")
     num_agents = params.num_agents  # (will be 2)
     dt = params.dt
-    max_accels_config = jnp.array(
-        [params.pursuer_max_accel, params.evader_max_accel]
-    )
-    max_speeds_config = jnp.array(
-        [params.pursuer_max_speed, params.evader_max_speed]
-    )
+    max_accels_config = jnp.array([params.pursuer_max_accel, params.evader_max_accel])
+    max_speeds_config = jnp.array([params.pursuer_max_speed, params.evader_max_speed])
 
     # --- Core env logic (bound to params) ---
 
     @jax.jit
-    def _step_dynamics(
-        state: jnp.ndarray, actions: jnp.ndarray
-    ) -> jnp.ndarray:
+    def _step_dynamics(state: jnp.ndarray, actions: jnp.ndarray) -> jnp.ndarray:
         """
         Double integrator dynamics
         """
@@ -217,9 +203,7 @@ def make_pursuit_evasion_env(params: EnvParams):
 
         next_velocities = velocities + actions * dt
         speeds = jnp.linalg.norm(next_velocities, axis=1, keepdims=True)
-        max_speeds_expanded = max_speeds_config.reshape(
-            -1, 1
-        )  # (num_agents, 1)
+        max_speeds_expanded = max_speeds_config.reshape(-1, 1)  # (num_agents, 1)
         scales = jnp.minimum(1.0, max_speeds_expanded / (speeds + 1e-6))
         clipped_velocities = next_velocities * scales
         next_positions = positions + velocities * dt + 0.5 * actions * dt**2
@@ -256,9 +240,7 @@ def make_pursuit_evasion_env(params: EnvParams):
     @jax.jit
     def compute_oob_penalty(agent_pos: jnp.ndarray) -> jnp.ndarray:
         """Computes the OpenAI-style OOB penalty for a single agent."""
-        scaled_pos_abs = (
-            jnp.abs(agent_pos) / params.box_half_width
-        )  # shape (2,)
+        scaled_pos_abs = jnp.abs(agent_pos) / params.box_half_width  # shape (2,)
         penalties = jax.vmap(_bound_scalar)(scaled_pos_abs)  # shape (2,)
 
         return -jnp.sum(penalties)
@@ -364,7 +346,7 @@ def make_blocker_goal_seeker_env(params: EnvParams):
 
     num_agents = params.num_agents
     dt = params.dt
-    
+
     # Generalized speed/accel configs
     # The first N-1 agents are blockers, the last one is the seeker.
     blocker_accels = jnp.full((num_agents - 1,), params.blocker_max_accel)
@@ -375,12 +357,10 @@ def make_blocker_goal_seeker_env(params: EnvParams):
     seeker_speed = jnp.array([params.seeker_max_speed])
     max_speeds_config = jnp.concatenate([blocker_speeds, seeker_speed])
 
-    # --- Core env logic (bound to params) --- 
-    
+    # --- Core env logic (bound to params) ---
+
     @jax.jit
-    def _step_dynamics(
-        state: jnp.ndarray, actions: jnp.ndarray
-    ) -> jnp.ndarray:
+    def _step_dynamics(state: jnp.ndarray, actions: jnp.ndarray) -> jnp.ndarray:
         """
         Double integrator dynamics with agent-specific speed/accel limits.
         """
@@ -391,9 +371,7 @@ def make_blocker_goal_seeker_env(params: EnvParams):
 
         next_velocities = velocities + actions * dt
         speeds = jnp.linalg.norm(next_velocities, axis=1, keepdims=True)
-        max_speeds_expanded = max_speeds_config.reshape(
-            -1, 1
-        )  # (num_agents, 1)
+        max_speeds_expanded = max_speeds_config.reshape(-1, 1)  # (num_agents, 1)
         scales = jnp.minimum(1.0, max_speeds_expanded / (speeds + 1e-6))
         clipped_velocities = next_velocities * scales
         next_positions = positions + velocities * dt + 0.5 * actions * dt**2
@@ -411,11 +389,11 @@ def make_blocker_goal_seeker_env(params: EnvParams):
         agent_states = state[:-2].reshape(num_agents, 4)
         all_pos = agent_states[:, :2]
         blocker_pos = all_pos[:-1]  # All agents except the last
-        seeker_pos = all_pos[-1]   # The last agent
+        seeker_pos = all_pos[-1]  # The last agent
 
         # Calculate distance from all blockers to the seeker
         dist = jnp.linalg.norm(blocker_pos - seeker_pos, axis=1)
-        
+
         # Return True if any distance is less than the threshold
         return jnp.any(dist < params.epsilon_collide)
 
@@ -456,9 +434,7 @@ def make_blocker_goal_seeker_env(params: EnvParams):
     @jax.jit
     def compute_oob_penalty(agent_pos: jnp.ndarray) -> jnp.ndarray:
         """Computes the OpenAI-style OOB penalty for a single agent."""
-        scaled_pos_abs = (
-            jnp.abs(agent_pos) / params.box_half_width
-        )  # shape (2,)
+        scaled_pos_abs = jnp.abs(agent_pos) / params.box_half_width  # shape (2,)
         penalties = jax.vmap(_bound_scalar)(scaled_pos_abs)  # shape (2,)
         return -jnp.sum(penalties)
 
@@ -546,7 +522,7 @@ def make_blocker_goal_seeker_env(params: EnvParams):
         collision = is_collision_fn(next_state)
         r_win = params.reward_win
         c_collide = params.reward_collision_penalty
-        
+
         # Collision penalty is applied to all agents
         collision_penalty = jnp.where(collision, -c_collide, 0.0)
 
@@ -557,7 +533,7 @@ def make_blocker_goal_seeker_env(params: EnvParams):
         terminal_r2 = jnp.where(
             terminated, +r_win, jnp.where(truncated, -r_win, 0.0)
         )  # Seeker terminal
-        
+
         # Build terminal reward array
         blocker_terminal_rewards = jnp.full((num_agents - 1,), terminal_r1)
         seeker_terminal_reward = jnp.array([terminal_r2])
@@ -570,8 +546,7 @@ def make_blocker_goal_seeker_env(params: EnvParams):
         positions = agent_states_next[:, :2]  # (num_agents, 2)
         oob_penalties = jax.vmap(compute_oob_penalty)(positions)  # (num_agents,)
 
-        rewards = shaping_rewards + collision_penalty + terminal_rewards +\
-            oob_penalties
+        rewards = shaping_rewards + collision_penalty + terminal_rewards + oob_penalties
 
         # 4. Get observations and info
         observations = get_obs_fn(next_state)
