@@ -28,7 +28,7 @@ from max.environments import init_env
 
 # Environment configuration (must match training config)
 CONFIG = {
-    "env_name": "pursuit_evasion",
+    "env_name": "blocker_goal_seeker",
     "env_params": {
         "num_agents": 2,
         "box_half_width": 1.0,
@@ -41,6 +41,9 @@ CONFIG = {
         "evader_max_speed": 1.3,
         "pursuer_size": 0.075,
         "evader_size": 0.05,
+        "reward_shaping_k1": 1.0,
+        "reward_shaping_k2": 1.0,
+        "reward_collision_penalty": 1.0,
     },
     "total_steps": 150_000,
     "num_agents": 2,
@@ -116,20 +119,27 @@ CONFIG = {
 CUSTOM_INITIAL_STATES = None  # Will use random initialization
 CUSTOM_GOAL = None
 
-# Option 2: Or uncomment these for custom scenarios:
-# Scenario: Agents start spread out, goal in center
-# CUSTOM_INITIAL_STATES = [
-#     jnp.array([-5.0, -5.0, 0.0, 0.0]),
-#     jnp.array([5.0, 5.0, 0.0, 0.0])
-# ]
-# CUSTOM_GOAL = jnp.array([0.0, 0.0])
+# P2, P1, Goal
+CUSTOM_INITIAL_STATES = [
+    jnp.array([0.0, 0.0, 0.0, 0.0]),  # Agent 0 (Blocker)
+    jnp.array([-0.5, 0.0, 0.0, 0.0]),  # Agent 1 (Goal-Seeker)
+]
+CUSTOM_GOAL = jnp.array([0.5, 0.0])
 
-# Scenario: Agents start together, goal to the side
+# Goal, P1, P2
 # CUSTOM_INITIAL_STATES = [
-#     jnp.array([-2.0, 0.0, 0.0, 0.0]),
-#     jnp.array([2.0, 0.0, 0.0, 0.0])
+#     jnp.array([0.0, 0.0, 0.0, 0.0]),  # Agent 0 (Blocker)
+#     jnp.array([0.5, 0.0, 0.0, 0.0]),  # Agent 1 (Goal-Seeker)
 # ]
-# CUSTOM_GOAL = jnp.array([8.0, 0.0])
+# CUSTOM_GOAL = jnp.array([-0.5, 0.0])
+
+# Same but vertical 
+# CUSTOM_INITIAL_STATES = [
+#     jnp.array([0.0, 0.0, 0.0, 0.0]),  # Agent 0 (Blocker)
+#     jnp.array([0.0, -0.5, 0.0, 0.0]),  # Agent 1 (Goal-Seeker)
+# ]
+# CUSTOM_GOAL = jnp.array([0.0, 0.5])
+
 
 # ============================================================================
 
