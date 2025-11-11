@@ -1,11 +1,4 @@
-"""
-2D Multi-Agent Tracking Environment
-
-A simple cooperative task where N agents try to navigate
-to a static goal position within a square bounding box.
-
-Also includes a pursuit-evasion task and a blocker-goal-seeker task.
-"""
+# environments.py
 
 import jax
 import jax.numpy as jnp
@@ -364,26 +357,26 @@ def make_pursuit_evasion_env(params: EnvParams):
 def make_blocker_goal_seeker_env(params: EnvParams):
     """
     Factory function that creates the blocker-goal-seeker environment.
-    - Agent 0 (Blocker) tries to keep Agent 1 away from the goal.
-    - Agent 1 (Goal-Seeker) tries to reach the goal.
+    - Agents 0..N-2 (Blockers) try to keep the Goal-Seeker from the goal.
+    - Agent N-1 (Goal-Seeker) tries to reach the goal.
     - Based on new reward structure (general-sum, mutual collision penalty).
     """
 
-    if params.num_agents != 2:
-        raise ValueError(
-            "Blocker-Goal-Seeker environment requires exactly 2 agents."
-        )
-    num_agents = params.num_agents  # (will be 2)
+    num_agents = params.num_agents
     dt = params.dt
-    max_accels_config = jnp.array(
-        [params.blocker_max_accel, params.seeker_max_accel]
-    )
-    max_speeds_config = jnp.array(
-        [params.blocker_max_speed, params.seeker_max_speed]
-    )
+    
+    # Generalized speed/accel configs
+    # The first N-1 agents are blockers, the last one is the seeker.
+    blocker_accels = jnp.full((num_agents - 1,), params.blocker_max_accel)
+    seeker_accel = jnp.array([params.seeker_max_accel])
+    max_accels_config = jnp.concatenate([blocker_accels, seeker_accel])
 
-    # --- Core env logic (bound to params) ---
+    blocker_speeds = jnp.full((num_agents - 1,), params.blocker_max_speed)
+    seeker_speed = jnp.array([params.seeker_max_speed])
+    max_speeds_config = jnp.concatenate([blocker_speeds, seeker_speed])
 
+    # --- Core env logic (bound to params) --- 
+    
     @jax.jit
     def _step_dynamics(
         state: jnp.ndarray, actions: jnp.ndarray
@@ -412,27 +405,38 @@ def make_blocker_goal_seeker_env(params: EnvParams):
 
     @jax.jit
     def is_collision_fn(state: jnp.ndarray) -> bool:
-        """Checks if the agents (p1, p2) have collided."""
-        agent_states = state[:-2].reshape(2, 4)
-        p1_pos = agent_states[0, :2]
-        p2_pos = agent_states[1, :2]
-        dist = jnp.linalg.norm(p1_pos - p2_pos)
-        return dist < params.epsilon_collide
+        """
+        Checks if *any* blocker has collided with the seeker.
+        """
+        agent_states = state[:-2].reshape(num_agents, 4)
+        all_pos = agent_states[:, :2]
+        blocker_pos = all_pos[:-1]  # All agents except the last
+        seeker_pos = all_pos[-1]   # The last agent
+
+        # Calculate distance from all blockers to the seeker
+        dist = jnp.linalg.norm(blocker_pos - seeker_pos, axis=1)
+        
+        # Return True if any distance is less than the threshold
+        return jnp.any(dist < params.epsilon_collide)
 
     @jax.jit
     def is_goal_reached_fn(state: jnp.ndarray) -> bool:
-        """Checks if the seeker (p2) has reached the goal (g)."""
-        agent_states = state[:-2].reshape(2, 4)
-        seeker_pos = agent_states[1, :2]
+        """
+        Checks if the seeker (last agent) has reached the goal.
+        """
+        agent_states = state[:-2].reshape(num_agents, 4)
+        seeker_pos = agent_states[-1, :2]  # Use last agent
         goal_pos = state[-2:]
         dist = jnp.linalg.norm(seeker_pos - goal_pos)
         return dist < params.epsilon_goal
 
     @jax.jit
     def dist_seeker_goal_fn(state: jnp.ndarray) -> float:
-        """Computes distance from seeker (p2) to goal (g)."""
-        agent_states = state[:-2].reshape(2, 4)
-        seeker_pos = agent_states[1, :2]
+        """
+        Computes distance from seeker (last agent) to goal.
+        """
+        agent_states = state[:-2].reshape(num_agents, 4)
+        seeker_pos = agent_states[-1, :2]  # Use last agent
         goal_pos = state[-2:]
         return jnp.linalg.norm(seeker_pos - goal_pos)
 
@@ -511,9 +515,9 @@ def make_blocker_goal_seeker_env(params: EnvParams):
 
         # 2. Check terminations
         next_step_count = step_count + 1
-        # terminated = Goal Reached (Win for A2, Loss for A1)
+        # terminated = Goal Reached (Win for Seeker, Loss for Blockers)
         terminated = check_termination_fn(next_state)
-        # truncated = Time-Limit (Win for A1, Loss for A2)
+        # truncated = Time-Limit (Win for Blockers, Loss for Seeker)
         truncated = next_step_count >= params.max_episode_steps
 
         # 3. Compute rewards
@@ -524,35 +528,47 @@ def make_blocker_goal_seeker_env(params: EnvParams):
 
         potential_1_prev = +params.reward_shaping_k2 * d_p2_g_prev
         potential_1_next = +params.reward_shaping_k2 * d_p2_g_next
-        
+
         potential_2_prev = -params.reward_shaping_k1 * d_p2_g_prev
         potential_2_next = -params.reward_shaping_k1 * d_p2_g_next
 
-        shaping_r1 = potential_1_next - potential_1_prev  # A1: Area Denial
-        shaping_r2 = potential_2_next - potential_2_prev  # A2: Potential
+        shaping_r1 = potential_1_next - potential_1_prev  # Area Denial
+        shaping_r2 = potential_2_next - potential_2_prev  # Potential
 
-        shaping_rewards = jnp.array([shaping_r1, shaping_r2])
+        # Build shaping reward array
+        blocker_shaping_rewards = jnp.full((num_agents - 1,), shaping_r1)
+        seeker_shaping_reward = jnp.array([shaping_r2])
+        shaping_rewards = jnp.concatenate(
+            [blocker_shaping_rewards, seeker_shaping_reward]
+        )
 
         # Other rewards
         collision = is_collision_fn(next_state)
         r_win = params.reward_win
         c_collide = params.reward_collision_penalty
+        
+        # Collision penalty is applied to all agents
         collision_penalty = jnp.where(collision, -c_collide, 0.0)
 
         # terminal rewards
         terminal_r1 = jnp.where(
             terminated, -r_win, jnp.where(truncated, +r_win, 0.0)
-        )
+        )  # Blocker terminal
         terminal_r2 = jnp.where(
             terminated, +r_win, jnp.where(truncated, -r_win, 0.0)
+        )  # Seeker terminal
+        
+        # Build terminal reward array
+        blocker_terminal_rewards = jnp.full((num_agents - 1,), terminal_r1)
+        seeker_terminal_reward = jnp.array([terminal_r2])
+        terminal_rewards = jnp.concatenate(
+            [blocker_terminal_rewards, seeker_terminal_reward]
         )
 
-        terminal_rewards = jnp.array([terminal_r1, terminal_r2])
-
         # out-of-bounds rewards
-        agent_states_next = next_state[:-2].reshape(2, 4)
-        positions = agent_states_next[:, :2]  # (2, 2)
-        oob_penalties = jax.vmap(compute_oob_penalty)(positions)  # (2,)
+        agent_states_next = next_state[:-2].reshape(num_agents, 4)
+        positions = agent_states_next[:, :2]  # (num_agents, 2)
+        oob_penalties = jax.vmap(compute_oob_penalty)(positions)  # (num_agents,)
 
         rewards = shaping_rewards + collision_penalty + terminal_rewards +\
             oob_penalties
@@ -562,15 +578,15 @@ def make_blocker_goal_seeker_env(params: EnvParams):
 
         # 5. Construct info dict
         info = {
-            "total_reward_agent_0": rewards[0],
-            "total_reward_agent_1": rewards[1],
+            "reward_blocker_avg": jnp.mean(rewards[:-1]),
+            "reward_seeker": rewards[-1],
             "collision": collision,
-            "shaping_reward_agent_0": shaping_r1,
-            "shaping_reward_agent_1": shaping_r2,
-            "terminal_reward_agent_0": terminal_r1,
-            "terminal_reward_agent_1": terminal_r2,
-            "oob_penalty_agent_0": oob_penalties[0],
-            "oob_penalty_agent_1": oob_penalties[1],
+            "shaping_reward_blocker": shaping_r1,
+            "shaping_reward_seeker": shaping_r2,
+            "terminal_reward_blocker": terminal_r1,
+            "terminal_reward_seeker": terminal_r2,
+            "oob_penalty_blocker_avg": jnp.mean(oob_penalties[:-1]),
+            "oob_penalty_seeker": oob_penalties[-1],
         }
 
         return (
@@ -584,7 +600,9 @@ def make_blocker_goal_seeker_env(params: EnvParams):
 
     @jax.jit
     def get_obs_fn(state: jnp.ndarray):
-        """Replicates the global state for each agent."""
+        """
+        Replicates the global state for each agent.
+        """
         return jnp.stack([state] * num_agents)
 
     return reset_fn, step_fn, get_obs_fn
