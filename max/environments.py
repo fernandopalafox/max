@@ -178,16 +178,25 @@ def make_env(params: EnvParams):
 def make_pursuit_evasion_env(params: EnvParams):
     """
     Factory function that creates pursuit-evasion environment functions.
-    - Agent 0 (Pursuer) tries to reach the Evader (Agent 1).
-    - Agent 1 (Evader) tries to avoid the pursuer.
+    - Agents 0..N-2 (Pursuers) try to reach the Evader.
+    - Agent N-1 (Evader) tries to avoid the pursuers.
     """
 
-    if params.num_agents != 2:
-        raise ValueError("Pursuit-Evasion environment requires exactly 2 agents.")
-    num_agents = params.num_agents  # (will be 2)
+    num_agents = params.num_agents
+    if num_agents < 2:
+        raise ValueError("Pursuit-Evasion environment requires at least 2 agents.")
+
     dt = params.dt
-    max_accels_config = jnp.array([params.pursuer_max_accel, params.evader_max_accel])
-    max_speeds_config = jnp.array([params.pursuer_max_speed, params.evader_max_speed])
+
+    # Generalized speed/accel configs
+    # The first N-1 agents are pursuers, the last one is the evader.
+    pursuer_accels = jnp.full((num_agents - 1,), params.pursuer_max_accel)
+    evader_accel = jnp.array([params.evader_max_accel])
+    max_accels_config = jnp.concatenate([pursuer_accels, evader_accel])
+
+    pursuer_speeds = jnp.full((num_agents - 1,), params.pursuer_max_speed)
+    evader_speed = jnp.array([params.evader_max_speed])
+    max_speeds_config = jnp.concatenate([pursuer_speeds, evader_speed])
 
     # --- Core env logic (bound to params) ---
 
@@ -215,14 +224,15 @@ def make_pursuit_evasion_env(params: EnvParams):
 
     @jax.jit
     def is_collision_fn(state: jnp.ndarray) -> bool:
-        """Checks if the pursuer and evader have collided."""
-        agent_states = state[:-2].reshape(2, 4)
-        pursuer_pos = agent_states[0, :2]
-        evader_pos = agent_states[1, :2]
+        """Checks if any pursuer and the evader have collided."""
+        agent_states = state[:-2].reshape(num_agents, 4)
+        all_pos = agent_states[:, :2]
+        pursuer_pos = all_pos[:-1]  # All agents except the last
+        evader_pos = all_pos[-1]  # The last agent
 
-        dist = jnp.linalg.norm(pursuer_pos - evader_pos)
+        dist = jnp.linalg.norm(pursuer_pos - evader_pos, axis=1)
         dist_min = params.pursuer_size + params.evader_size
-        return dist < dist_min
+        return jnp.any(dist < dist_min)
 
     @jax.jit
     def _bound_scalar(x_scaled: jnp.ndarray) -> jnp.ndarray:
@@ -252,17 +262,35 @@ def make_pursuit_evasion_env(params: EnvParams):
     ) -> jnp.ndarray:
         """
         Compute cumulative, non-terminal rewards (OpenAI-style).
+        OOB penalty is ONLY applied to the evader (last agent).
         """
         collided = is_collision_fn(next_state)
 
-        reward_pursuer = jnp.where(collided, 10.0, 0.0)
-        reward_evader = jnp.where(collided, -10.0, 0.0)
+        # Collision rewards
+        pursuer_terminal_reward = jnp.where(collided, 10.0, 0.0)
+        evader_terminal_reward = jnp.where(collided, -10.0, 0.0)
 
-        agent_states_next = next_state[:-2].reshape(2, 4)
-        positions = agent_states_next[:, :2]  # (2, 2)
-        oob_penalties = jax.vmap(compute_oob_penalty)(positions)  # (2,)
+        # Build collision reward array
+        pursuer_rewards_arr = jnp.full((num_agents - 1,), pursuer_terminal_reward)
+        evader_reward_arr = jnp.array([evader_terminal_reward])
+        collision_rewards = jnp.concatenate([pursuer_rewards_arr, evader_reward_arr])
 
-        rewards = jnp.array([reward_pursuer, reward_evader]) + oob_penalties
+        # OOB penalties (Evader only)
+        agent_states_next = next_state[:-2].reshape(num_agents, 4)
+        positions = agent_states_next[:, :2]  # (num_agents, 2)
+
+        # 1. Calculate penalty ONLY for the evader (last agent)
+        evader_pos = positions[-1]
+        evader_oob_penalty = compute_oob_penalty(evader_pos)  # scalar
+
+        # 2. Create OOB penalty array, applying penalty only to the evader
+        pursuer_oob_penalties = jnp.zeros(num_agents - 1)
+        evader_oob_penalty_arr = jnp.array([evader_oob_penalty])
+
+        oob_penalties = jnp.concatenate([pursuer_oob_penalties, evader_oob_penalty_arr])
+
+        # 3. Total rewards
+        rewards = collision_rewards + oob_penalties
 
         return rewards
 
@@ -290,8 +318,8 @@ def make_pursuit_evasion_env(params: EnvParams):
         agent_positions = jax.random.uniform(
             key,
             shape=(num_agents, 2),
-            minval=-0.9 * params.box_half_width,
-            maxval=0.9 * params.box_half_width,
+            minval=-params.box_half_width,
+            maxval=params.box_half_width,
             dtype=jnp.float32,
         )
         agent_velocities = jnp.zeros((num_agents, 2), dtype=jnp.float32)
@@ -317,7 +345,11 @@ def make_pursuit_evasion_env(params: EnvParams):
         terminated = check_termination_fn(next_state)
         truncated = next_step_count >= params.max_episode_steps
         observations = get_obs_fn(next_state)
-        info = {}
+        info = {
+            "reward_pursuer_avg": jnp.mean(rewards[:-1]),
+            "reward_evader": rewards[-1],
+            "collision": is_collision_fn(next_state),
+        }
 
         return (
             next_state,
