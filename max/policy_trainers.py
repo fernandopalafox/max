@@ -223,11 +223,6 @@ def create_ippo_policy_trainer(
         # advantages: (num_agents, H)
         # value_targets: (num_agents, H)
 
-        # Normalize advantages per agent
-        advantages = jax.vmap(
-            lambda adv: (adv - adv.mean()) / (adv.std() + 1e-8)
-        )(advantages)
-
         # Define single-agent PPO update function
         def single_agent_ppo_update(
             agent_actor_params,
@@ -274,13 +269,18 @@ def create_ippo_policy_trainer(
                 )(batch_states)
                 entropy = entropies.mean()
 
+                # Normalize advantages per mini-batch
+                advs_normed = (
+                    batch_advantages - batch_advantages.mean()
+                ) / (batch_advantages.std() + 1e-8)
+
                 # PPO clipped surrogate objective
                 ratio = jnp.exp(log_pis_new - batch_log_pis_old)
                 clipped_ratio = jnp.clip(
                     ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon
                 )
                 policy_loss = -jnp.minimum(
-                    ratio * batch_advantages, clipped_ratio * batch_advantages
+                    ratio * advs_normed, clipped_ratio * advs_normed
                 ).mean()
 
                 # Value function loss with clipping
