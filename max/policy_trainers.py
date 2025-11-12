@@ -86,6 +86,7 @@ def create_icem_policy_trainer(
 # IPPO (Independent PPO) Policy Trainer Implementation
 # ============================================================================
 
+
 def compute_gae(
     rewards: jax.Array,
     values: jax.Array,
@@ -141,24 +142,20 @@ def compute_gae(
 def create_ippo_policy_trainer(
     config: Any,
     policy: Policy,
+    policy_params: Any,
     key: jax.Array,
 ) -> tuple[PolicyTrainer, PolicyTrainState]:
     """
     Creates an IPPO (Independent PPO) policy trainer for multi-agent actor-critic policies.
 
-    IPPO trains each agent independently using PPO, with data structured as:
-    - num_agents is the FIRST dimension
-    - Each agent has its own trajectory and is trained independently
-    - Training is vectorized using vmap over the agents dimension
+    Args:
+        config: Configuration dictionary.
+        policy: The policy object with compute_log_prob, etc.
+        policy_params: PyTree of initial policy parameters (stacked for all agents).
+        key: JAX PRNG key.
 
-    Expected data shapes (num_agents first!):
-    - states: (num_agents, H, dim_state)
-    - actions: (num_agents, H, dim_action)
-    - rewards: (num_agents, H) or (H,) for shared rewards
-    - dones: (num_agents, H) or (H,) for shared dones
-    - log_pis_old: (num_agents, H)
-    - values_old: (num_agents, H)
-    - last_value: (num_agents,)
+    Returns:
+        tuple[PolicyTrainer, PolicyTrainState]: The trainer and the fully initialized train state.
     """
 
     policy_trainer_params = config.get("policy_trainer_params", {})
@@ -173,7 +170,6 @@ def create_ippo_policy_trainer(
     value_coef = policy_trainer_params.get("value_coef", 0.5)
     max_grad_norm = policy_trainer_params.get("max_grad_norm", 0.5)
 
-    # Create separate optimizers for actor and critic
     actor_optimizer = optax.adam(actor_lr, eps=1e-5)
     critic_optimizer = optax.adam(critic_lr, eps=1e-5)
 
@@ -194,35 +190,21 @@ def create_ippo_policy_trainer(
         - 'last_value': (num_agents,)
         """
 
-        states = data["states"]  # (num_agents, H, dim_state)
-        actions = data["actions"]  # (num_agents, H, dim_action)
-        rewards = data["rewards"]  # (num_agents, H) or (H,)
-        dones = data["dones"]  # (num_agents, H) or (H,)
-        log_pis_old = data["log_pis_old"]  # (num_agents, H)
-        values_old = data["values_old"]  # (num_agents, H)
-        last_value = data["last_value"]  # (num_agents,)
+        states = data["states"]
+        actions = data["actions"]
+        rewards = data["rewards"]
+        dones = data["dones"]
+        log_pis_old = data["log_pis_old"]
+        values_old = data["values_old"]
+        last_value = data["last_value"]
 
         num_agents = states.shape[0]
 
-        # Handle shared rewards/dones (broadcast to all agents if needed)
-        if rewards.ndim == 1:
-            # Shared reward - broadcast to all agents
-            rewards = jnp.broadcast_to(
-                rewards[None, :], (num_agents, rewards.shape[0])
-            )
-        if dones.ndim == 1:
-            # Shared dones - broadcast to all agents
-            dones = jnp.broadcast_to(
-                dones[None, :], (num_agents, dones.shape[0])
-            )
-
-        # Compute GAE for each agent independently using vmap
-        # vmap over agents dimension (axis 0)
+        # advantages and value targets
         advantages, value_targets = jax.vmap(
-            lambda r, v, d, lv: compute_gae(r, v, d, lv, ppo_gamma, ppo_lambda)
-        )(rewards, values_old, dones, last_value)
-        # advantages: (num_agents, H)
-        # value_targets: (num_agents, H)
+            lambda r, v, lv: compute_gae(r, v, dones, lv, ppo_gamma, ppo_lambda),
+            in_axes=(0, 0, 0)
+        )(rewards, values_old, last_value)
 
         # Define single-agent PPO update function
         def single_agent_ppo_update(
@@ -323,11 +305,9 @@ def create_ippo_policy_trainer(
                     key,
                 ) = carry
 
-                # Shuffle indices for this epoch
                 key, shuffle_key = jax.random.split(key)
                 perm = jax.random.permutation(shuffle_key, n_samples)
 
-                # Shuffle all data
                 states_shuffled = agent_states[perm]
                 actions_shuffled = agent_actions[perm]
                 log_pis_old_shuffled = agent_log_pis_old[perm]
@@ -335,7 +315,6 @@ def create_ippo_policy_trainer(
                 value_targets_shuffled = agent_value_targets[perm]
                 values_old_shuffled = agent_values_old[perm]
 
-                # Reshape into minibatches (n_minibatches, mini_batch_size, ...)
                 n_usable_samples = n_minibatches * mini_batch_size
                 states_batched = states_shuffled[:n_usable_samples].reshape(
                     n_minibatches, mini_batch_size, -1
@@ -356,7 +335,6 @@ def create_ippo_policy_trainer(
                     :n_usable_samples
                 ].reshape(n_minibatches, mini_batch_size)
 
-                # Create batched data structure for scanning
                 batched_data = (
                     states_batched,
                     actions_batched,
@@ -376,7 +354,6 @@ def create_ippo_policy_trainer(
                         key,
                     ) = carry
 
-                    # Unpack batch data
                     (
                         batch_states,
                         batch_actions,
@@ -386,7 +363,6 @@ def create_ippo_policy_trainer(
                         batch_values_old,
                     ) = batch_data
 
-                    # Compute gradients for both actor and critic
                     (_, loss_info), grads = jax.value_and_grad(
                         lambda params: ppo_loss_fn(
                             params["actor"],
@@ -401,12 +377,10 @@ def create_ippo_policy_trainer(
                         has_aux=True,
                     )({"actor": actor_params, "critic": critic_params})
 
-                    # Apply global gradient clipping
                     grads, _ = optax.clip_by_global_norm(max_grad_norm).update(
                         grads, None
                     )
 
-                    # Separate gradients and update actor and critic
                     actor_grads = grads["actor"]
                     critic_grads = grads["critic"]
 
@@ -432,7 +406,6 @@ def create_ippo_policy_trainer(
                         key,
                     ), loss_info
 
-                # Run through all mini-batches
                 carry_out, loss_infos = jax.lax.scan(
                     update_minibatch,
                     (
@@ -453,7 +426,6 @@ def create_ippo_policy_trainer(
                     key,
                 ) = carry_out
 
-                # Average metrics across mini-batches
                 epoch_metrics = jax.tree.map(lambda x: x.mean(), loss_infos)
 
                 return (
@@ -464,7 +436,7 @@ def create_ippo_policy_trainer(
                     key,
                 ), epoch_metrics
 
-            # Run multiple epochs
+            # Training loop
             carry_out, epoch_metrics = jax.lax.scan(
                 update_epoch,
                 (
@@ -485,7 +457,6 @@ def create_ippo_policy_trainer(
                 new_key,
             ) = carry_out
 
-            # Average metrics across all epochs
             agent_metrics = jax.tree.map(lambda x: x.mean(), epoch_metrics)
 
             return (
@@ -498,16 +469,14 @@ def create_ippo_policy_trainer(
             )
 
         # Vmap the single-agent PPO update over all agents
-        # Parameters are already stacked along axis 0 (num_agents, ...)
         actor_params = train_state.params["actor"]
         critic_params = train_state.params["critic"]
         actor_opt_state = train_state.opt_state["actor"]
         critic_opt_state = train_state.opt_state["critic"]
 
-        # Split key for each agent
         agent_keys = jax.random.split(train_state.key, num_agents)
 
-        # Vmap over agents (axis 0 for all inputs)
+        # Vmap PPO update over agents
         (
             new_actor_params,
             new_critic_params,
@@ -531,15 +500,12 @@ def create_ippo_policy_trainer(
             agent_keys,
         )
 
-        # Update train state with new parameters and optimizer states
         new_params = {"actor": new_actor_params, "critic": new_critic_params}
         new_opt_state = {
             "actor": new_actor_opt_state,
             "critic": new_critic_opt_state,
         }
-        new_key = new_keys[
-            0
-        ]  # Use the first agent's key for the next iteration
+        new_key = new_keys[0]
 
         new_train_state = train_state.replace(
             params=new_params,
@@ -547,15 +513,11 @@ def create_ippo_policy_trainer(
             key=new_key,
         )
 
-        # Aggregate metrics across agents
-        # Average metrics across all agents
+        # Aggregate metrics
         metrics = jax.tree.map(lambda x: x.mean(), agent_metrics)
-
-        # Add additional useful metrics
         metrics["mean_value_target"] = value_targets.mean()
         metrics["mean_advantage"] = advantages.mean()
 
-        # Optionally add per-agent metrics for debugging
         for agent_idx in range(num_agents):
             metrics[f"agent_{agent_idx}/policy_loss"] = agent_metrics[
                 "policy_loss"
@@ -571,10 +533,19 @@ def create_ippo_policy_trainer(
 
     trainer = PolicyTrainer(train_fn=train_fn)
 
-    # Initial train state - will be populated with actual params later
+    # Init optimizer states
+    actor_opt_state = jax.vmap(actor_optimizer.init)(
+        policy_params["actor"]
+    )
+    critic_opt_state = jax.vmap(critic_optimizer.init)(
+        policy_params["critic"]
+    )
+    opt_state = {"actor": actor_opt_state, "critic": critic_opt_state}
+
+    # Init train state
     initial_train_state = PolicyTrainState(
-        params=None,  # Will be set to policy params
-        opt_state=None,  # Will be initialized with actual params
+        params=policy_params,
+        opt_state=opt_state,
         key=key,
         dyn_params=None,
         cost_params=None,
@@ -600,37 +571,14 @@ def init_policy_trainer(
     print(f"🎓 Initializing policy trainer: {policy_trainer_type.upper()}")
 
     if policy_trainer_type == "ippo":
-        trainer, train_state = create_ippo_policy_trainer(config, policy, key)
-        # Initialize optimizer state with actual policy params (stacked for multi-agent)
-        policy_trainer_params = config.get("policy_trainer_params", {})
-        actor_lr = policy_trainer_params.get("actor_lr", 3e-4)
-        critic_lr = policy_trainer_params.get("critic_lr", 1e-3)
-
-        actor_optimizer = optax.adam(actor_lr)
-        critic_optimizer = optax.adam(critic_lr)
-
-        # For multi-agent, params are stacked along axis 0
-        # We need to vmap the optimizer init over the agents dimension
-        actor_opt_state = jax.vmap(actor_optimizer.init)(
-            policy_params["actor"]
-        )
-        critic_opt_state = jax.vmap(critic_optimizer.init)(
-            policy_params["critic"]
-        )
-
-        opt_state = {"actor": actor_opt_state, "critic": critic_opt_state}
-        train_state = train_state.replace(
-            params=policy_params, opt_state=opt_state
+        trainer, train_state = create_ippo_policy_trainer(
+            config, policy, policy_params, key
         )
 
     elif policy_trainer_type == "icem":
         trainer, train_state = create_icem_policy_trainer(config, policy)
-        # For ICEM, params is the planner state
         train_state = train_state.replace(params=policy_params)
-
     else:
-        raise ValueError(
-            f"Unknown policy trainer type: '{policy_trainer_type}'"
-        )
+        raise ValueError(f"Unknown policy trainer type: '{policy_trainer_type}'")
 
     return trainer, train_state
