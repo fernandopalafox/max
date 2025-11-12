@@ -127,7 +127,7 @@ def make_env(params: EnvParams):
             shape=(2,),
             minval=-0.8 * params.box_half_width,
             maxval=0.8 * params.box_half_width,
-            dtype=jnp.float33,
+            dtype=jnp.float32,
         )
         agent_positions = jax.random.uniform(
             key,
@@ -156,7 +156,7 @@ def make_env(params: EnvParams):
         terminated = check_termination_fn(next_state)
         truncated = next_step_count >= params.max_episode_steps
         observations = get_obs_fn(next_state)
-        info = {}
+        info = {"avg_reward": jnp.mean(rewards), "collision": False}
 
         return (
             next_state,

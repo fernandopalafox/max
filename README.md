@@ -51,15 +51,20 @@ pip install -e .
 </div>
 
 - **`scripts/ippo_pe.py`**: Train IPPO agents on pursuit-evasion task
-  - Multi-agent coordination
-  - Rolling return normalization
-  - Periodic policy evaluation
-  - WandB logging support
 
 - **`scripts/visualize_pe.py`**: Visualize trained policies
-  - Generate animated GIFs
-  - Custom initial conditions
-  - Multi-agent trajectory visualization
+
+### Multi-Agent Goal Tracking
+
+<div style="text-align: center;">
+  <img src="figures/readme_tracking.gif" alt="Multi-agent goal tracking with switching targets" width=400 style="display: block; margin: 0 auto;"/>
+  <p style="text-align: center; font-style: italic;">
+    <strong>Figure 2:</strong> Multi-agent goal tracking with dynamic target switching
+  </p>
+</div>
+
+- **`scripts/ippo_tracking.py`**: Train IPPO agents for goal tracking
+- **`scripts/visualize_tracking.py`**: Visualize trained tracking policies
 
 ## Architecture Highlights
 

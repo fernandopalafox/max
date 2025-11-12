@@ -1,4 +1,4 @@
-# run_ippo.py
+# ippo_tracking.py
 
 import jax
 import jax.numpy as jnp
@@ -22,11 +22,11 @@ import os
 import pickle
 
 CONFIG = {
-    "env_name": "blocker_goal_seeker",
+    "env_name": "multi_agent_tracking",
     "env_params": {
-       "num_agents": 3,
+       "num_agents": 6,
        "box_half_width": 1.0,
-       "max_episode_steps": 100,
+       "max_episode_steps": 25,
        "dt": 0.1,
        "max_accel": 2.0,
        "pursuer_max_accel": 3.0,
@@ -39,9 +39,9 @@ CONFIG = {
        "reward_shaping_k2": 1.0,
        "reward_collision_penalty": 1.0,
     },
-    "total_steps": 200_000,
-    "num_agents": 3,
-    "dim_state": 14,
+    "total_steps": 100_000,
+    "num_agents": 6,
+    "dim_state": 26,
     "dim_action": 2,
     "train_freq": 1,
     "train_policy_freq": 2048,
@@ -66,8 +66,32 @@ CONFIG = {
                 -1.5,
                 -1.0,
                 -1.0,
+                -1.5,
+                -1.5,
+                -1.0,
+                -1.0,
+                -1.5,
+                -1.5,
+                -1.0,
+                -1.0,
+                -1.5,
+                -1.5,
+                -1.0,
+                -1.0,
             ],
             "max": [
+                1.0,
+                1.0,
+                1.5,
+                1.5,
+                1.0,
+                1.0,
+                1.5,
+                1.5,
+                1.0,
+                1.0,
+                1.5,
+                1.5,
                 1.0,
                 1.0,
                 1.5,
@@ -100,9 +124,9 @@ CONFIG = {
         "ppo_lambda": 0.95,
         "ppo_gamma": 0.99,
         "clip_epsilon": 0.2,
-        "n_epochs": 10,
+        "n_epochs": 4,
         "mini_batch_size": 64,
-        "entropy_coef": 0.0,
+        "entropy_coef": 0.01,
         "value_coef": 0.5,
         "max_grad_norm": 0.5,
     },
@@ -116,7 +140,7 @@ CONFIG = {
 
 def main(config, save_dir):
     wandb.init(
-        project="blockers",
+        project="goal",
         config=config,
         group=config.get("wandb_group"),
         name=config.get("wandb_run_name"),
@@ -218,6 +242,30 @@ def main(config, save_dir):
 
     episode_length = 0
 
+    # === 1. MODIFIED: Initialize reward component accumulators ===
+    # These keys must match the `info` dict from the environment
+    # reward_component_keys_to_avg = [
+    #     "reward_blocker_avg",
+    #     "reward_seeker",
+    #     "shaping_reward_blocker",
+    #     "shaping_reward_seeker",
+    #     "terminal_reward_blocker",
+    #     "terminal_reward_seeker",
+    #     "oob_penalty_blocker_avg",
+    #     "oob_penalty_seeker",
+    # ]
+    # reward_component_keys_to_avg = [
+    #     "reward_pursuer_avg",
+    #     "reward_evader",
+    # ]
+    reward_component_keys_to_avg = ["avg_reward"]  # From the environment
+    episode_reward_components = {
+        info_key: 0.0 for info_key in reward_component_keys_to_avg
+    }
+    # Add collision separately to sum it, not average it
+    episode_reward_components["collision_sum"] = 0.0
+    # =======================================================
+
     rollout_start_time = time.time()
     time_policy_inference = 0.0
     time_env_step = 0.0
@@ -252,6 +300,14 @@ def main(config, save_dir):
             state, episode_length, actions
         )
         time_env_step += time.time() - t_start_env
+
+        # === 2. Accumulate reward components (No change needed) ===
+        for info_key in reward_component_keys_to_avg:
+            episode_reward_components[info_key] += info[info_key]
+        episode_reward_components["collision_sum"] += jnp.where(
+            info["collision"], 1.0, 0.0
+        )
+        # ==========================================================
 
         done = terminated or truncated
 
@@ -310,12 +366,31 @@ def main(config, save_dir):
                 episode_log[f"episode/agent_{agent_idx}_rolling_var"] = float(
                     reward_norm_params["var"][agent_idx]
                 )
+
+            # === 3. Log average reward components and reset (No change needed) ===
+            if episode_length > 0:  # Avoid division by zero
+                for info_key in reward_component_keys_to_avg:
+                    avg_val = (
+                        episode_reward_components[info_key] / episode_length
+                    )
+                    episode_log[f"rewards/{info_key}"] = float(avg_val)
+
+            # Log total collisions (sum, not average)
+            episode_log["rewards/total_collisions"] = float(
+                episode_reward_components["collision_sum"]
+            )
+
             wandb.log(episode_log, step=step)
             time_wandb_log += time.time() - t_start_wandb_log
 
             # Reset rolling return for new episode
             reward_norm_params = reset_rolling_return(reward_norm_params)
             episode_length = 0
+
+            # Reset accumulators
+            for info_key in episode_reward_components:
+                episode_reward_components[info_key] = 0.0
+            # =======================================================
 
         # Train policy
         if step % config["train_policy_freq"] == 0:

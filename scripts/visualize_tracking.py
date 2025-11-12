@@ -26,28 +26,27 @@ from max.environments import init_env
 # Configuration - MUST MATCH TRAINING CONFIG
 # ============================================================================
 
-# This config is for the "multi_agent_tracking" environment
 CONFIG = {
     "env_name": "multi_agent_tracking",
     "env_params": {
-        "num_agents": 3,
-        "box_half_width": 1.0,
-        "max_episode_steps": 100,
-        "dt": 0.1,
-        "max_accel": 2.0,
-        "pursuer_max_accel": 3.0,
-        "evader_max_accel": 4.0,
-        "pursuer_max_speed": 1.0,
-        "evader_max_speed": 1.3,
-        "pursuer_size": 0.075,
-        "evader_size": 0.05,
-        "reward_shaping_k1": 1.0,
-        "reward_shaping_k2": 1.0,
-        "reward_collision_penalty": 1.0,
+       "num_agents": 6,
+       "box_half_width": 1.0,
+       "max_episode_steps": 100,
+       "dt": 0.1,
+       "max_accel": 2.0,
+       "pursuer_max_accel": 3.0,
+       "evader_max_accel": 4.0,
+       "pursuer_max_speed": 1.0,
+       "evader_max_speed": 1.3,
+       "pursuer_size": 0.075,
+       "evader_size": 0.05,
+       "reward_shaping_k1": 1.0,
+       "reward_shaping_k2": 1.0,
+       "reward_collision_penalty": 1.0,
     },
     "total_steps": 100_000,
-    "num_agents": 3,
-    "dim_state": 14,
+    "num_agents": 6,
+    "dim_state": 26,
     "dim_action": 2,
     "train_freq": 1,
     "train_policy_freq": 2048,
@@ -72,8 +71,32 @@ CONFIG = {
                 -1.5,
                 -1.0,
                 -1.0,
+                -1.5,
+                -1.5,
+                -1.0,
+                -1.0,
+                -1.5,
+                -1.5,
+                -1.0,
+                -1.0,
+                -1.5,
+                -1.5,
+                -1.0,
+                -1.0,
             ],
             "max": [
+                1.0,
+                1.0,
+                1.5,
+                1.5,
+                1.0,
+                1.0,
+                1.5,
+                1.5,
+                1.0,
+                1.0,
+                1.5,
+                1.5,
                 1.0,
                 1.0,
                 1.5,
@@ -125,8 +148,8 @@ CONFIG = {
 # ============================================================================
 
 # Option 1: Use random initialization (set to None)
-CUSTOM_INITIAL_STATES = None  # Will use random initialization
-CUSTOM_GOAL = None  # Will use random initialization
+CUSTOM_INITIAL_STATES = None
+CUSTOM_GOAL = None
 
 # Option 2: Use custom states (for 3-agent tracking)
 # CUSTOM_INITIAL_STATES = [
@@ -186,8 +209,8 @@ def run_episode(
     env_name = config["env_name"]
 
     # Extract individual agent states and goal from concatenated state
-    agent_states = state[:-2].reshape(num_agents, 4)  # Shape: (num_agents, 4)
-    goal = state[-2:]  # Last 2 elements are goal position
+    agent_states = state[:-2].reshape(num_agents, 4)
+    goal = state[-2:]
 
     # Apply custom initial conditions if specified
     if CUSTOM_INITIAL_STATES is not None:
@@ -213,7 +236,7 @@ def run_episode(
     # Get observations (replicated for all agents)
     current_obs = get_obs_fn(state)
 
-    # Storage for trajectory (support dynamic number of agents)
+    # Storage for trajectory
     traj_agent_states = [[] for _ in range(num_agents)]
     traj_goals = []
     traj_actions = [[] for _ in range(num_agents)]
@@ -223,19 +246,18 @@ def run_episode(
     # Store initial states
     for i in range(num_agents):
         traj_agent_states[i].append(np.array(agent_states[i]))
-    traj_goals.append(np.array(goal))  # Store initial goal
+    traj_goals.append(np.array(goal))
 
     # Run episode
     done = False
     max_steps = config["env_params"]["max_episode_steps"]
     env_step_count = 0
 
-    # Key for goal switching
     goal_key = goal_key_init
 
     while not done and env_step_count < max_steps:
 
-        # --- NEW: GOAL SWITCHING LOGIC ---
+        # Goal switching logic
         if env_step_count > 0 and env_step_count % goal_switch_interval == 0:
             print(f"Step {env_step_count}: Switching goal...")
             key, goal_key = jax.random.split(key)
@@ -250,7 +272,6 @@ def run_episode(
             # Update state and observations with the new goal
             state = state.at[-2:].set(new_goal)
             current_obs = get_obs_fn(state)
-        # --- END GOAL SWITCHING LOGIC ---
 
         # Select actions deterministically (vmap over agents)
         actions = jax.vmap(policy.select_action_deterministic, in_axes=(0, 0, None))(
@@ -267,13 +288,13 @@ def run_episode(
 
         # Extract agent states and goal from new state for storage
         agent_states = state[:-2].reshape(num_agents, 4)
-        goal = state[-2:]  # This goal may or may not have changed
+        goal = state[-2:]
 
         # Store trajectory
         for i in range(num_agents):
             traj_agent_states[i].append(np.array(agent_states[i]))
             traj_actions[i].append(np.array(actions[i]))
-        traj_goals.append(np.array(goal))  # Store goal at each step
+        traj_goals.append(np.array(goal))
         traj_rewards.append(np.array(rewards))
         traj_info.append(info)
 
@@ -282,7 +303,6 @@ def run_episode(
     traj_goals = np.array(traj_goals)
     traj_actions = [np.array(traj) for traj in traj_actions]
     traj_rewards = np.array(traj_rewards)
-    # traj_info is a list of dicts
 
     print(f"\nEpisode finished after {env_step_count} steps")
     for i in range(num_agents):
@@ -292,11 +312,10 @@ def run_episode(
         f"Termination: {'Terminated' if terminated else ('Max steps' if truncated else 'Other')}"
     )
 
-    # Return in format compatible with animation
     return {
-        "agent_states": traj_agent_states,  # List of arrays, one per agent
-        "goals": traj_goals,  # Array of goals (T+1, 2)
-        "actions": traj_actions,  # List of arrays, one per agent
+        "agent_states": traj_agent_states,
+        "goals": traj_goals,
+        "actions": traj_actions,
         "rewards": traj_rewards,
         "info": traj_info,
         "num_agents": num_agents,
@@ -304,14 +323,13 @@ def run_episode(
 
 
 def animate_trajectory(
-    trajectory, config, save_path="tracking_animation.gif", fps=10, seed=None
+    trajectory, config, save_path="tracking_animation.gif", fps=10, seed=None, path_history=25
 ):
-    """Create an animation of the multi-agent tracking trajectory."""
-    agent_states = trajectory["agent_states"]  # List of arrays, one per agent
-    goals = trajectory["goals"]  # NEW: Array (T+1, 2) of goals
+    """Create an animation of the multi-agent tracking trajectory with fading paths."""
+    agent_states = trajectory["agent_states"]
+    goals = trajectory["goals"]
     num_agents = trajectory["num_agents"]
     rewards = trajectory["rewards"]
-    info_list = trajectory["info"]
 
     env_name = config["env_name"]
     dt = config["env_params"]["dt"]
@@ -325,7 +343,6 @@ def animate_trajectory(
     agent_sizes = []
 
     if env_name == "pursuit_evasion":
-        # ... (This logic remains, in case env_name is set to it)
         num_pursuers = num_agents - 1
         agent_labels = [f"Pursuer {i}" for i in range(num_pursuers)] + ["Evader"]
         colors = ["red"] * num_pursuers + ["blue"]
@@ -335,7 +352,6 @@ def animate_trajectory(
         ]
 
     elif env_name == "blocker_goal_seeker":
-        # ... (This logic remains)
         num_blockers = num_agents - 1
         agent_labels = [f"Blocker {i}" for i in range(num_blockers)] + ["Seeker"]
         colors = ["red"] * num_blockers + ["blue"]
@@ -357,12 +373,18 @@ def animate_trajectory(
         dark_colors = [
             dark_color_cycle[i % len(dark_color_cycle)] for i in range(num_agents)
         ]
-        agent_sizes = [0.05] * num_agents  # Default size
+        agent_sizes = [0.05] * num_agents
 
-    # Create figure
+    # Create figure with the goal of minimizing whitespace between plots
+    # Use gridspec_kw to control the relative heights and ensure zero width space
     fig, (ax_main, ax_reward) = plt.subplots(
-        2, 1, figsize=(10, 12), gridspec_kw={"height_ratios": [3, 1]}
+        2, 1, 
+        figsize=(10, 12), # Keep figsize for overall dimensions
+        gridspec_kw={"height_ratios": [3, 1], "hspace": 0.3} # hspace for vertical gap
     )
+    
+    # Use tight_layout at the end to minimize general whitespace
+    plt.tight_layout() 
 
     # Set up main plot
     ax_main.set_aspect("equal")
@@ -390,12 +412,12 @@ def animate_trajectory(
     # Draw goal (if not pursuit-evasion)
     if env_name != "pursuit_evasion":
         (goal_marker,) = ax_main.plot(
-            goals[0, 0], goals[0, 1], "g*", markersize=20, zorder=5, label="Goal"
+            goals[0, 0], goals[0, 1], "k*", markersize=20, zorder=5, label="Goal"
         )
     else:
-        goal_marker = None  # No goal marker for PE
-
-    # Initialize trajectory lines
+        goal_marker = None
+        
+    # Initialize trajectory lines (no label for the trajectory lines on purpose)
     agent_lines = []
     for i in range(num_agents):
         (line,) = ax_main.plot(
@@ -403,13 +425,12 @@ def animate_trajectory(
             [],
             "-",
             color=colors[i],
-            alpha=0.4,
             linewidth=2,
-            label=f"{agent_labels[i]} path",
+            # REMOVED label=f"{agent_labels[i]} path" HERE
         )
         agent_lines.append(line)
 
-    # Initialize agent markers
+    # Initialize agent markers (no label for the markers on purpose)
     agent_markers = []
     for i in range(num_agents):
         marker = Circle(
@@ -419,11 +440,12 @@ def animate_trajectory(
             edgecolor=dark_colors[i],
             linewidth=2,
             zorder=10,
+            # REMOVED label=f"{agent_labels[i]} marker" HERE
         )
         ax_main.add_patch(marker)
         agent_markers.append(marker)
 
-    # Initialize velocity arrows
+    # Initialize velocity arrows (no label for the arrows on purpose)
     agent_vel_arrows = []
     for i in range(num_agents):
         arrow = ax_main.quiver(
@@ -436,22 +458,17 @@ def animate_trajectory(
             alpha=0.7,
             zorder=9,
             width=0.01,
+            # REMOVED label=f"{agent_labels[i]} velocity" HERE
         )
         agent_vel_arrows.append(arrow)
 
-    ax_main.legend(loc="upper right")
-
-    # Time and info text
-    time_text = ax_main.text(
-        0.02,
-        0.98,
-        "",
-        transform=ax_main.transAxes,
-        verticalalignment="top",
-        fontsize=11,
-        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
-    )
-
+    # ONLY THE GOAL (if present) REMAINS IN THE LEGEND
+    if goal_marker:
+        # Create a proxy artist for the agents if you still want a legend entry for them
+        # E.g., a simple invisible line, but user requested 'doesn't mention agents'
+        # So we just draw the goal legend if it exists.
+        ax_main.legend(loc="upper right")
+    
     # Set up reward plot
     ax_reward.set_xlim(0, len(rewards))
     if len(rewards) > 0:
@@ -473,22 +490,32 @@ def animate_trajectory(
         )
         agent_reward_lines.append(line)
     ax_reward.legend(loc="upper right")
+    
+    # Ensure plots have the same width after layout adjustment
+    # This is typically handled by tight_layout/constrained_layout, 
+    # but we can force it if needed, though tight_layout is usually sufficient.
 
     def init():
         for line in agent_lines:
             line.set_data([], [])
         for line in agent_reward_lines:
             line.set_data([], [])
-        time_text.set_text("")
         return []
 
     def animate(frame):
-        # Update trajectories
+        # Update trajectories (FADING PATH LOGIC)
+        # The path only shows the last 'path_history' steps (up to 'frame').
+        start_idx = max(0, frame - path_history + 1)
+        end_idx = frame + 1
+        
         for i in range(num_agents):
             agent_lines[i].set_data(
-                agent_states[i][: frame + 1, 0],
-                agent_states[i][: frame + 1, 1],
+                agent_states[i][start_idx:end_idx, 0],
+                agent_states[i][start_idx:end_idx, 1],
             )
+            # Optional: Can also dynamically set alpha based on frame/history length
+            # to simulate fading, but a fixed window is often cleaner.
+            agent_lines[i].set_alpha(1.0) # Full opacity for the window
 
         # Update agent positions
         for i in range(num_agents):
@@ -506,32 +533,23 @@ def animate_trajectory(
                 [agent_states[i][frame, 2]], [agent_states[i][frame, 3]]
             )
 
-        # --- NEW: Update Goal Marker Position ---
+        # Update Goal Marker Position
         current_goal = goals[frame]
         if goal_marker:
             goal_marker.set_data([current_goal[0]], [current_goal[1]])
 
         # Calculate distances and build text
+        # (Removed text box for simplicity in animation returns, but kept logic)
         text_lines = [f"Time: {frame*dt:.1f}s (step {frame})"]
 
-        if env_name == "pursuit_evasion":
-            # ... (text logic)
-            pass
-        elif env_name == "blocker_goal_seeker":
-            # ... (text logic)
-            pass
-        else:  # Default (multi_agent_tracking)
+        if env_name != "pursuit_evasion" and env_name != "blocker_goal_seeker":
             for i in range(num_agents):
-                # --- NEW: Use current_goal for distance ---
                 dist_to_goal = np.linalg.norm(agent_states[i][frame, :2] - current_goal)
                 text_lines.append(f"Dist A{i}-Goal: {dist_to_goal:.2f}m")
 
         text_lines.append("Cumulative Rewards:")
         for i in range(num_agents):
             text_lines.append(f"  {agent_labels[i]}: {rewards[:frame, i].sum():.1f}")
-
-        # Update text
-        time_text.set_text("\n".join(text_lines))
 
         # Update reward plot
         for i in range(num_agents):
@@ -542,7 +560,6 @@ def animate_trajectory(
             agent_lines
             + agent_markers
             + agent_vel_arrows
-            + [time_text]
             + agent_reward_lines
         )
         if goal_marker:
@@ -551,11 +568,12 @@ def animate_trajectory(
         return artists
 
     print(f"Creating animation with {len(agent_states[0])} frames...")
+    print(f"Path history set to {path_history} steps.")
     ani = animation.FuncAnimation(
         fig,
         animate,
         init_func=init,
-        frames=len(agent_states[0]),  # Number of steps + 1
+        frames=len(agent_states[0]),
         interval=1000 / fps,
         blit=True,
     )
@@ -581,7 +599,7 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=5,
+        default=20,
         help="Random seed for episode initialization",
     )
     parser.add_argument(
@@ -593,11 +611,17 @@ def main():
     parser.add_argument(
         "--fps", type=int, default=40, help="Frames per second for animation"
     )
-    parser.add_argument(  # --- NEW ARGUMENT ---
+    parser.add_argument(
         "--goal-switch-interval",
         type=int,
         default=25,
         help="Number of steps before switching to a new random goal.",
+    )
+    parser.add_argument(
+        "--path-history",
+        type=int,
+        default=25,
+        help="Number of previous steps to show as the path trail (for fading effect).",
     )
     args = parser.parse_args()
 
@@ -605,8 +629,6 @@ def main():
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
     # Load policy
-    # Note: We use the CONFIG from this file, which MUST match the one
-    # used for training the policy specified in --policy-path.
     policy, params, reset_fn, step_fn, get_obs_fn = load_policy(
         args.policy_path, CONFIG
     )
@@ -620,14 +642,15 @@ def main():
         step_fn,
         get_obs_fn,
         CONFIG,
-        goal_switch_interval=args.goal_switch_interval,  # Pass new arg
+        goal_switch_interval=args.goal_switch_interval,
         seed=args.seed,
     )
 
     # Animate
     print(f"\nCreating animation...")
     animate_trajectory(
-        trajectory, CONFIG, save_path=args.output, fps=args.fps, seed=args.seed
+        trajectory, CONFIG, save_path=args.output, fps=args.fps, seed=args.seed,
+        path_history=args.path_history # **PASS NEW ARGUMENT**
     )
 
     print(f"\nDone! Open {args.output} to view the result.")
