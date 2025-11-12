@@ -39,7 +39,6 @@ from max.policy_trainers import (
     PolicyTrainer,
     PolicyTrainState,
     init_policy_trainer,
-    create_ppo_policy_trainer,
     create_ippo_policy_trainer,
 )
 from max.trainers import (
