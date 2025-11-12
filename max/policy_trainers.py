@@ -177,6 +177,7 @@ def create_ippo_policy_trainer(
     actor_optimizer = optax.adam(actor_lr, eps=1e-5)
     critic_optimizer = optax.adam(critic_lr, eps=1e-5)
 
+    @jax.jit
     def train_fn(
         train_state: PolicyTrainState, data: dict
     ) -> tuple[PolicyTrainState, dict]:
