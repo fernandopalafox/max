@@ -86,6 +86,57 @@ def create_icem_policy_trainer(
 # IPPO (Independent PPO) Policy Trainer Implementation
 # ============================================================================
 
+def compute_gae(
+    rewards: jax.Array,
+    values: jax.Array,
+    dones: jax.Array,
+    last_value: jax.Array,
+    gamma: float,
+    lam: float,
+) -> tuple[jax.Array, jax.Array]:
+    """
+    Compute Generalized Advantage Estimation (GAE).
+
+    Args:
+        rewards: (T,) array of rewards
+        values: (T,) array of value estimates
+        dones: (T,) array of done flags
+        last_value: scalar, value estimate for final state
+        gamma: discount factor
+        lam: GAE lambda parameter
+
+    Returns:
+        advantages: (T,) array of advantage estimates
+        value_targets: (T,) array of value targets for training (advantages + values)
+    """
+    # Append last_value to values for next value calculation
+    next_values = jnp.concatenate([values[1:], last_value[None]])
+    next_dones = jnp.concatenate([dones[1:], jnp.array([0.0])])
+
+    # Compute TD residuals: delta_t = r_t + gamma * V(s_{t+1}) * (1 - done) - V(s_t)
+    deltas = rewards + gamma * next_values * (1.0 - next_dones) - values
+
+    # Compute advantages using GAE: A_t = delta_t + gamma * lambda * (1 - done) * A_{t+1}
+    # Scan backwards through time
+    def scan_fn(gae, t_idx):
+        t = rewards.shape[0] - 1 - t_idx
+        delta = deltas[t]
+        next_nonterminal = 1.0 - next_dones[t]
+        gae = delta + gamma * lam * next_nonterminal * gae
+        return gae, gae
+
+    _, advantages = jax.lax.scan(
+        scan_fn,
+        init=0.0,
+        xs=jnp.arange(rewards.shape[0]),
+    )
+
+    # Reverse to get correct time order
+    advantages = advantages[::-1]
+    value_targets = advantages + values
+
+    return advantages, value_targets
+
 
 def create_ippo_policy_trainer(
     config: Any,
