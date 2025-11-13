@@ -22,9 +22,9 @@ import os
 import pickle
 
 CONFIG = {
-    "env_name": "multi_agent_tracking",
+    "env_name": "pursuit_evasion",
     "env_params": {
-       "num_agents": 6,
+       "num_agents": 2,
        "box_half_width": 1.0,
        "max_episode_steps": 25,
        "dt": 0.1,
@@ -40,8 +40,8 @@ CONFIG = {
        "reward_collision_penalty": 1.0,
     },
     "total_steps": 100_000,
-    "num_agents": 6,
-    "dim_state": 26,
+    "num_agents": 2,
+    "dim_state": 10,
     "dim_action": 2,
     "train_freq": 1,
     "train_policy_freq": 2048,
@@ -62,40 +62,8 @@ CONFIG = {
                 -1.5,
                 -1.0,
                 -1.0,
-                -1.5,
-                -1.5,
-                -1.0,
-                -1.0,
-                -1.5,
-                -1.5,
-                -1.0,
-                -1.0,
-                -1.5,
-                -1.5,
-                -1.0,
-                -1.0,
-                -1.5,
-                -1.5,
-                -1.0,
-                -1.0,
             ],
             "max": [
-                1.0,
-                1.0,
-                1.5,
-                1.5,
-                1.0,
-                1.0,
-                1.5,
-                1.5,
-                1.0,
-                1.0,
-                1.5,
-                1.5,
-                1.0,
-                1.0,
-                1.5,
-                1.5,
                 1.0,
                 1.0,
                 1.5,
@@ -140,7 +108,7 @@ CONFIG = {
 
 def main(config, save_dir):
     wandb.init(
-        project="goal",
+        project="pe_again",
         config=config,
         group=config.get("wandb_group"),
         name=config.get("wandb_run_name"),
@@ -254,11 +222,10 @@ def main(config, save_dir):
     #     "oob_penalty_blocker_avg",
     #     "oob_penalty_seeker",
     # ]
-    # reward_component_keys_to_avg = [
-    #     "reward_pursuer_avg",
-    #     "reward_evader",
-    # ]
-    reward_component_keys_to_avg = ["avg_reward"]  # From the environment
+    reward_component_keys_to_avg = [
+        "reward_pursuer_avg",
+        "reward_evader",
+    ]
     episode_reward_components = {
         info_key: 0.0 for info_key in reward_component_keys_to_avg
     }

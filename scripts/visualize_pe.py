@@ -1,10 +1,4 @@
-#!/usr/bin/env python3
-"""
-Simple script to visualize trained multi-agent tracking policies.
-
-Usage:
-    python visualize_tracking.py --policy-path trained_policies/ippo-multi-agent-tracking_seed_0/policy_params.pkl
-"""
+# visualize_pe.py
 
 import jax
 import jax.numpy as jnp
@@ -26,9 +20,9 @@ from max.environments import init_env
 # Configuration - MUST MATCH TRAINING CONFIG
 # ============================================================================
 
-# Environment configuration (must match training config)
+# This config is copied from run_ippo.py for pursuit_evasion
 CONFIG = {
-    "env_name": "blocker_goal_seeker",
+    "env_name": "pursuit_evasion",
     "env_params": {
         "num_agents": 2,
         "box_half_width": 1.0,
@@ -45,7 +39,7 @@ CONFIG = {
         "reward_shaping_k2": 1.0,
         "reward_collision_penalty": 1.0,
     },
-    "total_steps": 150_000,
+    "total_steps": 100_000,
     "num_agents": 2,
     "dim_state": 10,
     "dim_action": 2,
@@ -98,9 +92,9 @@ CONFIG = {
         "ppo_lambda": 0.95,
         "ppo_gamma": 0.99,
         "clip_epsilon": 0.2,
-        "n_epochs": 10,
+        "n_epochs": 4,
         "mini_batch_size": 64,
-        "entropy_coef": 0.0,
+        "entropy_coef": 0.01,
         "value_coef": 0.5,
         "max_grad_norm": 0.5,
     },
@@ -111,6 +105,7 @@ CONFIG = {
     "reward_clip": 100.0,
 }
 
+
 # ============================================================================
 # CUSTOMIZE YOUR INITIAL CONDITIONS HERE!
 # ============================================================================
@@ -119,26 +114,17 @@ CONFIG = {
 CUSTOM_INITIAL_STATES = None  # Will use random initialization
 CUSTOM_GOAL = None
 
-# P2, P1, Goal
-CUSTOM_INITIAL_STATES = [
-    jnp.array([0.0, 0.0, 0.0, 0.0]),  # Agent 0 (Blocker)
-    jnp.array([-0.5, 0.0, 0.0, 0.0]),  # Agent 1 (Goal-Seeker)
-]
-CUSTOM_GOAL = jnp.array([0.5, 0.0])
-
-# Goal, P1, P2
+# Option 2: Use custom states (for 3-agent pursuit-evasion)
+# Agent 0: Pursuer
+# Agent 1: Pursuer
+# Agent 2: Evader
 # CUSTOM_INITIAL_STATES = [
-#     jnp.array([0.0, 0.0, 0.0, 0.0]),  # Agent 0 (Blocker)
-#     jnp.array([0.5, 0.0, 0.0, 0.0]),  # Agent 1 (Goal-Seeker)
+#     jnp.array([0.5, 0.5, 0.0, 0.0]),   # Agent 0 (Pursuer 0)
+#     jnp.array([-0.5, 0.5, 0.0, 0.0]),  # Agent 1 (Pursuer 1)
+#     jnp.array([0.0, -0.5, 0.0, 0.0]),  # Agent 2 (Evader)
 # ]
-# CUSTOM_GOAL = jnp.array([-0.5, 0.0])
-
-# Same but vertical 
-# CUSTOM_INITIAL_STATES = [
-#     jnp.array([0.0, 0.0, 0.0, 0.0]),  # Agent 0 (Blocker)
-#     jnp.array([0.0, -0.5, 0.0, 0.0]),  # Agent 1 (Goal-Seeker)
-# ]
-# CUSTOM_GOAL = jnp.array([0.0, 0.5])
+# # Goal is not used in pursuit-evasion, can be None or any value
+# CUSTOM_GOAL = jnp.array([0.0, 0.0])
 
 
 # ============================================================================
@@ -156,9 +142,7 @@ def load_policy(policy_path, config):
 
     # Initialize policy structure
     key = jax.random.key(0)
-    policy, policy_state = init_policy(
-        key, config, None, None, normalizer, norm_params
-    )
+    policy, policy_state = init_policy(key, config, None, None, normalizer, norm_params)
 
     # Load saved parameters
     with open(policy_path, "rb") as f:
@@ -177,6 +161,7 @@ def run_episode(policy, params, reset_fn, step_fn, get_obs_fn, config, seed=0):
 
     # Extract number of agents from config
     num_agents = config["num_agents"]
+    env_name = config["env_name"]
 
     # Extract individual agent states and goal from concatenated state
     agent_states = state[:-2].reshape(num_agents, 4)  # Shape: (num_agents, 4)
@@ -193,13 +178,27 @@ def run_episode(policy, params, reset_fn, step_fn, get_obs_fn, config, seed=0):
     # Reconstruct state with custom initial conditions
     state = jnp.concatenate([agent_states.flatten(), goal])
 
-    print(f"\nInitial state:")
+    print(f"\nInitial state (Env: {env_name}):")
+    num_pursuers = num_agents - 1 if env_name == "pursuit_evasion" else 0
+
     for i in range(num_agents):
+        # Determine label
+        if env_name == "pursuit_evasion":
+            label = f"Pursuer {i}" if i < num_pursuers else "Evader"
+        elif env_name == "blocker_goal_seeker":
+            label = f"Blocker {i}" if i < num_pursuers else "Seeker"
+        else:
+            label = f"Agent {i}"
+
         print(
-            f"  Agent {i}: pos=({agent_states[i, 0]:.2f}, {agent_states[i, 1]:.2f}), "
+            f"  {label} ({i}): pos=({agent_states[i, 0]:.2f}, {agent_states[i, 1]:.2f}), "
             f"vel=({agent_states[i, 2]:.2f}, {agent_states[i, 3]:.2f})"
         )
-    print(f"  Goal:    pos=({goal[0]:.2f}, {goal[1]:.2f})")
+
+    if env_name != "pursuit_evasion":
+        print(f"  Goal:    pos=({goal[0]:.2f}, {goal[1]:.2f})")
+    else:
+        print(f"  Goal (Unused): pos=({goal[0]:.2f}, {goal[1]:.2f})")
 
     # Get observations (replicated for all agents)
     current_obs = get_obs_fn(state)
@@ -208,6 +207,7 @@ def run_episode(policy, params, reset_fn, step_fn, get_obs_fn, config, seed=0):
     traj_agent_states = [[] for _ in range(num_agents)]
     traj_actions = [[] for _ in range(num_agents)]
     traj_rewards = []
+    traj_info = []
 
     # Store initial states
     for i in range(num_agents):
@@ -220,9 +220,9 @@ def run_episode(policy, params, reset_fn, step_fn, get_obs_fn, config, seed=0):
 
     while not done and env_step_count < max_steps:
         # Select actions deterministically (vmap over agents)
-        actions = jax.vmap(
-            policy.select_action_deterministic, in_axes=(0, 0, None)
-        )(params, current_obs, None)
+        actions = jax.vmap(policy.select_action_deterministic, in_axes=(0, 0, None))(
+            params, current_obs, None
+        )
 
         # Step environment - new API: (state, step_count, actions) -> (next_state, obs, rewards, terminated, truncated, info)
         state, current_obs, rewards, terminated, truncated, info = step_fn(
@@ -241,22 +241,34 @@ def run_episode(policy, params, reset_fn, step_fn, get_obs_fn, config, seed=0):
             traj_agent_states[i].append(np.array(agent_states[i]))
             traj_actions[i].append(np.array(actions[i]))
         traj_rewards.append(np.array(rewards))
+        traj_info.append(info)
 
     # Convert to arrays
     traj_agent_states = [np.array(traj) for traj in traj_agent_states]
     traj_actions = [np.array(traj) for traj in traj_actions]
     traj_rewards = np.array(traj_rewards)
+    # traj_info is a list of dicts
 
     print(f"\nEpisode finished after {env_step_count} steps")
     for i in range(num_agents):
         print(f"Total rewards: Agent {i}={traj_rewards[:, i].sum():.2f}")
-    print(f"Termination: {'Out of bounds' if terminated else 'Max steps'}")
+
+    if env_name == "pursuit_evasion":
+        final_collision = traj_info[-1]["collision"] if traj_info else False
+        print(
+            f"Termination: {'Collision' if final_collision else ('Max steps' if truncated else 'Other')}"
+        )
+    else:
+        print(
+            f"Termination: {'Terminated' if terminated else ('Max steps' if truncated else 'Other')}"
+        )
 
     # Return in format compatible with animation (arbitrary number of agents)
     return {
         "agent_states": traj_agent_states,  # List of arrays, one per agent
         "actions": traj_actions,  # List of arrays, one per agent
         "rewards": traj_rewards,
+        "info": traj_info,
         "goal": np.array(goal),
         "num_agents": num_agents,
     }
@@ -270,39 +282,58 @@ def animate_trajectory(
     num_agents = trajectory["num_agents"]
     goal = trajectory["goal"]
     rewards = trajectory["rewards"]
+    info_list = trajectory["info"]
 
+    env_name = config["env_name"]
     dt = config["env_params"]["dt"]
     box_half_width = config["env_params"]["box_half_width"]
 
-    # Define colors for agents (cycle through if more agents than colors)
-    color_cycle = [
-        "red",
-        "blue",
-        "green",
-        "orange",
-        "purple",
-        "brown",
-        "pink",
-        "gray",
-        "olive",
-        "cyan",
-    ]
-    dark_color_cycle = [
-        "darkred",
-        "darkblue",
-        "darkgreen",
-        "darkorange",
-        "darkviolet",
-        "saddlebrown",
-        "deeppink",
-        "darkgray",
-        "darkolivegreen",
-        "darkcyan",
-    ]
-    colors = [color_cycle[i % len(color_cycle)] for i in range(num_agents)]
-    dark_colors = [
-        dark_color_cycle[i % len(dark_color_cycle)] for i in range(num_agents)
-    ]
+    # --- Define Agent-Specific Visuals ---
+
+    agent_labels = []
+    colors = []
+    dark_colors = []
+    agent_sizes = []
+
+    if env_name == "pursuit_evasion":
+        num_pursuers = num_agents - 1
+        pursuer_color = "red"
+        evader_color = "blue"
+
+        agent_labels = [f"Pursuer {i}" for i in range(num_pursuers)] + ["Evader"]
+        colors = [pursuer_color] * num_pursuers + [evader_color]
+        dark_colors = ["darkred"] * num_pursuers + ["darkblue"]
+        agent_sizes = [config["env_params"]["pursuer_size"]] * num_pursuers + [
+            config["env_params"]["evader_size"]
+        ]
+
+    elif env_name == "blocker_goal_seeker":
+        num_blockers = num_agents - 1
+        blocker_color = "red"
+        seeker_color = "blue"
+
+        agent_labels = [f"Blocker {i}" for i in range(num_blockers)] + ["Seeker"]
+        colors = [blocker_color] * num_blockers + [seeker_color]
+        dark_colors = ["darkred"] * num_blockers + ["darkblue"]
+        # Use epsilon_collide as size for blockers/seeker if not defined
+        agent_sizes = [config["env_params"].get("epsilon_collide", 0.05)] * num_agents
+
+    else:  # Default/Cooperative
+        color_cycle = ["red", "blue", "green", "orange", "purple"]
+        dark_color_cycle = [
+            "darkred",
+            "darkblue",
+            "darkgreen",
+            "darkorange",
+            "darkviolet",
+        ]
+
+        agent_labels = [f"Agent {i}" for i in range(num_agents)]
+        colors = [color_cycle[i % len(color_cycle)] for i in range(num_agents)]
+        dark_colors = [
+            dark_color_cycle[i % len(dark_color_cycle)] for i in range(num_agents)
+        ]
+        agent_sizes = [0.05] * num_agents  # Default size
 
     # Create figure
     fig, (ax_main, ax_reward) = plt.subplots(
@@ -317,7 +348,7 @@ def animate_trajectory(
     ax_main.grid(True, alpha=0.3)
     ax_main.set_xlabel("X Position (m)")
     ax_main.set_ylabel("Y Position (m)")
-    ax_main.set_title(f"Multi-Agent Tracking Trajectory (Seed: {seed})")
+    ax_main.set_title(f"Environment: '{env_name}' (Seed: {seed})")
 
     # Draw boundary (square box)
     boundary = Rectangle(
@@ -332,8 +363,9 @@ def animate_trajectory(
     )
     ax_main.add_patch(boundary)
 
-    # Draw goal (as a star marker, no radius)
-    ax_main.plot(goal[0], goal[1], "g*", markersize=20, zorder=5, label="Goal")
+    # Draw goal (if not pursuit-evasion)
+    if env_name != "pursuit_evasion":
+        ax_main.plot(goal[0], goal[1], "g*", markersize=20, zorder=5, label="Goal")
 
     # Initialize trajectory lines for each agent
     agent_lines = []
@@ -345,7 +377,7 @@ def animate_trajectory(
             color=colors[i],
             alpha=0.4,
             linewidth=2,
-            label=f"Agent {i} path",
+            label=f"{agent_labels[i]} path",
         )
         agent_lines.append(line)
 
@@ -354,7 +386,7 @@ def animate_trajectory(
     for i in range(num_agents):
         marker = Circle(
             (0, 0),
-            0.025,
+            agent_sizes[i],  # Use correct size
             facecolor=colors[i],
             edgecolor=dark_colors[i],
             linewidth=2,
@@ -381,17 +413,6 @@ def animate_trajectory(
 
     ax_main.legend(loc="upper right")
 
-    # Time and info text
-    time_text = ax_main.text(
-        0.02,
-        0.98,
-        "",
-        transform=ax_main.transAxes,
-        verticalalignment="top",
-        fontsize=11,
-        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
-    )
-
     # Set up reward plot
     ax_reward.set_xlim(0, len(rewards))
     if len(rewards) > 0:
@@ -409,7 +430,7 @@ def animate_trajectory(
     agent_reward_lines = []
     for i in range(num_agents):
         (line,) = ax_reward.plot(
-            [], [], "-", color=colors[i], label=f"Agent {i}", linewidth=2
+            [], [], "-", color=colors[i], label=f"{agent_labels[i]}", linewidth=2
         )
         agent_reward_lines.append(line)
     ax_reward.legend(loc="upper right")
@@ -419,7 +440,6 @@ def animate_trajectory(
             line.set_data([], [])
         for line in agent_reward_lines:
             line.set_data([], [])
-        time_text.set_text("")
         return []
 
     def animate(frame):
@@ -446,38 +466,19 @@ def animate_trajectory(
                 [agent_states[i][frame, 2]], [agent_states[i][frame, 3]]
             )
 
-        # Calculate distances and build text
-        text_lines = [f"Time: {frame*dt:.1f}s (step {frame})"]
-        for i in range(num_agents):
-            dist_to_goal = np.linalg.norm(agent_states[i][frame, :2] - goal)
-            text_lines.append(f"Dist A{i}-Goal: {dist_to_goal:.2f}m")
-
-        text_lines.append("Cumulative Rewards:")
-        for i in range(num_agents):
-            text_lines.append(f"  Agent {i}: {rewards[:frame, i].sum():.1f}")
-
-        # Update text
-        time_text.set_text("\n".join(text_lines))
-
         # Update reward plot
         for i in range(num_agents):
             agent_reward_lines[i].set_data(range(frame), rewards[:frame, i])
 
         # Return all artists
-        return (
-            agent_lines
-            + agent_markers
-            + agent_vel_arrows
-            + [time_text]
-            + agent_reward_lines
-        )
+        return agent_lines + agent_markers + agent_vel_arrows + agent_reward_lines
 
     print(f"Creating animation with {len(agent_states[0])} frames...")
     ani = animation.FuncAnimation(
         fig,
         animate,
         init_func=init,
-        frames=len(agent_states[0]),
+        frames=len(agent_states[0]),  # Number of steps + 1 (for initial state)
         interval=1000 / fps,
         blit=True,
     )
@@ -491,25 +492,23 @@ def animate_trajectory(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Visualize trained multi-agent tracking policy"
-    )
+    parser = argparse.ArgumentParser(description="Visualize trained multi-agent policy")
     parser.add_argument(
         "--policy-path",
         type=str,
-        default="trained_policies/ippo-multi-agent-tracking/policy_params.pkl",
+        default="trained_policies/ippo_pursuit_evasion_seed_0/policy_params.pkl",
         help="Path to trained policy parameters (.pkl file). Note: name may include seed.",
     )
     parser.add_argument(
         "--seed",
         type=int,
-        default=5,
+        default=14,
         help="Random seed for episode initialization (if not using custom state)",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="figures/tracking_animation.gif",
+        default="figures/pursuit_evasion_animation.gif",
         help="Output path for animation",
     )
     parser.add_argument(
