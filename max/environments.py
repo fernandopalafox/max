@@ -264,23 +264,54 @@ def make_pursuit_evasion_env(params: EnvParams):
         Compute cumulative, non-terminal rewards (OpenAI-style).
         OOB penalty is ONLY applied to the evader (last agent).
         """
+        # This flag enables the dense, shaped rewards.
+        # Set to False to revert to sparse collision-only rewards.
+        use_dense_reward = True
+
         collided = is_collision_fn(next_state)
 
-        # Collision rewards
+        # --- Get positions from next_state ---
+        agent_states_next = next_state[:-2].reshape(num_agents, 4)
+        positions = agent_states_next[:, :2]  # (num_agents, 2)
+        pursuer_pos = positions[:-1]  # (num_agents-1, 2)
+        evader_pos = positions[-1]  # (2,)
+
+        # --- 1. Dense/Shaped Rewards (MPE2-style) ---
+        # Distances from each pursuer to the evader
+        distances_to_evader = jnp.linalg.norm(
+            pursuer_pos - evader_pos, axis=1
+        )  # (num_agents-1,)
+
+        # Pursuers: rewarded for minimizing distance to evader
+        # -0.1 * distance (for each pursuer)
+        pursuer_dense_rewards = -0.1 * distances_to_evader  # (num_agents-1,)
+
+        # Evader: rewarded for maximizing sum of distances to all pursuers
+        # +0.1 * sum(distances)
+        evader_dense_reward = 0.1 * jnp.sum(distances_to_evader)  # scalar
+
+        # Combine into one array
+        dense_rewards_arr = jnp.concatenate(
+            [pursuer_dense_rewards, jnp.array([evader_dense_reward])]
+        )
+
+        # Toggle dense rewards
+        # If not use_dense_reward, this becomes an array of zeros
+        dense_rewards = jnp.where(
+            use_dense_reward, dense_rewards_arr, jnp.zeros(num_agents)
+        )
+
+        # --- 2. Collision Rewards ---
+        # This is the "terminal" reward given at the step of collision
         pursuer_terminal_reward = jnp.where(collided, 10.0, 0.0)
         evader_terminal_reward = jnp.where(collided, -10.0, 0.0)
 
-        # Build collision reward array
         pursuer_rewards_arr = jnp.full((num_agents - 1,), pursuer_terminal_reward)
         evader_reward_arr = jnp.array([evader_terminal_reward])
         collision_rewards = jnp.concatenate([pursuer_rewards_arr, evader_reward_arr])
 
-        # OOB penalties (Evader only)
-        agent_states_next = next_state[:-2].reshape(num_agents, 4)
-        positions = agent_states_next[:, :2]  # (num_agents, 2)
-
+        # --- 3. OOB Penalties (Evader only) ---
         # 1. Calculate penalty ONLY for the evader (last agent)
-        evader_pos = positions[-1]
         evader_oob_penalty = compute_oob_penalty(evader_pos)  # scalar
 
         # 2. Create OOB penalty array, applying penalty only to the evader
@@ -289,8 +320,9 @@ def make_pursuit_evasion_env(params: EnvParams):
 
         oob_penalties = jnp.concatenate([pursuer_oob_penalties, evader_oob_penalty_arr])
 
-        # 3. Total rewards
-        rewards = collision_rewards + oob_penalties
+        # --- 4. Total rewards ---
+        # Total reward is the sum of all three components
+        rewards = dense_rewards + collision_rewards + oob_penalties
 
         return rewards
 
