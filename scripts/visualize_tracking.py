@@ -16,6 +16,7 @@ import pickle
 import argparse
 import sys
 import os
+import json
 
 from max.normalizers import init_normalizer
 from max.policies import init_policy
@@ -23,124 +24,8 @@ from max.environments import init_env
 
 
 # ============================================================================
-# Configuration - MUST MATCH TRAINING CONFIG
+# Configuration will be loaded from JSON
 # ============================================================================
-
-CONFIG = {
-    "env_name": "multi_agent_tracking",
-    "env_params": {
-       "num_agents": 6,
-       "box_half_width": 1.0,
-       "max_episode_steps": 100,
-       "dt": 0.1,
-       "max_accel": 2.0,
-       "pursuer_max_accel": 3.0,
-       "evader_max_accel": 4.0,
-       "pursuer_max_speed": 1.0,
-       "evader_max_speed": 1.3,
-       "pursuer_size": 0.075,
-       "evader_size": 0.05,
-       "reward_shaping_k1": 1.0,
-       "reward_shaping_k2": 1.0,
-       "reward_collision_penalty": 1.0,
-    },
-    "total_steps": 100_000,
-    "num_agents": 6,
-    "dim_state": 26,
-    "dim_action": 2,
-    "train_freq": 1,
-    "train_policy_freq": 2048,
-    "normalize_freq": 1000000,
-    "eval_freq": 100,
-    "eval_traj_horizon": 100,
-    "normalization": {"method": "static"},
-    "normalization_params": {
-        "state": {
-            "min": [
-                -1.0,
-                -1.0,
-                -1.5,
-                -1.5,
-                -1.0,
-                -1.0,
-                -1.5,
-                -1.5,
-                -1.0,
-                -1.0,
-                -1.5,
-                -1.5,
-                -1.0,
-                -1.0,
-                -1.5,
-                -1.5,
-                -1.0,
-                -1.0,
-                -1.5,
-                -1.5,
-                -1.0,
-                -1.0,
-                -1.5,
-                -1.5,
-                -1.0,
-                -1.0,
-            ],
-            "max": [
-                1.0,
-                1.0,
-                1.5,
-                1.5,
-                1.0,
-                1.0,
-                1.5,
-                1.5,
-                1.0,
-                1.0,
-                1.5,
-                1.5,
-                1.0,
-                1.0,
-                1.5,
-                1.5,
-                1.0,
-                1.0,
-                1.5,
-                1.5,
-                1.0,
-                1.0,
-                1.5,
-                1.5,
-                1.0,
-                1.0,
-            ],
-        },
-        "action": {
-            "min": [-2.0, -2.0],
-            "max": [2.0, 2.0],
-        },
-    },
-    "policy": "actor-critic",
-    "policy_params": {
-        "hidden_layers": [64, 64],
-    },
-    "policy_trainer": "ippo",
-    "policy_trainer_params": {
-        "actor_lr": 3e-4,
-        "critic_lr": 1e-3,
-        "ppo_lambda": 0.95,
-        "ppo_gamma": 0.99,
-        "clip_epsilon": 0.2,
-        "n_epochs": 4,
-        "mini_batch_size": 64,
-        "entropy_coef": 0.01,
-        "value_coef": 0.5,
-        "max_grad_norm": 0.5,
-    },
-    "policy_evaluator_params": {
-        "n_episodes": 10,
-    },
-    "reward_scaling_discount_factor": 0.99,
-    "reward_clip": 100.0,
-}
 
 
 # ============================================================================
@@ -624,6 +509,11 @@ def main():
         help="Number of previous steps to show as the path trail (for fading effect).",
     )
     args = parser.parse_args()
+
+    # Load config from JSON file
+    config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "tracking.json")
+    with open(config_path, "r") as f:
+        CONFIG = json.load(f)
 
     # Ensure output directory exists
     os.makedirs(os.path.dirname(args.output), exist_ok=True)

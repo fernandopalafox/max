@@ -20,103 +20,12 @@ import time
 import functools
 import os
 import pickle
-
-CONFIG = {
-    "env_name": "pursuit_evasion",
-    "env_params": {
-       "num_agents": 3,
-       "box_half_width": 1.0,
-       "max_episode_steps": 25,
-       "dt": 0.1,
-       "max_accel": 2.0,
-       "pursuer_max_accel": 3.0,
-       "evader_max_accel": 4.0,
-       "pursuer_max_speed": 1.0,
-       "evader_max_speed": 1.3,
-       "pursuer_size": 0.075,
-       "evader_size": 0.05,
-       "reward_shaping_k1": 1.0,
-       "reward_shaping_k2": 1.0,
-       "reward_collision_penalty": 1.0,
-    },
-    "total_steps": 200_000,
-    "num_agents": 3,
-    "dim_state": 14,
-    "dim_action": 2,
-    "train_freq": 1,
-    "train_policy_freq": 2048,
-    "normalize_freq": 1000000,
-    "eval_freq": 100,
-    "eval_traj_horizon": 100,
-    "normalization": {"method": "static"},
-    "normalization_params": {
-        "state": {
-            "min": [
-                -1.0,
-                -1.0,
-                -1.5,
-                -1.5,
-                -1.0,
-                -1.0,
-                -1.5,
-                -1.5,
-                -1.0,
-                -1.0,
-                -1.5,
-                -1.5,
-                -1.0,
-                -1.0,
-            ],
-            "max": [
-                1.0,
-                1.0,
-                1.5,
-                1.5,
-                1.0,
-                1.0,
-                1.5,
-                1.5,
-                1.0,
-                1.0,
-                1.5,
-                1.5,
-                1.0,
-                1.0,
-            ],
-        },
-        "action": {
-            "min": [-2.0, -2.0],
-            "max": [2.0, 2.0],
-        },
-    },
-    "policy": "actor-critic",
-    "policy_params": {
-        "hidden_layers": [64, 64],
-    },
-    "policy_trainer": "ippo",
-    "policy_trainer_params": {
-        "actor_lr": 3e-4,
-        "critic_lr": 1e-3,
-        "ppo_lambda": 0.95,
-        "ppo_gamma": 0.99,
-        "clip_epsilon": 0.2,
-        "n_epochs": 4,
-        "mini_batch_size": 64,
-        "entropy_coef": 0.01,
-        "value_coef": 0.5,
-        "max_grad_norm": 0.5,
-    },
-    "policy_evaluator_params": {
-        "n_episodes": 10,
-    },
-    "reward_scaling_discount_factor": 0.99,
-    "reward_clip": 100.0,
-}
+import json
 
 
 def main(config, save_dir):
     wandb.init(
-        project="pe_again",
+        project="pe",
         config=config,
         group=config.get("wandb_group"),
         name=config.get("wandb_run_name"),
@@ -218,18 +127,7 @@ def main(config, save_dir):
 
     episode_length = 0
 
-    # === 1. MODIFIED: Initialize reward component accumulators ===
-    # These keys must match the `info` dict from the environment
-    # reward_component_keys_to_avg = [
-    #     "reward_blocker_avg",
-    #     "reward_seeker",
-    #     "shaping_reward_blocker",
-    #     "shaping_reward_seeker",
-    #     "terminal_reward_blocker",
-    #     "terminal_reward_seeker",
-    #     "oob_penalty_blocker_avg",
-    #     "oob_penalty_seeker",
-    # ]
+    # Reward component accumulators
     reward_component_keys_to_avg = [
         "reward_pursuer_avg",
         "reward_evader",
@@ -237,9 +135,7 @@ def main(config, save_dir):
     episode_reward_components = {
         info_key: 0.0 for info_key in reward_component_keys_to_avg
     }
-    # Add collision separately to sum it, not average it
     episode_reward_components["collision_sum"] = 0.0
-    # =======================================================
 
     rollout_start_time = time.time()
     time_policy_inference = 0.0
@@ -342,7 +238,7 @@ def main(config, save_dir):
                     reward_norm_params["var"][agent_idx]
                 )
 
-            # === 3. Log average reward components and reset (No change needed) ===
+            # Log average reward components and reset
             if episode_length > 0:  # Avoid division by zero
                 for info_key in reward_component_keys_to_avg:
                     avg_val = (
@@ -350,7 +246,7 @@ def main(config, save_dir):
                     )
                     episode_log[f"rewards/{info_key}"] = float(avg_val)
 
-            # Log total collisions (sum, not average)
+            # Log total collisions
             episode_log["rewards/total_collisions"] = float(
                 episode_reward_components["collision_sum"]
             )
@@ -553,6 +449,10 @@ if __name__ == "__main__":
         help="Directory to save the trained policy parameters.",
     )
     args = parser.parse_args()
+
+    config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "pursuit_evasion.json")
+    with open(config_path, "r") as f:
+        CONFIG = json.load(f)
 
     if args.meta_seed is not None:
         rng = np.random.default_rng(args.meta_seed)
