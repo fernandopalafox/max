@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from typing import Any, Callable, Optional
 
 
-class Evaluator:
+class DynamicsEvaluator:
     """A class for evaluating dynamics models."""
 
     def __init__(

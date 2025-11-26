@@ -57,7 +57,7 @@ from max.normalizers import (
 from max.buffers import init_jax_buffers, update_buffer_dynamic
 from max.planners import Planner, PlannerState, init_planner
 from max.policy_evaluators import evaluate_policy
-from max.evaluation import Evaluator
+from max.max.dynamics_evaluators import DynamicsEvaluator
 
 __all__ = [
     # Version
@@ -101,5 +101,5 @@ __all__ = [
     "init_planner",
     # Evaluation
     "evaluate_policy",
-    "Evaluator",
+    "DynamicsEvaluator",
 ]
