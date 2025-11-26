@@ -41,7 +41,7 @@ from max.policy_trainers import (
     init_policy_trainer,
     create_ippo_policy_trainer,
 )
-from max.trainers import (
+from max.max.dynamics_trainers import (
     Trainer,
     TrainState,
     init_trainer,
