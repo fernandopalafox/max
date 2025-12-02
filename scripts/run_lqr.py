@@ -13,7 +13,6 @@ from max.planners import init_planner
 from max.costs import init_cost
 import argparse
 import copy
-import time
 import os
 import pickle
 import json
@@ -56,7 +55,6 @@ def main(config, save_dir):
     planner, planner_state = init_planner(config, cost_fn, planner_key)
 
     # Initialize buffer
-    num_agents = config["num_agents"]
     buffers = init_jax_buffers(
         config["num_agents"],
         config["train_policy_freq"],
@@ -85,24 +83,22 @@ def main(config, save_dir):
 
     for step in range(1, config["total_steps"] + 1):
 
-        key, action_key, reset_key = jax.random.split(key, 3)
+        # Compute actions
+        cost_params = {
+            "dyn_params": train_state.params,
+            "params_cov_model": train_state.covariance,
+        }
+        key, planner_key = jax.random.split(key)
+        planner_state = planner_state.replace(key=planner_key)
 
-        # Select action
-        dyn_params = None
-
-        agent_action_keys = jax.random.split(action_key, num_agents)
-
-        # Execute policy
-        actions, values, log_pis = policy_step(
-            None,
-            current_obs,
-            dyn_params,
-            agent_action_keys,
+        actions, planner_state = planner.solve(
+            planner_state, state, cost_params
         )
+        action = actions[0]
 
         # Step environment
         state, next_obs, rewards, terminated, truncated, info = step_fn(
-            state, episode_length, actions
+            state, episode_length, action
         )
         done = terminated or truncated
         episode_length += 1
@@ -110,19 +106,17 @@ def main(config, save_dir):
             episode_reward_components[info_key] += info[info_key]
 
         # Update buffer
-        t_start_buffer = time.time()
         buffers = update_buffer_dynamic(
             buffers,
             buffer_idx,
             current_obs,
-            actions,
+            action,
             rewards,
-            log_pis,
-            values,
+            0.0, # value
+            0.0, # log_pi
             float(done),
         )
         buffer_idx += 1
-        time_buffering += time.time() - t_start_buffer
 
         current_obs = next_obs
 
@@ -130,7 +124,7 @@ def main(config, save_dir):
         if done:
             state = reset_fn(reset_key)
             current_obs = get_obs_fn(state)
-            
+
             # Log and reset episode stats
             episode_log = {"episode/length": episode_length}
             if episode_length > 0:
@@ -151,33 +145,13 @@ def main(config, save_dir):
 
         # Train model
         if step % config["train_model_freq"] == 0 and buffer_idx >= 2:
-            # Get the most recent complete transition from buffer
-            # We need buffer_idx >= 2 because we need (s_t, a_t, s_{t+1})
-            # buffer[i] contains state at time i, action at time i
-            # buffer[i+1] contains state at time i+1 (which is next_state for transition i)
-
-            # Train on the global state (same for all agents) and evader's action (agent 1)
-            prev_idx = buffer_idx - 2
-            curr_idx = buffer_idx - 1
-
-            # Note: We use the global state (agent 0's obs = agent 1's obs = full state)
-            # and the evader's action (agent 1)
-            train_data = {
-                "states": buffers["state"][0:1, prev_idx:prev_idx+1, :],  # Global state at t
-                "actions": buffers["action"][1:2, prev_idx:prev_idx+1, :],  # Evader's action at t
-                "next_states": buffers["state"][0:1, curr_idx:curr_idx+1, :],  # Global state at t+1
-            }
-
-            # Reshape to (1, dim) for batch_size=1
-            train_data = {
-                "states": train_data["states"].reshape(1, -1),
-                "actions": train_data["actions"].reshape(1, -1),
-                "next_states": train_data["next_states"].reshape(1, -1),
-            }
+            # TODO: setup train_data
 
             # Update dynamics parameters using EKF
             train_state, loss = trainer.train(train_state, train_data, step=step)
             wandb.log({"train/model_loss": float(loss)}, step=step)
+
+            # TODO: run evaluation
 
             # Reset buffers
             buffers = init_jax_buffers(
