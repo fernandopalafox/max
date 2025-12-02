@@ -144,16 +144,20 @@ def main(config, save_dir):
             pass
 
         # Train model
+        # buffer_idx >= 2 to ensure we have at least one full transition
         if step % config["train_model_freq"] == 0 and buffer_idx >= 2:
-            # TODO: setup train_data
-
-            # Update dynamics parameters using EKF
+            train_data = {
+                "states": buffers["states"][0, buffer_idx-2:buffer_idx-1, :],
+                "actions": buffers["actions"][0, buffer_idx-2:buffer_idx-1, :],
+                "next_states": buffers["states"][0, buffer_idx-1:buffer_idx, :],
+            }
             train_state, loss = trainer.train(train_state, train_data, step=step)
             wandb.log({"train/model_loss": float(loss)}, step=step)
 
             # TODO: run evaluation
 
-            # Reset buffers
+        # Handle Buffer Overflow
+        if buffer_idx >= config["train_policy_freq"]:
             buffers = init_jax_buffers(
                 config["num_agents"],
                 config["train_policy_freq"],
