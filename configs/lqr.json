@@ -1,16 +1,16 @@
 {
   "env_name": "pursuit_evasion_lqr",
   "num_agents": 1,
-  "total_steps": 500,
+  "total_steps": 100,
   "dim_state": 8,
   "dim_action": 2,
   "train_freq": 1,
   "train_model_freq": 1,
   "train_policy_freq": 1,
   "normalize_freq": 1000000,
-  "eval_freq": 10,
+  "eval_freq": 1,
   "eval_traj_horizon": 100,
-  "buffer_size": 10000,
+  "buffer_size": 110,
   "normalization": {
     "method": "static"
   },

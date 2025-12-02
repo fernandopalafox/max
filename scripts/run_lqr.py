@@ -79,7 +79,7 @@ def main(config, save_dir):
     # Initialize buffer
     buffers = init_jax_buffers(
         config["num_agents"],
-        config["train_policy_freq"],
+        config["buffer_size"],
         config["dim_state"],
         config["dim_action"],
     )
@@ -127,9 +127,7 @@ def main(config, save_dir):
         key, planner_key = jax.random.split(key)
         planner_state = planner_state.replace(key=planner_key)
 
-        actions, planner_state = planner.solve(
-            planner_state, state, cost_params
-        )
+        actions, planner_state = planner.solve(planner_state, state, cost_params)
         action = actions[0][None, :]  # hacky add agent dim
 
         # Step environment
@@ -160,14 +158,13 @@ def main(config, save_dir):
         if done:
             state = reset_fn(reset_key)
             current_obs = get_obs_fn(state)
+            print(f"Episode finished at step {step}.")
 
             # Log and reset episode stats
             episode_log = {"episode/length": episode_length}
             if episode_length > 0:
                 for info_key in reward_component_keys_to_avg:
-                    avg_val = (
-                        episode_reward_components[info_key] / episode_length
-                    )
+                    avg_val = episode_reward_components[info_key] / episode_length
                     episode_log[f"rewards/{info_key}"] = float(avg_val)
             wandb.log(episode_log, step=step)
             episode_length = 0
@@ -183,9 +180,9 @@ def main(config, save_dir):
         # buffer_idx >= 2 to ensure we have at least one full transition
         if step % config["train_model_freq"] == 0 and buffer_idx >= 2:
             train_data = {
-                "states": buffers["states"][0, buffer_idx-2:buffer_idx-1, :],
-                "actions": buffers["actions"][0, buffer_idx-2:buffer_idx-1, :],
-                "next_states": buffers["states"][0, buffer_idx-1:buffer_idx, :],
+                "states": buffers["states"][0, buffer_idx - 2 : buffer_idx - 1, :],
+                "actions": buffers["actions"][0, buffer_idx - 2 : buffer_idx - 1, :],
+                "next_states": buffers["states"][0, buffer_idx - 1 : buffer_idx, :],
             }
             train_state, loss = trainer.train(train_state, train_data, step=step)
             wandb.log({"train/model_loss": float(loss)}, step=step)
@@ -206,10 +203,10 @@ def main(config, save_dir):
                 )
 
         # Handle Buffer Overflow
-        if buffer_idx >= config["train_policy_freq"]:
+        if buffer_idx >= config["buffer_size"]:
             buffers = init_jax_buffers(
                 config["num_agents"],
-                config["train_policy_freq"],
+                config["buffer_size"],
                 config["dim_state"],
                 config["dim_action"],
             )
@@ -217,9 +214,7 @@ def main(config, save_dir):
 
     # Save model parameters
     if save_dir:
-        run_name = config.get(
-            "wandb_run_name", f"lqr_model_{config['seed']}"
-        )
+        run_name = config.get("wandb_run_name", f"lqr_model_{config['seed']}")
         save_path = os.path.join(save_dir, run_name)
         os.makedirs(save_path, exist_ok=True)
         print(f"\nSaving final model parameters to {save_path}...")
@@ -240,9 +235,7 @@ def main(config, save_dir):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Run LQR control experiments."
-    )
+    parser = argparse.ArgumentParser(description="Run LQR control experiments.")
     parser.add_argument(
         "--run-name",
         type=str,
