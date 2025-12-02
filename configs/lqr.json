@@ -1,5 +1,5 @@
 {
-  "env_name": "pursuit_evasion",
+  "env_name": "pursuit_evasion_lqr",
   "num_agents": 2,
   "total_steps": 500,
   "dim_state": 8,
@@ -30,7 +30,9 @@
     "pursuer_max_accel": 3.0,
     "evader_max_accel": 4.0,
     "pursuer_max_speed": 1.0,
-    "evader_max_speed": 1.3
+    "evader_max_speed": 1.3,
+    "true_q_diag": [10.0, 10.0, 1.0, 1.0],
+    "true_r_diag": [0.1, 0.1]
   },
   "trainer": "ekf",
   "trainer_params": {

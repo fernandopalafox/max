@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 from typing import Dict, Any
 from dataclasses import dataclass
+from max.dynamics import create_pursuit_evader_dynamics
 
 
 @dataclass(frozen=True)
@@ -400,6 +401,73 @@ def make_pursuit_evasion_env(params: EnvParams):
     return reset_fn, step_fn, get_obs_fn
 
 
+def make_pursuit_evasion_lqr_env(params: EnvParams, true_q_diag, true_r_diag):
+    num_agents = params.num_agents
+    dt = params.dt
+
+    config_for_dynamics = {
+        "dynamics_params": {
+            "dt": dt,
+            "init_q_diag": true_q_diag,
+            "init_r_diag": true_r_diag,
+        }
+    }
+
+    dynamics_model, _ = create_pursuit_evader_dynamics(config_for_dynamics, None, None)
+
+    true_q_cholesky = jnp.diag(jnp.sqrt(jnp.array(true_q_diag)))
+    true_r_cholesky = jnp.diag(jnp.sqrt(jnp.array(true_r_diag)))
+    true_params = {
+        "model": {
+            "q_cholesky": true_q_cholesky,
+            "r_cholesky": true_r_cholesky,
+        },
+        "normalizer": None,
+    }
+
+    @jax.jit
+    def _step_dynamics(state: jnp.ndarray, evader_action: jnp.ndarray) -> jnp.ndarray:
+        return dynamics_model.pred_one_step(true_params, state, evader_action)
+
+    @jax.jit
+    def reset_fn(key: jax.random.PRNGKey):
+        agent_positions = jax.random.uniform(
+            key,
+            shape=(num_agents, 2),
+            minval=-params.box_half_width,
+            maxval=params.box_half_width,
+        )
+        agent_velocities = jnp.zeros((num_agents, 2))
+        agent_states = jnp.concatenate([agent_positions, agent_velocities], axis=1)
+        return agent_states.flatten()
+
+    @jax.jit
+    def step_fn(state: jnp.ndarray, step_count: int, action: jnp.ndarray):
+        next_state = _step_dynamics(state, action)
+
+        evader_pos = next_state[0:2]
+        pursuer_pos = next_state[4:6]
+        dist_sq = jnp.sum((evader_pos - pursuer_pos) ** 2)
+
+        pursuer_reward = -dist_sq
+        evader_reward = dist_sq
+        rewards = jnp.array([pursuer_reward, evader_reward])
+
+        terminated = False
+        truncated = step_count >= params.max_episode_steps
+
+        observations = next_state
+        info = {"reward": evader_reward}
+
+        return next_state, observations, rewards, terminated, truncated, info
+
+    @jax.jit
+    def get_obs_fn(state: jnp.ndarray):
+        return state
+
+    return reset_fn, step_fn, get_obs_fn
+
+
 def make_blocker_goal_seeker_env(params: EnvParams):
     """
     Factory function that creates the blocker-goal-seeker environment.
@@ -661,6 +729,10 @@ def init_env(config: Dict[str, Any]):
         return make_env(params)
     elif env_name == "pursuit_evasion":
         return make_pursuit_evasion_env(params)
+    elif env_name == "pursuit_evasion_lqr":
+        true_q_diag = env_params_dict.get("true_q_diag")
+        true_r_diag = env_params_dict.get("true_r_diag")
+        return make_pursuit_evasion_lqr_env(params, true_q_diag, true_r_diag)
     elif env_name == "blocker_goal_seeker":
         return make_blocker_goal_seeker_env(params)
     else:

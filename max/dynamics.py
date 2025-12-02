@@ -314,6 +314,8 @@ def create_pursuit_evader_dynamics(
         Q = q_cholesky @ q_cholesky.T
         R = r_cholesky @ r_cholesky.T + 1e-6 * jnp.eye(2)
 
+        # TODO: Fix this
+        print("FIX THIS")
         # --- Single-Step LQR Control Law (Pursuer) ---
         # The pursuer chooses its acceleration 'a_pursuer' to minimize:
         # J = x_err_next.T @ Q @ x_err_next + a_pursuer.T @ R @ a_pursuer
@@ -340,23 +342,17 @@ def create_pursuit_evader_dynamics(
         )
 
     # --- Initialize Learnable Parameters ---
-    # We learn the Cholesky factors, which we can initialize from diagonal values
-    # provided in the config. This is a robust way to start training.
-    # `init_q_diag` should be a list/array of 4 values.
-    # `init_r_diag` should be a list/array of 2 values.
     init_q_diag = jnp.array(config["dynamics_params"]["init_q_diag"])
     init_r_diag = jnp.array(config["dynamics_params"]["init_r_diag"])
 
-    q_cholesky_init = jnp.diag(
-        jnp.sqrt(init_q_diag)
-    )  # Use sqrt for initialization
+    q_cholesky_init = jnp.diag(jnp.sqrt(init_q_diag))
     r_cholesky_init = jnp.diag(jnp.sqrt(init_r_diag))
 
     model_params = {
         "q_cholesky": q_cholesky_init,
         "r_cholesky": r_cholesky_init,
     }
-    params = {"model": model_params, "normalizer": normalizer_params}
+    params = {"model": model_params, "normalizer": None}
     model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=None)
 
     return model, params

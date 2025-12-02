@@ -79,7 +79,7 @@ def main(config, save_dir):
     # Main training loop
     key, reset_key = jax.random.split(key)
     state = reset_fn(reset_key)
-    current_obs = get_obs_fn(state) 
+    current_obs = get_obs_fn(state)
 
     for step in range(1, config["total_steps"] + 1):
 
