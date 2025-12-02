@@ -293,7 +293,7 @@ def create_pursuit_evader_dynamics(
         v_evader = state[2:4]
         p_pursuer = state[4:6]
         v_pursuer = state[6:8]
-        a_evader = action
+        a_evader = action.squeeze()  # remove agent dim
 
         # --- Unpack Config and Construct LQR Matrices ---
         dt = config["dynamics_params"]["dt"]

@@ -39,6 +39,9 @@ class EnvParams:
     reward_shaping_k1: float = 0.01  # k_1 for goal-seeker potential
     reward_shaping_k2: float = 0.01  # k_2 for blocker area denial
 
+    # Specific to LQR pursuit-evasion
+    
+
 
 def make_env(params: EnvParams):
     """
@@ -433,13 +436,17 @@ def make_pursuit_evasion_lqr_env(params: EnvParams, true_q_diag, true_r_diag):
     def reset_fn(key: jax.random.PRNGKey):
         agent_positions = jax.random.uniform(
             key,
-            shape=(num_agents, 2),
+            shape=(1, 4),
             minval=-params.box_half_width,
             maxval=params.box_half_width,
         )
-        agent_velocities = jnp.zeros((num_agents, 2))
+        agent_velocities = jnp.zeros((1, 4))
         agent_states = jnp.concatenate([agent_positions, agent_velocities], axis=1)
         return agent_states.flatten()
+    
+    @jax.jit
+    def get_obs_fn(state: jnp.ndarray):
+        return state[None, :]
 
     @jax.jit
     def step_fn(state: jnp.ndarray, step_count: int, action: jnp.ndarray):
@@ -451,19 +458,15 @@ def make_pursuit_evasion_lqr_env(params: EnvParams, true_q_diag, true_r_diag):
 
         pursuer_reward = -dist_sq
         evader_reward = dist_sq
-        rewards = jnp.array([pursuer_reward, evader_reward])
+        rewards = jnp.array([evader_reward])
 
         terminated = False
         truncated = step_count >= params.max_episode_steps
 
-        observations = next_state
-        info = {"reward": evader_reward}
+        observations = get_obs_fn(next_state)
+        info = {"reward": pursuer_reward}
 
         return next_state, observations, rewards, terminated, truncated, info
-
-    @jax.jit
-    def get_obs_fn(state: jnp.ndarray):
-        return state
 
     return reset_fn, step_fn, get_obs_fn
 
@@ -719,8 +722,14 @@ def init_env(config: Dict[str, Any]):
     """
     Initialize environment functions based on configuration.
     """
-    env_name = config.get("env_name", "multi_agent_tracking")
+    env_name = config.get("env_name", None)
     env_params_dict = config.get("env_params", {})
+
+    # Hacky fix for LQR-specific params
+    if env_name == "pursuit_evasion_lqr":
+        true_q_diag = env_params_dict.pop("true_q_diag", None)
+        true_r_diag = env_params_dict.pop("true_r_diag", None)
+
     params = EnvParams(**env_params_dict)
 
     print(f"Initializing environment: {env_name}")
@@ -730,8 +739,6 @@ def init_env(config: Dict[str, Any]):
     elif env_name == "pursuit_evasion":
         return make_pursuit_evasion_env(params)
     elif env_name == "pursuit_evasion_lqr":
-        true_q_diag = env_params_dict.get("true_q_diag")
-        true_r_diag = env_params_dict.get("true_r_diag")
         return make_pursuit_evasion_lqr_env(params, true_q_diag, true_r_diag)
     elif env_name == "blocker_goal_seeker":
         return make_blocker_goal_seeker_env(params)

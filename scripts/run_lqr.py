@@ -130,7 +130,7 @@ def main(config, save_dir):
         actions, planner_state = planner.solve(
             planner_state, state, cost_params
         )
-        action = actions[0]
+        action = actions[0][None, :]  # hacky add agent dim
 
         # Step environment
         state, next_obs, rewards, terminated, truncated, info = step_fn(
@@ -148,8 +148,8 @@ def main(config, save_dir):
             current_obs,
             action,
             rewards,
-            0.0, # value
-            0.0, # log_pi
+            jnp.zeros_like(rewards),  # dummy value
+            jnp.zeros_like(rewards),  # dummy log_pi
             float(done),
         )
         buffer_idx += 1

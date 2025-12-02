@@ -41,7 +41,7 @@ from max.policy_trainers import (
     init_policy_trainer,
     create_ippo_policy_trainer,
 )
-from max.max.dynamics_trainers import (
+from max.dynamics_trainers import (
     Trainer,
     TrainState,
     init_trainer,
@@ -57,7 +57,7 @@ from max.normalizers import (
 from max.buffers import init_jax_buffers, update_buffer_dynamic
 from max.planners import Planner, PlannerState, init_planner
 from max.policy_evaluators import evaluate_policy
-from max.max.dynamics_evaluators import DynamicsEvaluator
+from max.dynamics_evaluators import DynamicsEvaluator
 
 __all__ = [
     # Version
