@@ -1,6 +1,7 @@
 # run_lqr.py
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import wandb
 from max.normalizers import init_normalizer
@@ -47,6 +48,27 @@ def main(config, save_dir):
     # Initialize dynamics evaluator
     evaluator = DynamicsEvaluator(dynamics_model.pred_one_step)
 
+    key, action_key = jax.random.split(key)
+    eval_actions = jax.random.uniform(
+        action_key,
+        shape=(config["eval_traj_horizon"], config["dim_action"]),
+        minval=jnp.array(config["normalization_params"]["action"]["min"]),
+        maxval=jnp.array(config["normalization_params"]["action"]["max"]),
+    )
+
+    key, reset_key = jax.random.split(key)
+    eval_trajectory = [reset_fn(reset_key)]
+    current_state = eval_trajectory[0]
+    for action in eval_actions:
+        next_state, _, _, _, _, _ = step_fn(current_state, 0, action)
+        eval_trajectory.append(next_state)
+        current_state = next_state
+
+    eval_trajectory_data = {
+        "trajectory": jnp.array(eval_trajectory),
+        "actions": eval_actions,
+    }
+
     # Initialize cost function
     cost_fn = init_cost(config, dynamics_model)
 
@@ -66,6 +88,20 @@ def main(config, save_dir):
     print(
         f"Starting online training for {config['total_steps']} steps "
         f"with train_policy_freq = {config['train_policy_freq']}..."
+    )
+
+    initial_multi_step_loss = evaluator.compute_multi_step_loss(
+        train_state.params, eval_trajectory_data
+    )
+    initial_one_step_loss = evaluator.compute_one_step_loss(
+        train_state.params, eval_trajectory_data
+    )
+    wandb.log(
+        {
+            "eval/multi_step_loss": initial_multi_step_loss,
+            "eval/one_step_loss": initial_one_step_loss,
+        },
+        step=0,
     )
 
     episode_length = 0
@@ -154,7 +190,20 @@ def main(config, save_dir):
             train_state, loss = trainer.train(train_state, train_data, step=step)
             wandb.log({"train/model_loss": float(loss)}, step=step)
 
-            # TODO: run evaluation
+            if step % config["eval_freq"] == 0:
+                multi_step_loss = evaluator.compute_multi_step_loss(
+                    train_state.params, eval_trajectory_data
+                )
+                one_step_loss = evaluator.compute_one_step_loss(
+                    train_state.params, eval_trajectory_data
+                )
+                wandb.log(
+                    {
+                        "eval/multi_step_loss": multi_step_loss,
+                        "eval/one_step_loss": one_step_loss,
+                    },
+                    step=step,
+                )
 
         # Handle Buffer Overflow
         if buffer_idx >= config["train_policy_freq"]:
