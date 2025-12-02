@@ -7,99 +7,10 @@ Follows the max library philosophy: pure functions, closures, and NamedTuples.
 
 import jax
 import jax.numpy as jnp
-from typing import NamedTuple, Callable, Dict, Any, Optional
+from typing import Callable
 
-# Type aliases
-CostParams = Dict[str, Any]
-StageCostFn = Callable[[jnp.ndarray, jnp.ndarray, CostParams], float]
-TerminalCostFn = Callable[[jnp.ndarray, CostParams], float]
-TrajCostFn = Callable[[jnp.ndarray, jnp.ndarray, CostParams], float]
+# --- Helpers for info gathering term ---
 
-
-class CostSpec(NamedTuple):
-    """Container for cost function components."""
-    stage: StageCostFn
-    terminal: TerminalCostFn
-    traj: TrajCostFn
-
-
-# --- Helper: Quadratic costs ---
-
-def make_quadratic_stage_cost(Q: jnp.ndarray, R: jnp.ndarray) -> StageCostFn:
-    """
-    Creates a quadratic stage cost: x'Qx + u'Ru.
-
-    Args:
-        Q: State cost matrix (dim_state x dim_state)
-        R: Control cost matrix (dim_control x dim_control)
-
-    Returns:
-        Stage cost function with signature (state, control, cost_params) -> scalar
-    """
-    @jax.jit
-    def stage_cost(state, control, cost_params):
-        return state @ Q @ state + control @ R @ control
-    return stage_cost
-
-
-def make_quadratic_terminal_cost(Q_terminal: jnp.ndarray) -> TerminalCostFn:
-    """
-    Creates a quadratic terminal cost: x'Qx.
-
-    Args:
-        Q_terminal: Terminal state cost matrix (dim_state x dim_state)
-
-    Returns:
-        Terminal cost function with signature (state, cost_params) -> scalar
-    """
-    @jax.jit
-    def terminal_cost(state, cost_params):
-        return state @ Q_terminal @ state
-    return terminal_cost
-
-
-# --- Helper: Standard trajectory cost composition ---
-
-def make_standard_traj_cost(
-    stage_cost: StageCostFn,
-    terminal_cost: TerminalCostFn,
-    jerk_weight: float = 0.0
-) -> TrajCostFn:
-    """
-    Creates a trajectory cost that sums stage costs, adds terminal cost,
-    and optionally penalizes control jerk (smoothness).
-
-    Args:
-        stage_cost: Stage cost function
-        terminal_cost: Terminal cost function
-        jerk_weight: Weight for control jerk penalty (squared finite differences)
-
-    Returns:
-        Trajectory cost function with signature (states, controls, cost_params) -> scalar
-    """
-    stage_cost_vmap = jax.vmap(stage_cost, in_axes=(0, 0, None))
-
-    @jax.jit
-    def traj_cost(states, controls, cost_params):
-        # Sum stage costs over trajectory (excluding terminal state)
-        stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
-        total = jnp.sum(stage_costs)
-
-        # Add terminal cost
-        total += terminal_cost(states[-1], cost_params)
-
-        # Add jerk penalty if requested
-        if jerk_weight > 0:
-            control_diffs = jnp.diff(controls, axis=0)
-            jerk_cost = jnp.sum(jnp.sum(control_diffs**2, axis=1))
-            total += jerk_weight * jerk_cost
-
-        return total
-
-    return traj_cost
-
-
-# --- Helper: Information gathering term ---
 
 def make_info_gathering_term(
     dynamics_fn: Callable,
@@ -107,11 +18,6 @@ def make_info_gathering_term(
 ) -> Callable:
     """
     Creates an information gathering (exploration bonus) term.
-
-    Computes the differential entropy of the predicted state distribution,
-    which measures how much a state-action pair reduces parameter uncertainty.
-    This implements the exploration strategy from active learning / optimal
-    experiment design.
 
     Mathematical background:
         - Information gain: I(θ; s_{t+1} | s_t, a_t)
@@ -170,45 +76,7 @@ def make_info_gathering_term(
 
     return info_term_fn
 
-
-# --- Factory function (follows max library init_* pattern) ---
-
-def init_lqr_costs(
-    Q: jnp.ndarray,
-    R: jnp.ndarray,
-    Q_terminal: Optional[jnp.ndarray] = None,
-    jerk_weight: float = 0.0
-) -> CostSpec:
-    """
-    Initializes standard LQR costs: quadratic state/control penalties.
-
-    Args:
-        Q: State cost matrix (dim_state x dim_state)
-        R: Control cost matrix (dim_control x dim_control)
-        Q_terminal: Terminal state cost matrix (defaults to Q if None)
-        jerk_weight: Weight for control jerk penalty
-
-    Returns:
-        CostSpec with stage, terminal, and trajectory cost functions
-
-    Example:
-        >>> Q = jnp.diag(jnp.array([10.0, 10.0, 1.0, 1.0]))
-        >>> R = jnp.diag(jnp.array([0.1, 0.1]))
-        >>> costs = init_lqr_costs(Q, R, jerk_weight=0.01)
-        >>> # Use in solver
-        >>> cost_value = costs.stage(state, action, cost_params)
-    """
-    if Q_terminal is None:
-        Q_terminal = Q
-
-    stage = make_quadratic_stage_cost(Q, R)
-    terminal = make_quadratic_terminal_cost(Q_terminal)
-    traj = make_standard_traj_cost(stage, terminal, jerk_weight)
-
-    return CostSpec(stage=stage, terminal=terminal, traj=traj)
-
-
-# --- Private helpers for info gathering cost ---
+# Note: these helpers are unique to pursuit-evasion with info gathering cost
 
 def _stage_cost_info_gathering(state, control, cost_params, weight_control, weight_info, info_term_fn):
     """Private helper for info gathering stage cost."""
@@ -242,7 +110,7 @@ def _rollout(init_state, controls, cost_params, pred_fn):
     return jnp.concatenate([init_state[jnp.newaxis, :], states], axis=0)
 
 
-# --- Main factory function (follows max library pattern) ---
+# --- Main factory function ---
 
 def init_cost(config, dynamics_model):
     """
