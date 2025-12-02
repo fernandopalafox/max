@@ -293,42 +293,48 @@ def create_pursuit_evader_dynamics(
         v_evader = state[2:4]
         p_pursuer = state[4:6]
         v_pursuer = state[6:8]
-        a_evader = action.squeeze()  # remove agent dim
+        a_evader = action.squeeze()
+
+        # Construct full state vectors for clarity
+        x_evader = jnp.concatenate([p_evader, v_evader])
+        x_pursuer = jnp.concatenate([p_pursuer, v_pursuer])
 
         # --- Unpack Config and Construct LQR Matrices ---
         dt = config["dynamics_params"]["dt"]
 
-        # State transition matrix for relative dynamics (4x4)
+        # State transition matrix (4x4)
         A = jnp.array(
             [[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]]
         )
 
-        # Control matrix for relative dynamics (4x2)
+        # Control matrix (4x2)
         B = jnp.array([[0.5 * dt**2, 0], [0, 0.5 * dt**2], [dt, 0], [0, dt]])
 
         # --- Construct Q and R from learnable Cholesky factors ---
-        # This ensures Q is positive semi-definite and R is positive definite.
         q_cholesky = params["model"]["q_cholesky"]
         r_cholesky = params["model"]["r_cholesky"]
 
         Q = q_cholesky @ q_cholesky.T
         R = r_cholesky @ r_cholesky.T + 1e-6 * jnp.eye(2)
 
-        # TODO: Fix this
-        print("FIX THIS")
         # --- Single-Step LQR Control Law (Pursuer) ---
-        # The pursuer chooses its acceleration 'a_pursuer' to minimize:
-        # J = x_err_next.T @ Q @ x_err_next + a_pursuer.T @ R @ a_pursuer
-
-        # 1. Define the relative state (error state).
-        x_err = jnp.concatenate([p_pursuer - p_evader, v_pursuer - v_evader])
-
-        # 2. Compute the optimal control gain K = (R + B'QB)^-1 B'QA
+        # Implementing Eq (10): u* = -(R + B'QB)^-1 B'Q(Ax_pursuer - x_evader)
+        
+        # 1. Compute the inverse term: (R + B'QB)^-1
+        # shape: (2,2)
         inv_term = jnp.linalg.inv(R + B.T @ Q @ B)
-        K = inv_term @ B.T @ Q @ A
 
-        # 3. Calculate the pursuer's optimal acceleration.
-        a_pursuer = -K @ x_err
+        # 2. Compute the Gain component that does NOT depend on state: (R + B'QB)^-1 B'Q
+        # shape: (2,4)
+        Gain_prefix = inv_term @ B.T @ Q
+
+        # 3. Compute the specific error term defined in the paper: (Ax_p - x_e)
+        # The paper derivation minimizes ||Ax_p + Bu - x_e||^2, leading to this term.
+        # shape: (4,)
+        state_diff_term = (A @ x_pursuer) - x_evader
+
+        # 4. Calculate optimal acceleration
+        a_pursuer = -Gain_prefix @ state_diff_term
 
         # --- Dynamics Update (Double Integrator) ---
         next_v_evader = v_evader + a_evader * dt
