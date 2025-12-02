@@ -62,6 +62,7 @@
     "pursuer_vel_x",
     "pursuer_vel_y"
   ],
+  "cost_type": "info_gathering",
   "planner_type": "icem",
   "planner_params": {
     "horizon": 20,
