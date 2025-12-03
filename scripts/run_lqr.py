@@ -3,6 +3,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import matplotlib.pyplot as plt
 import wandb
 from max.normalizers import init_normalizer
 from max.buffers import init_jax_buffers, update_buffer_dynamic
@@ -19,6 +20,42 @@ import pickle
 import json
 
 
+def plot_lqr_trajectory(buffers, buffer_idx, config):
+    """Plot evader and pursuer x-y positions from LQR buffer."""
+    # Extract states (agent 0, valid timesteps only)
+    states = np.array(buffers["states"][0, :buffer_idx, :])
+
+    # Extract positions (indices from state_labels in config)
+    evader_x, evader_y = states[:, 0], states[:, 1]      # evader pos
+    pursuer_x, pursuer_y = states[:, 4], states[:, 5]    # pursuer pos
+
+    # Create plot
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.plot(evader_x, evader_y, label="Evader", color="blue", linewidth=2, alpha=0.8)
+    ax.plot(pursuer_x, pursuer_y, label="Pursuer", color="red", linewidth=2, alpha=0.8)
+
+    # Mark start (circle) and end (x) points
+    ax.scatter(evader_x[0], evader_y[0], marker="o", s=100, color="blue",
+               label="Evader Start", zorder=5)
+    ax.scatter(evader_x[-1], evader_y[-1], marker="x", s=100, color="blue",
+               label="Evader End", zorder=5)
+    ax.scatter(pursuer_x[0], pursuer_y[0], marker="o", s=100, color="red",
+               label="Pursuer Start", zorder=5)
+    ax.scatter(pursuer_x[-1], pursuer_y[-1], marker="x", s=100, color="red",
+               label="Pursuer End", zorder=5)
+
+    # Formatting
+    ax.set_xlabel("X Position")
+    ax.set_ylabel("Y Position")
+    ax.set_title("LQR Pursuit-Evasion Trajectory")
+    ax.legend(loc="best")
+    ax.grid(True, alpha=0.3)
+    ax.axis("equal")  # Equal aspect ratio for spatial plots
+    plt.tight_layout()
+
+    return fig
+
+
 def main(config, save_dir):
     wandb.init(
         project="lqr",
@@ -28,6 +65,17 @@ def main(config, save_dir):
         reinit=True,
     )
     key = jax.random.key(config["seed"])
+
+    # Ground truth parameters for evaluation (extract before init_env modifies config)
+    true_q_diag = jnp.array(config["env_params"]["true_q_diag"])
+    true_r_diag = jnp.array(config["env_params"]["true_r_diag"])
+    true_params = {
+        "model": {
+            "q_cholesky": jnp.diag(jnp.sqrt(true_q_diag)),
+            "r_cholesky": jnp.diag(jnp.sqrt(true_r_diag)),
+        },
+        "normalizer": None,
+    }
 
     # Initialize environment
     reset_fn, step_fn, get_obs_fn = init_env(config)
@@ -194,10 +242,18 @@ def main(config, save_dir):
                 one_step_loss = evaluator.compute_one_step_loss(
                     train_state.params, eval_trajectory_data
                 )
+
+                # Compute parameter difference from true dynamics
+                diff_tree = jax.tree.map(lambda x, y: x - y, train_state.params, true_params)
+                param_diff = sum(jnp.linalg.norm(leaf) for leaf in jax.tree_util.tree_leaves(diff_tree))
+                cov_trace = jnp.trace(train_state.covariance) if train_state.covariance is not None else 0.0
+
                 wandb.log(
                     {
                         "eval/multi_step_loss": multi_step_loss,
                         "eval/one_step_loss": one_step_loss,
+                        "eval/param_diff": param_diff,
+                        "eval/cov_trace": cov_trace,
                     },
                     step=step,
                 )
@@ -229,6 +285,14 @@ def main(config, save_dir):
             with open(cov_path, "wb") as f:
                 pickle.dump(cov_np, f)
             print(f"Parameter covariance saved to {cov_path}")
+
+    # Plot and log trajectory
+    if buffer_idx > 0:
+        print("\nGenerating trajectory plot...")
+        fig = plot_lqr_trajectory(buffers, buffer_idx, config)
+        wandb.log({"trajectory/xy_plot": wandb.Image(fig)}, step=config["total_steps"])
+        plt.close(fig)
+        print("Trajectory plot logged to wandb.")
 
     wandb.finish()
     print("Run complete.")
