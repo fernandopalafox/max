@@ -19,12 +19,6 @@ def make_info_gathering_term(
     """
     Creates an information gathering (exploration bonus) term.
 
-    Mathematical background:
-        - Information gain: I(θ; s_{t+1} | s_t, a_t)
-        - For Gaussians: 0.5 * [log(det(Σ_pred)) - log(det(R_meas))]
-        - Where Σ_pred = J_θ * Σ_params * J_θ^T + R_meas
-        - J_θ is the Jacobian of dynamics w.r.t. parameters
-
     Args:
         dynamics_fn: Dynamics prediction function (params, state, action) -> next_state
         meas_noise_diag: Diagonal of measurement noise covariance
@@ -32,7 +26,7 @@ def make_info_gathering_term(
     Returns:
         Function with signature (state, control, dyn_params, params_cov) -> info_gain
     """
-    # Pre-compute log determinant of measurement noise
+    # Pre-compute log determinant and covariance of measurement noise
     log_det_meas_noise = jnp.sum(jnp.log(meas_noise_diag))
     meas_noise_cov = jnp.diag(meas_noise_diag)
 
@@ -44,54 +38,69 @@ def make_info_gathering_term(
         Args:
             state: Current state
             control: Current control/action
-            dyn_params: Current dynamics model parameters
-            params_cov: Parameter covariance matrix (from EKF or other estimator)
+            dyn_params: Dictionary containing "model" and "normalizer" params
+            params_cov: Parameter covariance matrix
 
         Returns:
             Information gain scalar (higher = more informative)
         """
-        if params_cov is None:
-            return 0.0
 
-        # Flatten parameters for Jacobian computation
-        flat_params, unflatten_fn = jax.flatten_util.ravel_pytree(dyn_params["model"])
+        # 1. Flatten only the learnable model parameters
+        flat_model_params, unflatten_fn = jax.flatten_util.ravel_pytree(
+            dyn_params["model"]
+        )
 
-        # Define prediction function with flattened parameters
-        def pred_flat(flat_p, s, a):
+        # 2. Define prediction wrapper that isolates model params from normalizer
+        def pred_flat(flat_p, s, a, norm_p):
             unflat_p = unflatten_fn(flat_p)
-            full_params = {"model": unflat_p, "normalizer": dyn_params["normalizer"]}
+            full_params = {"model": unflat_p, "normalizer": norm_p}
             return dynamics_fn(full_params, s, a)
 
-        # Compute Jacobian w.r.t. parameters
-        jac_params = jax.jacobian(pred_flat, argnums=0)(flat_params, state, control)
+        # 3. Compute Jacobian w.r.t. flattened model parameters (arg 0)
+        jac_dyn = jax.jacobian(pred_flat, argnums=0)(
+            flat_model_params, state, control, dyn_params["normalizer"]
+        )
 
-        # Propagate parameter uncertainty to state space
+        # 4. Propagate parameter uncertainty to state space
         # Σ_pred = J * Σ_params * J^T + R_meas
-        pred_cov = jac_params @ params_cov @ jac_params.T + meas_noise_cov
+        pred_cov = jac_dyn @ params_cov @ jac_dyn.T + meas_noise_cov
 
-        # Compute information gain (differential entropy)
+        # 5. Compute information gain (differential entropy term)
+        # 0.5 * (log(det(Σ_pred)) - log(det(R_meas)))
         info_gain = 0.5 * (jnp.log(jnp.linalg.det(pred_cov)) - log_det_meas_noise)
 
         return info_gain
 
     return info_term_fn
 
-# Note: these helpers are unique to pursuit-evasion with info gathering cost
 
-def _stage_cost_info_gathering(state, control, cost_params, weight_control, weight_info, info_term_fn):
-    """Private helper for info gathering stage cost."""
+def _stage_cost_info_gathering(
+    state, control, cost_params, weight_control, weight_info, info_term_fn
+):
+    """
+    Private helper for info gathering stage cost.
+    Matches stage_cost in run_dogfight.py
+    """
+    # Hardcoded indices for pursuit-evasion
     p_evader = state[0:2]
     p_pursuer = state[4:6]
+
     dist_sq = jnp.sum((p_evader - p_pursuer) ** 2)
     control_cost = weight_control * jnp.sum(control**2)
+
+    # Exploration bonus (subtracted because planners minimize cost)
+    # Passed params match the structure in run_lqr.py
     exploration_term = -weight_info * info_term_fn(
         state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
     )
+
     return -dist_sq + control_cost + exploration_term
 
 
 def _terminal_cost_pursuit_evasion(state):
-    """Private helper for pursuit-evasion terminal cost."""
+    """
+    Private helper for pursuit-evasion terminal cost.
+    """
     p_evader = state[0:2]
     p_pursuer = state[4:6]
     dist_sq = jnp.sum((p_evader - p_pursuer) ** 2)
@@ -99,7 +108,10 @@ def _terminal_cost_pursuit_evasion(state):
 
 
 def _rollout(init_state, controls, cost_params, pred_fn):
-    """Private helper for trajectory rollout using dynamics model."""
+    """
+    Private helper for trajectory rollout using dynamics model.
+    """
+
     def step(carry, control):
         state, dyn_params = carry
         next_state = pred_fn(dyn_params, state, control)
@@ -107,30 +119,24 @@ def _rollout(init_state, controls, cost_params, pred_fn):
 
     dyn_params = cost_params["dyn_params"]
     _, states = jax.lax.scan(step, (init_state, dyn_params), controls)
+
+    # Concatenate init_state to match dogfight shape requirements
     return jnp.concatenate([init_state[jnp.newaxis, :], states], axis=0)
 
 
 # --- Main factory function ---
 
+
 def init_cost(config, dynamics_model):
     """
     Initializes cost function based on configuration.
 
-    This is the main factory function that follows the max library pattern
-    (similar to init_env, init_dynamics, init_planner).
-
     Args:
-        config: Configuration dictionary containing:
-            - cost_type: Type of cost ("info_gathering", etc.)
-            - cost_fn_params: Cost-specific parameters
-        dynamics_model: Dynamics model containing pred_one_step function
+        config: Configuration dictionary containing cost_fn_params.
+        dynamics_model: Object with .pred_one_step method.
 
     Returns:
         Cost function with signature (init_state, controls, cost_params) -> scalar
-
-    Example:
-        >>> cost_fn = init_cost(config, dynamics_model)
-        >>> cost = cost_fn(init_state, controls, cost_params)
     """
     cost_type = config.get("cost_type", "info_gathering")
     print(f"🚀 Initializing cost function: {cost_type.upper()}")
@@ -143,26 +149,43 @@ def init_cost(config, dynamics_model):
         weight_info = params["weight_info"]
         meas_noise_diag = jnp.array(params["meas_noise_diag"])
 
-        # Info and stage costs
+        # Create the info term calculator (JIT-able helper)
         info_term_fn = make_info_gathering_term(
-            dynamics_model.pred_one_step,
-            meas_noise_diag
-        )
-        stage_cost_vmap = jax.vmap(
-            lambda s, u, cp: _stage_cost_info_gathering(s, u, cp, weight_control, weight_info, info_term_fn),
-            in_axes=(0, 0, None)
+            dynamics_model.pred_one_step, meas_noise_diag
         )
 
-        # Total cost function
+        # Vectorize stage cost over the horizon
+        stage_cost_vmap = jax.vmap(
+            lambda s, u, cp: _stage_cost_info_gathering(
+                s, u, cp, weight_control, weight_info, info_term_fn
+            ),
+            in_axes=(0, 0, None),
+        )
+
         @jax.jit
         def cost_fn(init_state, controls, cost_params):
-            states = _rollout(init_state, controls, cost_params, dynamics_model.pred_one_step)
+            """
+            Calculates total trajectory cost.
+            Matches traj_cost in run_dogfight.py
+            """
+            # 1. Rollout trajectory
+            states = _rollout(
+                init_state, controls, cost_params, dynamics_model.pred_one_step
+            )
+
+            # 2. Calculate stage costs (on states 0 to T-1)
             stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
+
+            # 3. Calculate terminal cost (on state T)
             terminal = _terminal_cost_pursuit_evasion(states[-1])
+
+            # 4. Calculate Jerk Cost (on controls)
             jerk = 0.0
             if weight_jerk > 0:
                 control_diffs = jnp.diff(controls, axis=0)
+                # Sum over dimensions, then sum over time
                 jerk = weight_jerk * jnp.sum(control_diffs**2)
+
             return jnp.sum(stage_costs) + terminal + jerk
 
         return cost_fn
