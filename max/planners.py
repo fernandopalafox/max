@@ -109,8 +109,8 @@ def _random_solve_internal(
     planner_params = config.get("planner_params", {})
     horizon = planner_params.get("horizon")
     dim_control = planner_params.get("dim_control")
-    action_low = planner_params.get("action_low")
-    action_high = planner_params.get("action_high")
+    action_low = jnp.array(planner_params.get("action_low"))
+    action_high = jnp.array(planner_params.get("action_high"))
 
     # Generate a new key for this planning step
     key, subkey = random.split(state.key)
