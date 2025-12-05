@@ -58,51 +58,87 @@ state = jnp.array([2.0, 2.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0])
 params_cov = init_covariance
 dyn_params = init_params
 
-n_grid = 50
-u_range = jnp.linspace(-2.0, 2.0, n_grid)
-u1_grid, u2_grid = jnp.meshgrid(u_range, u_range)
-controls = jnp.stack([u1_grid.ravel(), u2_grid.ravel()], axis=-1)
-
-@jax.jit
-def compute_info_cost(control):
-    return info_term_fn(state, control, dyn_params, params_cov)
-
-info_costs = jax.vmap(compute_info_cost)(controls).reshape(n_grid, n_grid)
-
 proc_cov = jnp.zeros((dim_params_model, dim_params_model))
 meas_cov = jnp.eye(dim_state) * 0.1
 
+# Create a meshgrid for u_0
+n_grid = 50
+u_range = jnp.linspace(-2.0, 2.0, n_grid)
+u1_grid, u2_grid = jnp.meshgrid(u_range, u_range)
+controls_t0 = jnp.stack([u1_grid.ravel(), u2_grid.ravel()], axis=-1)
+
+# Fixed control for t=1 (Assumed zero to isolate effect of u_0)
+control_t1 = jnp.zeros(dim_action) 
+
 @jax.jit
-def compute_ekf_trace(control):
-    next_state = true_params["model"]
-    true_next = dynamics_model.pred_one_step(true_params, state, control)
-    ekf_inp = jnp.concatenate([state, control])
-    ekf_out = true_next - state
-    _, cov_tp1, _ = estimator.estimate(
-        flat_params_model, params_cov, ekf_inp, ekf_out, proc_cov, meas_cov
+def compute_2step_metrics(control_0):
+    # --- STEP 1 (t=0 -> t=1) ---
+    # Apply u_0. This moves us to x_1.
+    # Note: The covariance update here is CONSTANT w.r.t control_0, 
+    # but we must compute it to get the correct starting cov for step 2.
+    
+    # 1. Predict Next State x_1
+    params_mean = {"model": unflatten_fn_model(flat_params_model), "normalizer": None}
+    state_1 = dynamics_model.pred_one_step(params_mean, state, control_0)
+    
+    # 2. Update Covariance to Sigma_1
+    # We use a dummy observation (zeros) because obs value doesn't affect covariance update
+    ekf_inp_0 = jnp.concatenate([state, control_0])
+    _, cov_1, _ = estimator.estimate(
+        flat_params_model, params_cov, ekf_inp_0, jnp.zeros(dim_state), proc_cov, meas_cov
     )
-    return jnp.trace(cov_tp1)
+    
+    # --- STEP 2 (t=1 -> t=2) ---
+    # Now we are at x_1. We apply fixed control_t1.
+    # The pursuer reacts to x_1. THIS is where u_0 pays off.
+    
+    # 1. Calculate Information Cost (The Proxy)
+    # We calculate the info gain of the transition x_1 -> x_2
+    # Note: We pass cov_1, which is the covariance entering this step
+    info_cost_val = info_term_fn(state_1, control_t1, dyn_params, cov_1)
+    
+    # 2. Calculate EKF Trace (The Truth)
+    # We perform the actual EKF update to get Sigma_2
+    ekf_inp_1 = jnp.concatenate([state_1, control_t1])
+    _, cov_2, _ = estimator.estimate(
+        flat_params_model, cov_1, ekf_inp_1, jnp.zeros(dim_state), proc_cov, meas_cov
+    )
+    trace_val = jnp.trace(cov_2)
+    
+    return info_cost_val, trace_val
 
-ekf_traces = jax.vmap(compute_ekf_trace)(controls).reshape(n_grid, n_grid)
+# Vectorize and compute
+results = jax.vmap(compute_2step_metrics)(controls_t0)
+info_costs_flat, ekf_traces_flat = results
 
+info_costs = info_costs_flat.reshape(n_grid, n_grid)
+ekf_traces = ekf_traces_flat.reshape(n_grid, n_grid)
+
+# Plotting
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
+# Negative sign on Info Cost?
+# Ideally, your info_term_fn returns POSITIVE gain (higher is better).
+# If your optimizer minimizes NEGATIVE gain, plot the negative here to match "valleys".
+# Assuming info_term_fn returns entropy reduction (positive good):
 im0 = axes[0].imshow(
-    info_costs, extent=[-2, 2, -2, 2], origin="lower", aspect="auto", cmap="viridis"
+    -info_costs, # Flip sign so "Good" is a valley (blue/purple)
+    extent=[-2, 2, -2, 2], origin="lower", aspect="auto", cmap="viridis"
 )
-axes[0].set_xlabel("u_1")
-axes[0].set_ylabel("u_2")
-axes[0].set_title("Information-Gathering Cost")
+axes[0].set_xlabel("u_0 (x)")
+axes[0].set_ylabel("u_0 (y)")
+axes[0].set_title("(-) Info Gain at t=2\n(Lower is Better)")
 plt.colorbar(im0, ax=axes[0])
 
 im1 = axes[1].imshow(
-    ekf_traces, extent=[-2, 2, -2, 2], origin="lower", aspect="auto", cmap="viridis"
+    ekf_traces, 
+    extent=[-2, 2, -2, 2], origin="lower", aspect="auto", cmap="viridis"
 )
-axes[1].set_xlabel("u_1")
-axes[1].set_ylabel("u_2")
-axes[1].set_title("Trace of EKF Covariance")
+axes[1].set_xlabel("u_0 (x)")
+axes[1].set_ylabel("u_0 (y)")
+axes[1].set_title("Trace of Covariance at t=2\n(Lower is Better)")
 plt.colorbar(im1, ax=axes[1])
 
 plt.tight_layout()
-plt.savefig("heatmaps.png", dpi=150)
-print("Saved heatmaps.png")
+plt.savefig("heatmaps_2step.png", dpi=150)
+print("Saved heatmaps_2step.png")
