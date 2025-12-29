@@ -67,7 +67,7 @@ proc_cov = jnp.zeros((dim_params_model, dim_params_model))
 meas_cov = jnp.eye(dim_state) * 0.1
 
 # Create a meshgrid for u_0
-n_grid = 50
+n_grid = 200
 u_range = jnp.linspace(-2.0, 2.0, n_grid)
 u1_grid, u2_grid = jnp.meshgrid(u_range, u_range)
 controls_t0 = jnp.stack([u1_grid.ravel(), u2_grid.ravel()], axis=-1)
@@ -98,6 +98,16 @@ def compute_2step_metrics(control_0):
     # This uses log(det(pred_cov)) internally
     info_cost_val = info_term_fn(state_1, control_t1, dyn_params, cov_1)
 
+    # --- MODIFICATION START ---
+    # Apply scaling from Eq (21): log_det(Sigma_next) = log_det(Sigma_prior) + 2 * info_cost
+    # We calculate the prior covariance (Sigma_t + Q)
+    prior_cov = cov_1 + proc_cov
+    _, logdet_prior = jnp.linalg.slogdet(prior_cov)
+
+    # Calculate the scaled metric (Predicted Log Det)
+    scaled_metric = logdet_prior - 2.0 * info_cost_val
+    # --- MODIFICATION END ---
+
     # 2. Calculate EKF Log-Determinant (The Truth)
     ekf_inp_1 = jnp.concatenate([state_1, control_t1])
     _, cov_2, _ = estimator.estimate(
@@ -105,41 +115,38 @@ def compute_2step_metrics(control_0):
     )
 
     # CHANGE: Replaced jnp.trace with slogdet
-    # We use slogdet for numerical stability.
-    # The sign should always be 1 for a valid Covariance matrix.
     _, logdet_val = jnp.linalg.slogdet(cov_2)
 
-    return info_cost_val, logdet_val
+    return scaled_metric, logdet_val
 
 
 # Vectorize and compute
 results = jax.vmap(compute_2step_metrics)(controls_t0)
-info_costs_flat, ekf_logdet_flat = results  # Renamed variable
+scaled_metrics_flat, ekf_logdet_flat = results
 
-info_costs = info_costs_flat.reshape(n_grid, n_grid)
-ekf_logdets = ekf_logdet_flat.reshape(n_grid, n_grid)  # Renamed variable
+scaled_metrics = scaled_metrics_flat.reshape(n_grid, n_grid)
+ekf_logdets = ekf_logdet_flat.reshape(n_grid, n_grid)
 
 # Plotting
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-# Plot 1: Negative Info Cost (Proxy)
-# High Gain = Low Cost. We plot negative so "valleys" are good.
+# Plot 1: Predicted Log-Det via Info Cost (Scaled)
+# We no longer negate it because we are plotting the LogDet directly
 im0 = axes[0].imshow(
-    -info_costs, extent=[-2, 2, -2, 2], origin="lower", aspect="auto", cmap="viridis"
+    scaled_metrics, extent=[-2, 2, -2, 2], origin="lower", aspect="auto", cmap="viridis"
 )
 axes[0].set_xlabel("u_0 (x)")
 axes[0].set_ylabel("u_0 (y)")
-axes[0].set_title("(-) Info Gain at t=2\n(Lower is Better)")
+axes[0].set_title("Predicted Log-Det (via Eq. 21)\n(Should match Truth)")
 plt.colorbar(im0, ax=axes[0])
 
 # Plot 2: Log Determinant of Covariance (Truth)
-# Low LogDet = Low Entropy = Low Uncertainty. "Valleys" are good.
 im1 = axes[1].imshow(
     ekf_logdets, extent=[-2, 2, -2, 2], origin="lower", aspect="auto", cmap="viridis"
 )
 axes[1].set_xlabel("u_0 (x)")
 axes[1].set_ylabel("u_0 (y)")
-axes[1].set_title("Log-Det of Covariance at t=2\n(Lower is Better)")
+axes[1].set_title("True EKF Log-Det at t=2\n(Ground Truth)")
 plt.colorbar(im1, ax=axes[1])
 
 plt.tight_layout()
