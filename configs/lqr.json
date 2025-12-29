@@ -1,7 +1,7 @@
 {
   "env_name": "pursuit_evasion_lqr",
   "num_agents": 1,
-  "total_steps": 100,
+  "total_steps": 250,
   "dim_state": 8,
   "dim_action": 2,
   "train_freq": 1,
@@ -10,7 +10,7 @@
   "normalize_freq": 1000000,
   "eval_freq": 1,
   "eval_traj_horizon": 100,
-  "buffer_size": 110,
+  "buffer_size": 510,
   "normalization": {
     "method": "static"
   },
@@ -23,7 +23,7 @@
   "env_params": {
     "num_agents": 1,
     "box_half_width": 10.0,
-    "max_episode_steps": 100,
+    "max_episode_steps": 500,
     "dt": 0.1,
     "pursuer_size": 0.075,
     "evader_size": 0.05,

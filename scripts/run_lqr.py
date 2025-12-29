@@ -20,6 +20,7 @@ import pickle
 import json
 
 
+# TODO: move this elsewhere
 def plot_lqr_trajectory(buffers, buffer_idx, config):
     """Plot evader and pursuer x-y positions from LQR buffer."""
     # Extract states (agent 0, valid timesteps only)
@@ -134,8 +135,7 @@ def main(config, save_dir):
     buffer_idx = 0
 
     print(
-        f"Starting online training for {config['total_steps']} steps "
-        f"with train_policy_freq = {config['train_policy_freq']}..."
+        f"Starting simulation for {config['total_steps']} steps "
     )
 
     initial_multi_step_loss = evaluator.compute_multi_step_loss(
@@ -177,7 +177,7 @@ def main(config, save_dir):
 
         actions, planner_state = planner.solve(planner_state, state, cost_params)
         action = actions[0][None, :]  # hacky add agent dim
-
+        
         # Step environment
         state, next_obs, rewards, terminated, truncated, info = step_fn(
             state, episode_length, action
