@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 from typing import Dict, Any
 from dataclasses import dataclass
-from max.dynamics import create_pursuit_evader_dynamics
+from max.dynamics import create_pursuit_evader_dynamics, create_unicycle_mpc_dynamics
 
 
 @dataclass(frozen=True)
@@ -440,9 +440,11 @@ def make_pursuit_evasion_lqr_env(params: EnvParams, true_q_diag, true_r_diag):
             minval=-params.box_half_width,
             maxval=params.box_half_width,
         )
-        agent_velocities = jnp.zeros((1, 4))
-        agent_states = jnp.concatenate([agent_positions, agent_velocities], axis=1)
-        return agent_states.flatten()
+        # FIX: State layout must be [evader_x, evader_y, evader_vx, evader_vy, pursuer_x, pursuer_y, pursuer_vx, pursuer_vy]
+        # Previous code incorrectly concatenated as [positions, velocities] instead of interleaving per agent.
+        evader_state = jnp.concatenate([agent_positions[0, 0:2], jnp.zeros(2)])
+        pursuer_state = jnp.concatenate([agent_positions[0, 2:4], jnp.zeros(2)])
+        return jnp.concatenate([evader_state, pursuer_state])
     
     @jax.jit
     def get_obs_fn(state: jnp.ndarray):
@@ -718,6 +720,101 @@ def make_blocker_goal_seeker_env(params: EnvParams):
     return reset_fn, step_fn, get_obs_fn
 
 
+def make_unicycle_mpc_env(params: EnvParams, true_theta1, true_theta2, dynamics_config):
+    """
+    Factory function that creates unicycle MPC environment.
+
+    Player 1 (evader): double integrator, controlled by the planner
+    Player 2 (opponent): unicycle with MPC, uses true_theta1/theta2
+
+    State: 8D [p1x, p1y, v1x, v1y, p2x, p2y, alpha2, v2]
+    Action: 2D [a1x, a1y] for evader's acceleration
+    """
+    dt = params.dt
+
+    # Create dynamics with TRUE parameters (for environment simulation)
+    config_for_dynamics = {
+        "dynamics_params": {
+            "dt": dt,
+            "newton_iters": dynamics_config.get("newton_iters", 10),
+            "init_theta1": true_theta1,
+            "init_theta2": true_theta2,
+            "weight_w": dynamics_config.get("weight_w", 0.1),
+            "weight_a": dynamics_config.get("weight_a", 1.0),
+            "weight_speed": dynamics_config.get("weight_speed", 0.0),
+            "target_speed": dynamics_config.get("target_speed", 1.0),
+        }
+    }
+
+    dynamics_model, _ = create_unicycle_mpc_dynamics(config_for_dynamics, None, None)
+
+    true_params = {
+        "model": {
+            "theta1": jnp.array(true_theta1),
+            "theta2": jnp.array(true_theta2),
+        },
+        "normalizer": None,
+    }
+
+    @jax.jit
+    def _step_dynamics(state: jnp.ndarray, evader_action: jnp.ndarray) -> jnp.ndarray:
+        return dynamics_model.pred_one_step(true_params, state, evader_action)
+
+    @jax.jit
+    def reset_fn(key: jax.random.PRNGKey):
+        """Reset environment with random initial positions."""
+        key1, key2, key3 = jax.random.split(key, 3)
+
+        # Evader (P1): random position, zero velocity
+        p1 = jax.random.uniform(
+            key1, shape=(2,),
+            minval=-0.5 * params.box_half_width,
+            maxval=0.5 * params.box_half_width,
+        )
+        v1 = jnp.zeros(2)
+
+        # Opponent (P2): random position, random heading, some initial speed
+        p2 = jax.random.uniform(
+            key2, shape=(2,),
+            minval=-0.5 * params.box_half_width,
+            maxval=0.5 * params.box_half_width,
+        )
+        alpha2 = jax.random.uniform(key3, minval=-jnp.pi, maxval=jnp.pi)
+        v2 = 0.5  # initial speed
+
+        # State: [p1x, p1y, v1x, v1y, p2x, p2y, alpha2, v2]
+        return jnp.array([p1[0], p1[1], v1[0], v1[1], p2[0], p2[1], alpha2, v2])
+
+    @jax.jit
+    def get_obs_fn(state: jnp.ndarray):
+        return state[None, :]
+
+    @jax.jit
+    def step_fn(state: jnp.ndarray, step_count: int, action: jnp.ndarray):
+        # Clip evader action
+        clipped_action = jnp.clip(action, -params.evader_max_accel, params.evader_max_accel)
+
+        next_state = _step_dynamics(state, clipped_action)
+
+        # Reward: evader wants to maximize distance
+        evader_pos = next_state[0:2]
+        opponent_pos = next_state[4:6]
+        dist_sq = jnp.sum((evader_pos - opponent_pos) ** 2)
+
+        evader_reward = dist_sq
+        rewards = jnp.array([evader_reward])
+
+        terminated = False
+        truncated = step_count >= params.max_episode_steps
+
+        observations = get_obs_fn(next_state)
+        info = {"distance": jnp.sqrt(dist_sq)}
+
+        return next_state, observations, rewards, terminated, truncated, info
+
+    return reset_fn, step_fn, get_obs_fn
+
+
 def init_env(config: Dict[str, Any]):
     """
     Initialize environment functions based on configuration.
@@ -729,6 +826,12 @@ def init_env(config: Dict[str, Any]):
     if env_name == "pursuit_evasion_lqr":
         true_q_diag = env_params_dict.pop("true_q_diag", None)
         true_r_diag = env_params_dict.pop("true_r_diag", None)
+
+    # Hacky fix for unicycle-specific params
+    if env_name == "unicycle_mpc":
+        true_theta1 = env_params_dict.pop("true_theta1", None)
+        true_theta2 = env_params_dict.pop("true_theta2", None)
+        dynamics_config = config.get("dynamics_params", {})
 
     params = EnvParams(**env_params_dict)
 
@@ -742,5 +845,7 @@ def init_env(config: Dict[str, Any]):
         return make_pursuit_evasion_lqr_env(params, true_q_diag, true_r_diag)
     elif env_name == "blocker_goal_seeker":
         return make_blocker_goal_seeker_env(params)
+    elif env_name == "unicycle_mpc":
+        return make_unicycle_mpc_env(params, true_theta1, true_theta2, dynamics_config)
     else:
         raise ValueError(f"Unknown environment name: '{env_name}'")

@@ -75,7 +75,8 @@ def make_info_gathering_term(
 
 
 def _stage_cost_info_gathering(
-    state, control, cost_params, weight_control, weight_info, info_term_fn
+    state, control, cost_params, weight_control, weight_info, info_term_fn,
+    weight_evader_speed=0.0, evader_target_speed=0.0
 ):
     """
     Private helper for info gathering stage cost.
@@ -83,10 +84,15 @@ def _stage_cost_info_gathering(
     """
     # Hardcoded indices for pursuit-evasion
     p_evader = state[0:2]
+    v_evader = state[2:4]
     p_pursuer = state[4:6]
 
     dist_sq = jnp.sum((p_evader - p_pursuer) ** 2)
     control_cost = weight_control * jnp.sum(control**2)
+
+    # Evader speed penalty (soft cap on speed)
+    evader_speed = jnp.sqrt(jnp.sum(v_evader**2))
+    speed_cost = weight_evader_speed * (evader_speed - evader_target_speed)**2
 
     # Exploration bonus (subtracted because planners minimize cost)
     # Passed params match the structure in run_lqr.py
@@ -94,7 +100,7 @@ def _stage_cost_info_gathering(
         state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
     )
 
-    return -dist_sq + control_cost + exploration_term
+    return -dist_sq + control_cost + speed_cost + exploration_term
 
 
 def _terminal_cost_pursuit_evasion(state):
@@ -105,6 +111,24 @@ def _terminal_cost_pursuit_evasion(state):
     p_pursuer = state[4:6]
     dist_sq = jnp.sum((p_evader - p_pursuer) ** 2)
     return -dist_sq
+
+
+def _stage_cost_evasion_only(state, control, weight_control,
+                             weight_evader_speed=0.0, evader_target_speed=0.0):
+    """
+    Stage cost for evasion with perfect information (no exploration term).
+    """
+    p_evader = state[0:2]
+    v_evader = state[2:4]
+    p_pursuer = state[4:6]
+    dist_sq = jnp.sum((p_evader - p_pursuer) ** 2)
+    control_cost = weight_control * jnp.sum(control**2)
+
+    # Evader speed penalty (soft cap on speed)
+    evader_speed = jnp.sqrt(jnp.sum(v_evader**2))
+    speed_cost = weight_evader_speed * (evader_speed - evader_target_speed)**2
+
+    return -dist_sq + control_cost + speed_cost
 
 
 def _rollout(init_state, controls, cost_params, pred_fn):
@@ -147,6 +171,8 @@ def init_cost(config, dynamics_model):
         weight_jerk = params["weight_jerk"]
         weight_control = params["weight_control"]
         weight_info = params["weight_info"]
+        weight_evader_speed = params.get("weight_evader_speed", 0.0)
+        evader_target_speed = params.get("evader_target_speed", 0.0)
         meas_noise_diag = jnp.array(params["meas_noise_diag"])
 
         # Create the info term calculator (JIT-able helper)
@@ -157,7 +183,8 @@ def init_cost(config, dynamics_model):
         # Vectorize stage cost over the horizon
         stage_cost_vmap = jax.vmap(
             lambda s, u, cp: _stage_cost_info_gathering(
-                s, u, cp, weight_control, weight_info, info_term_fn
+                s, u, cp, weight_control, weight_info, info_term_fn,
+                weight_evader_speed, evader_target_speed
             ),
             in_axes=(0, 0, None),
         )
@@ -189,5 +216,47 @@ def init_cost(config, dynamics_model):
             return jnp.sum(stage_costs) + terminal + jerk
 
         return cost_fn
+
+    elif cost_type == "evasion_only":
+        # Extract params
+        params = config["cost_fn_params"]
+        weight_jerk = params.get("weight_jerk", 0.0)
+        weight_control = params["weight_control"]
+        weight_evader_speed = params.get("weight_evader_speed", 0.0)
+        evader_target_speed = params.get("evader_target_speed", 0.0)
+
+        # Vectorize stage cost over the horizon
+        stage_cost_vmap = jax.vmap(
+            lambda s, u: _stage_cost_evasion_only(s, u, weight_control,
+                                                   weight_evader_speed, evader_target_speed),
+            in_axes=(0, 0),
+        )
+
+        @jax.jit
+        def cost_fn(init_state, controls, cost_params):
+            """
+            Calculates total trajectory cost for pure evasion (no info gathering).
+            """
+            # 1. Rollout trajectory
+            states = _rollout(
+                init_state, controls, cost_params, dynamics_model.pred_one_step
+            )
+
+            # 2. Calculate stage costs (on states 0 to T-1)
+            stage_costs = stage_cost_vmap(states[:-1], controls)
+
+            # 3. Calculate terminal cost (on state T)
+            terminal = _terminal_cost_pursuit_evasion(states[-1])
+
+            # 4. Calculate Jerk Cost (on controls)
+            jerk = 0.0
+            if weight_jerk > 0:
+                control_diffs = jnp.diff(controls, axis=0)
+                jerk = weight_jerk * jnp.sum(control_diffs**2)
+
+            return jnp.sum(stage_costs) + terminal + jerk
+
+        return cost_fn
+
     else:
         raise ValueError(f"Unknown cost type: '{cost_type}'")
