@@ -20,6 +20,8 @@ Reduced MPC problem:
 
 Optimality condition:
     g(u, theta) = ∇_u J(u, theta) = 0
+    d^2 J / d^2 u * du / dtheta + d^2 J / du dtheta = 0
+    du / dtheta = - (d^2 J / d^2 u)^{-1} (d^2 J / du dtheta)
 
 IFT sensitivity:
     du*/dtheta = - (∂g/∂u)^{-1} (∂g/∂theta)
@@ -134,9 +136,9 @@ def cost_T(x0, u_seq, dt, theta1, theta2, p_target,
         track = theta1 * torch.sum((ps[-1] - p_target) ** 2)
     else:
         track = theta1 * torch.sum((ps[1:] - p_target) ** 2)
-
-    reg = u_weight * torch.sum(u_seq ** 2)
-    return track + reg
+    # theta 1, pursuit cost; theta 2, 
+    reg = 0.1 * torch.sum(u_seq[:,0]**2) + 1.0 * torch.sum(u_seq[:,1]**2) #u_weight * torch.sum(u_seq ** 2)
+    return track + reg + 5.0*torch.sum((xs[-1, 2] - 3.0)**2)
 
 
 # ============================================================
@@ -274,6 +276,9 @@ def implicit_du_dtheta_T(x0, dt, theta, p_target, u_star,
     # Solve linear system from IFT
     du_dtheta = torch.linalg.solve(H, -Gtheta)
     return du_dtheta.detach()
+
+
+# 
 
 
 # ============================================================
