@@ -364,6 +364,47 @@ def create_pursuit_evader_dynamics(
     return model, params
 
 
+def create_linear_dynamics(
+    config: dict,
+    normalizer: Normalizer,
+    normalizer_params: Optional[jnp.ndarray] = None,
+) -> tuple[NamedTuple, dict]:
+    """
+    Creates dynamics for a single-agent linear system with learnable A and B matrices.
+
+    - State: A 4D vector [px, py, vx, vy].
+    - Action: A 2D vector [ax, ay] for acceleration.
+    - Trainable Params:
+        - `A`: State transition matrix (4x4).
+        - `B`: Control matrix (4x2).
+
+    Dynamics: x_{t+1} = A @ x_t + B @ u_t
+    """
+
+    @jax.jit
+    def pred_one_step(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts the next state using linear dynamics: x_{t+1} = A @ x + B @ u"""
+        A = params["model"]["A"]
+        B = params["model"]["B"]
+        u = action.squeeze()  # Ensure action is (2,)
+        return A @ state + B @ u
+
+    # Initialize learnable parameters from config
+    init_A = jnp.array(config["dynamics_params"]["init_A"])  # (4, 4)
+    init_B = jnp.array(config["dynamics_params"]["init_B"])  # (4, 2)
+
+    model_params = {
+        "A": init_A,
+        "B": init_B,
+    }
+    params = {"model": model_params, "normalizer": None}
+    model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=None)
+
+    return model, params
+
+
 def init_dynamics(
     key: jax.Array,
     config: Any,
@@ -397,6 +438,11 @@ def init_dynamics(
 
     elif dynamics_type == "pursuit_evader":
         return create_pursuit_evader_dynamics(
+            config, normalizer, normalizer_params
+        )
+
+    elif dynamics_type == "linear":
+        return create_linear_dynamics(
             config, normalizer, normalizer_params
         )
 

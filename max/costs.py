@@ -124,6 +124,43 @@ def _rollout(init_state, controls, cost_params, pred_fn):
     return jnp.concatenate([init_state[jnp.newaxis, :], states], axis=0)
 
 
+def _stage_cost_linear_tracking(
+    state, control, cost_params, target_point, weight_control, weight_info, info_term_fn
+):
+    """
+    Stage cost for linear tracking: tracking error + control penalty - info bonus.
+
+    Args:
+        state: Current state (4,)
+        control: Current action (2,)
+        cost_params: Dict with 'dyn_params' and 'params_cov_model'
+        target_point: Target state (4,)
+        weight_control: Control penalty weight
+        weight_info: Information gathering weight
+        info_term_fn: Information term function
+
+    Returns:
+        Stage cost scalar
+    """
+    # Tracking error (squared distance to target)
+    tracking_error = jnp.sum((state - target_point) ** 2)
+
+    # Control penalty
+    control_cost = weight_control * jnp.sum(control ** 2)
+
+    # Information bonus (subtracted because planners minimize cost)
+    exploration_term = -weight_info * info_term_fn(
+        state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
+    )
+
+    return tracking_error + control_cost + exploration_term
+
+
+def _terminal_cost_linear_tracking(state, target_point):
+    """Terminal cost: squared distance to target."""
+    return jnp.sum((state - target_point) ** 2)
+
+
 # --- Main factory function ---
 
 
@@ -189,5 +226,54 @@ def init_cost(config, dynamics_model):
             return jnp.sum(stage_costs) + terminal + jerk
 
         return cost_fn
+
+    elif cost_type == "linear_tracking_info":
+        # Extract params
+        params = config["cost_fn_params"]
+        weight_jerk = params["weight_jerk"]
+        weight_control = params["weight_control"]
+        weight_info = params["weight_info"]
+        target_point = jnp.array(params["target_point"])
+        meas_noise_diag = jnp.array(params["meas_noise_diag"])
+
+        # Create the info term calculator (JIT-able helper)
+        info_term_fn = make_info_gathering_term(
+            dynamics_model.pred_one_step, meas_noise_diag
+        )
+
+        # Vectorize stage cost over the horizon
+        stage_cost_vmap = jax.vmap(
+            lambda s, u, cp: _stage_cost_linear_tracking(
+                s, u, cp, target_point, weight_control, weight_info, info_term_fn
+            ),
+            in_axes=(0, 0, None),
+        )
+
+        @jax.jit
+        def cost_fn(init_state, controls, cost_params):
+            """
+            Calculates total trajectory cost for linear tracking.
+            """
+            # 1. Rollout trajectory
+            states = _rollout(
+                init_state, controls, cost_params, dynamics_model.pred_one_step
+            )
+
+            # 2. Calculate stage costs (on states 0 to T-1)
+            stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
+
+            # 3. Calculate terminal cost (on state T)
+            terminal = _terminal_cost_linear_tracking(states[-1], target_point)
+
+            # 4. Calculate Jerk Cost (on controls)
+            jerk = 0.0
+            if weight_jerk > 0:
+                control_diffs = jnp.diff(controls, axis=0)
+                jerk = weight_jerk * jnp.sum(control_diffs**2)
+
+            return jnp.sum(stage_costs) + terminal + jerk
+
+        return cost_fn
+
     else:
         raise ValueError(f"Unknown cost type: '{cost_type}'")

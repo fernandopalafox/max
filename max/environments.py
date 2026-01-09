@@ -718,6 +718,84 @@ def make_blocker_goal_seeker_env(params: EnvParams):
     return reset_fn, step_fn, get_obs_fn
 
 
+def make_linear_tracking_env(params: EnvParams, true_A, true_B, target_point):
+    """
+    Factory function that creates a single-agent linear tracking environment.
+
+    - State: A 4D vector [px, py, vx, vy].
+    - Action: A 2D vector [ax, ay] for acceleration.
+    - Dynamics: x_{t+1} = A @ x_t + B @ u_t (using ground truth A and B).
+    - Reward: Negative squared distance to target point.
+
+    Args:
+        params: EnvParams dataclass with common environment parameters.
+        true_A: Ground truth state transition matrix (4x4).
+        true_B: Ground truth control matrix (4x2).
+        target_point: Fixed target state [px, py, vx, vy] (4,).
+
+    Returns:
+        Tuple of (reset_fn, step_fn, get_obs_fn).
+    """
+    true_A = jnp.array(true_A)
+    true_B = jnp.array(true_B)
+    target_point = jnp.array(target_point)
+
+    @jax.jit
+    def _step_dynamics(state: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
+        """Linear dynamics: x_{t+1} = A @ x_t + B @ u_t"""
+        return true_A @ state + true_B @ action
+
+    @jax.jit
+    def reset_fn(key: jax.random.PRNGKey):
+        """Reset to random position with zero velocity."""
+        pos = jax.random.uniform(
+            key,
+            shape=(2,),
+            minval=-params.box_half_width,
+            maxval=params.box_half_width,
+            dtype=jnp.float32,
+        )
+        vel = jnp.zeros(2, dtype=jnp.float32)
+        return jnp.concatenate([pos, vel])
+
+    @jax.jit
+    def get_obs_fn(state: jnp.ndarray):
+        """Returns state with agent dimension."""
+        return state[None, :]  # Shape: (1, 4)
+
+    @jax.jit
+    def step_fn(state: jnp.ndarray, step_count: int, action: jnp.ndarray):
+        """Steps the environment forward."""
+        # Clip action to max acceleration
+        clipped_action = jnp.clip(action.squeeze(), -params.max_accel, params.max_accel)
+
+        # Step dynamics
+        next_state = _step_dynamics(state, clipped_action)
+
+        # Compute reward: negative squared distance to target
+        dist_sq = jnp.sum((next_state - target_point) ** 2)
+        reward = -dist_sq
+        rewards = jnp.array([reward])
+
+        # Check out-of-bounds
+        pos = next_state[:2]
+        is_oob = jnp.any(jnp.abs(pos) > params.box_half_width)
+        terminated = is_oob
+
+        # Check truncation
+        truncated = step_count >= params.max_episode_steps
+
+        observations = get_obs_fn(next_state)
+        info = {
+            "reward": reward,
+            "dist_to_target": jnp.sqrt(dist_sq),
+        }
+
+        return next_state, observations, rewards, terminated, truncated, info
+
+    return reset_fn, step_fn, get_obs_fn
+
+
 def init_env(config: Dict[str, Any]):
     """
     Initialize environment functions based on configuration.
@@ -729,6 +807,12 @@ def init_env(config: Dict[str, Any]):
     if env_name == "pursuit_evasion_lqr":
         true_q_diag = env_params_dict.pop("true_q_diag", None)
         true_r_diag = env_params_dict.pop("true_r_diag", None)
+
+    # Hacky fix for linear_tracking-specific params
+    if env_name == "linear_tracking":
+        true_A = env_params_dict.pop("true_A", None)
+        true_B = env_params_dict.pop("true_B", None)
+        target_point = env_params_dict.pop("target_point", None)
 
     params = EnvParams(**env_params_dict)
 
@@ -742,5 +826,7 @@ def init_env(config: Dict[str, Any]):
         return make_pursuit_evasion_lqr_env(params, true_q_diag, true_r_diag)
     elif env_name == "blocker_goal_seeker":
         return make_blocker_goal_seeker_env(params)
+    elif env_name == "linear_tracking":
+        return make_linear_tracking_env(params, true_A, true_B, target_point)
     else:
         raise ValueError(f"Unknown environment name: '{env_name}'")

@@ -1,0 +1,100 @@
+{
+  "env_name": "linear_tracking",
+  "num_agents": 1,
+  "total_steps": 500,
+  "dim_state": 4,
+  "dim_action": 2,
+  "train_freq": 1,
+  "train_model_freq": 1,
+  "train_policy_freq": 1,
+  "normalize_freq": 1000000,
+  "eval_freq": 10,
+  "eval_traj_horizon": 50,
+  "buffer_size": 1000,
+
+  "normalization": {
+    "method": "static"
+  },
+
+  "dynamics": "linear",
+  "dynamics_params": {
+    "init_A": [
+      [1.0, 1.0, 1.0, 1.0],
+      [1.0, 1.0, 1.0, 1.0],
+      [1.0, 1.0, 1.0, 1.0],
+      [1.0, 1.0, 1.0, 1.0]
+    ],
+    "init_B": [
+      [1.0, 1.0],
+      [1.0, 1.0],
+      [1.0, 1.0],
+      [1.0, 1.0]
+    ]
+  },
+
+  "env_params": {
+    "num_agents": 1,
+    "box_half_width": 10.0,
+    "max_episode_steps": 200,
+    "dt": 0.1,
+    "max_accel": 2.0,
+    "true_A": [
+      [1.0, 0.0, 0.1, 0.0],
+      [0.0, 1.0, 0.0, 0.1],
+      [0.0, 0.0, 0.95, 0.0],
+      [0.0, 0.0, 0.0, 0.95]
+    ],
+    "true_B": [
+      [0.005, 0.0],
+      [0.0, 0.005],
+      [0.1, 0.0],
+      [0.0, 0.1]
+    ],
+    "target_point": [5.0, 5.0, 0.0, 0.0]
+  },
+
+  "trainer": "ekf",
+  "trainer_params": {
+    "learning_rate": 10.0,
+    "weight_decay": 1.0,
+    "proc_noise_init": 0.001,
+    "proc_noise_decay": 0.999,
+    "proc_noise_floor": 0.0001,
+    "init_cov_scale": 1.0,
+    "jitter": 1e-6
+  },
+
+  "normalization_params": {
+    "state": {
+      "min": [-10.0, -10.0, -5.0, -5.0],
+      "max": [10.0, 10.0, 5.0, 5.0]
+    },
+    "action": {
+      "min": [-2.0, -2.0],
+      "max": [2.0, 2.0]
+    }
+  },
+
+  "state_labels": ["pos_x", "pos_y", "vel_x", "vel_y"],
+
+  "cost_type": "linear_tracking_info",
+  "planner_type": "icem",
+  "planner_params": {
+    "horizon": 15,
+    "batch_size": 300,
+    "max_iter": 5,
+    "elit_frac": 0.1,
+    "learning_rate": 0.9,
+    "dim_control": 2,
+    "action_low": [-2.0, -2.0],
+    "action_high": [2.0, 2.0]
+  },
+
+  "cost_fn_params": {
+    "weight_jerk": 0.01,
+    "weight_control": 1.0,
+    "weight_info": 100.0,
+    "target_point": [5.0, 5.0, 0.0, 0.0],
+    "meas_noise_diag": [0.01, 0.01, 0.01, 0.01]
+  }
+}
