@@ -27,7 +27,7 @@ def plot_linear_trajectory(buffers, buffer_idx, config):
 
     # Extract positions
     pos_x, pos_y = states[:, 0], states[:, 1]
-    target = config["env_params"]["target_point"]
+    target = config["cost_fn_params"]["target_point"]
 
     # Create plot
     fig, ax = plt.subplots(figsize=(8, 8))
