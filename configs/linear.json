@@ -1,7 +1,7 @@
 {
   "env_name": "linear_tracking",
   "num_agents": 1,
-  "total_steps": 500,
+  "total_steps": 400,
   "dim_state": 4,
   "dim_action": 2,
   "train_freq": 1,
@@ -19,23 +19,23 @@
   "dynamics": "linear",
   "dynamics_params": {
     "init_A": [
-      [1.0, 1.0, 1.0, 1.0],
-      [1.0, 1.0, 1.0, 1.0],
-      [1.0, 1.0, 1.0, 1.0],
-      [1.0, 1.0, 1.0, 1.0]
-    ],
+      [1.0, 0.0, 0.09, 0.0],
+      [0.0, 1.0, 0.0, 0.09],
+      [0.0, 0.0, 0.88, 0.0],
+      [0.0, 0.0, 0.0, 0.88]
+    ], 
     "init_B": [
-      [1.0, 1.0],
-      [1.0, 1.0],
-      [1.0, 1.0],
-      [1.0, 1.0]
+      [0.006, 0.0],
+      [0.0, 0.006],
+      [0.12, 0.0],
+      [0.0, 0.12]
     ]
   },
 
   "env_params": {
     "num_agents": 1,
     "box_half_width": 10.0,
-    "max_episode_steps": 200,
+    "max_episode_steps": 500,
     "dt": 0.1,
     "max_accel": 2.0,
     "true_A": [
@@ -61,7 +61,7 @@
     "proc_noise_decay": 0.999,
     "proc_noise_floor": 0.0001,
     "init_cov_scale": 1.0,
-    "jitter": 1e-6
+    "jitter": 0.0
   },
 
   "normalization_params": {
@@ -92,8 +92,8 @@
 
   "cost_fn_params": {
     "weight_jerk": 0.01,
-    "weight_control": 1.0,
-    "weight_info": 100.0,
+    "weight_control": 25.0,
+    "weight_info": 10.0,
     "target_point": [5.0, 5.0, 0.0, 0.0],
     "meas_noise_diag": [0.01, 0.01, 0.01, 0.01]
   }
