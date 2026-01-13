@@ -13,6 +13,7 @@ from max.buffers import init_jax_buffers, update_buffer_dynamic
 from max.environments import init_env
 from max.dynamics import init_dynamics
 from max.dynamics_trainers import init_trainer
+from max.dynamics_evaluators import DynamicsEvaluator
 from max.planners import init_planner
 from max.costs import init_cost
 import argparse
@@ -170,6 +171,48 @@ def run_with_lambda(config, key, initial_state, weight_info, case_name):
     current_params = train_state.params
     current_cov = train_state.covariance
 
+    # Initialize dynamics evaluator
+    evaluator = DynamicsEvaluator(dynamics_model.pred_one_step)
+
+    # Create evaluation trajectory with random actions
+    eval_horizon = config.get("eval_traj_horizon", 50)
+    key, action_key = jax.random.split(key)
+    eval_actions = jax.random.uniform(
+        action_key,
+        shape=(eval_horizon, config["dim_action"]),
+        minval=jnp.array(config["normalization_params"]["action"]["min"]),
+        maxval=jnp.array(config["normalization_params"]["action"]["max"]),
+    )
+
+    # Roll out eval trajectory using true dynamics
+    key, eval_reset_key = jax.random.split(key)
+    eval_state = initial_state
+    eval_trajectory = [eval_state]
+    for eval_action in eval_actions:
+        eval_next_state, _, _, _, _, _ = step_fn(eval_state, 0, eval_action[None, :])
+        eval_trajectory.append(eval_next_state)
+        eval_state = eval_next_state
+
+    eval_trajectory_data = {
+        "trajectory": jnp.array(eval_trajectory),
+        "actions": eval_actions,
+    }
+
+    # Log initial eval metrics
+    initial_multi_step_loss = evaluator.compute_multi_step_loss(
+        train_state.params, eval_trajectory_data
+    )
+    initial_one_step_loss = evaluator.compute_one_step_loss(
+        train_state.params, eval_trajectory_data
+    )
+    wandb.log(
+        {
+            "eval/multi_step_loss": initial_multi_step_loss,
+            "eval/one_step_loss": initial_one_step_loss,
+        },
+        step=0,
+    )
+
     # Initialize cost function
     cost_fn = init_cost(config, dynamics_model)
 
@@ -254,6 +297,23 @@ def run_with_lambda(config, key, initial_state, weight_info, case_name):
             train_state, loss = trainer.train(train_state, train_data, step=step)
             current_params = train_state.params
             current_cov = train_state.covariance
+
+            # Evaluate dynamics model periodically
+            eval_freq = config.get("eval_freq", config["train_model_freq"])
+            if step % eval_freq == 0:
+                multi_step_loss = evaluator.compute_multi_step_loss(
+                    train_state.params, eval_trajectory_data
+                )
+                one_step_loss = evaluator.compute_one_step_loss(
+                    train_state.params, eval_trajectory_data
+                )
+                wandb.log(
+                    {
+                        "eval/multi_step_loss": float(multi_step_loss),
+                        "eval/one_step_loss": float(one_step_loss),
+                    },
+                    step=step,
+                )
 
         # Handle buffer overflow
         if buffer_idx >= config["buffer_size"]:
