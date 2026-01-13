@@ -2,6 +2,9 @@
 # Runs experiments with wandb logging, sweeping over lambda (weight_info) values
 # Produces plots for: covariance trace, parameter estimation error
 
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend, avoids tkinter threading issues
+
 import jax
 import jax.numpy as jnp
 import numpy as np
