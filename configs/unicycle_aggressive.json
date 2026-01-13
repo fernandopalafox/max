@@ -19,7 +19,7 @@
     "dt": 0.1,
     "newton_iters": 10,
     "init_theta1": 1.0,
-    "init_theta2": 1.0,
+    "init_theta2": 0.5,
     "weight_w": 0.1,
     "weight_a": 1.0,
     "weight_speed": 5.0,
