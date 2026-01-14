@@ -354,8 +354,37 @@ def main(config, args):
     key, reset_key = jax.random.split(key)
     initial_state = reset_fn(reset_key)
 
+    # Apply manual overrides if provided
+    if args.evader_pos:
+        ex, ey = [float(x) for x in args.evader_pos.split(",")]
+        initial_state = initial_state.at[0].set(ex)
+        initial_state = initial_state.at[1].set(ey)
+    if args.pursuer_pos:
+        px, py = [float(x) for x in args.pursuer_pos.split(",")]
+        initial_state = initial_state.at[4].set(px)
+        initial_state = initial_state.at[5].set(py)
+    if args.pursuer_heading is not None:
+        initial_state = initial_state.at[6].set(args.pursuer_heading)
+
+    # Compute initial distance
+    evader_pos = initial_state[0:2]
+    pursuer_pos = initial_state[4:6]
+    initial_distance = float(jnp.linalg.norm(evader_pos - pursuer_pos))
+
     print(f"Initial state: evader=({initial_state[0]:.2f}, {initial_state[1]:.2f}), "
-          f"pursuer=({initial_state[4]:.2f}, {initial_state[5]:.2f})")
+          f"pursuer=({initial_state[4]:.2f}, {initial_state[5]:.2f}), "
+          f"heading={initial_state[6]:.2f}, dist={initial_distance:.2f}")
+
+    # Build initial state config for wandb logging
+    initial_state_config = {
+        "initial/evader_x": float(initial_state[0]),
+        "initial/evader_y": float(initial_state[1]),
+        "initial/pursuer_x": float(initial_state[4]),
+        "initial/pursuer_y": float(initial_state[5]),
+        "initial/pursuer_heading": float(initial_state[6]),
+        "initial/pursuer_speed": float(initial_state[7]),
+        "initial/distance": initial_distance,
+    }
 
     # Use the same run_key for all cases
     key, run_key = jax.random.split(key)
@@ -368,7 +397,7 @@ def main(config, args):
 
         wandb.init(
             project=args.project,
-            config={**config, "λ": "random"},
+            config={**config, "λ": "random", **initial_state_config},
             group=args.group or "λ_sweep",
             name=run_name,
             reinit=True,
@@ -394,7 +423,7 @@ def main(config, args):
 
         wandb.init(
             project=args.project,
-            config={**config, "λ": weight_info},
+            config={**config, "λ": weight_info, **initial_state_config},
             group=args.group or "λ_sweep",
             name=run_name,
             reinit=True,
@@ -424,6 +453,12 @@ if __name__ == "__main__":
                         help="Comma-separated list of lambda values (e.g., '0,1,10,50')")
     parser.add_argument("--include-random", action="store_true",
                         help="Include random baseline (no planning)")
+    parser.add_argument("--evader-pos", type=str, default=None,
+                        help="Manual evader starting position: 'x,y' (e.g., '2.0,-3.0')")
+    parser.add_argument("--pursuer-pos", type=str, default=None,
+                        help="Manual pursuer starting position: 'x,y' (e.g., '-1.0,4.0')")
+    parser.add_argument("--pursuer-heading", type=float, default=None,
+                        help="Manual pursuer starting heading in radians (e.g., 1.57 for 90 deg)")
     args = parser.parse_args()
 
     # Load config
