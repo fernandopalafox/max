@@ -21,6 +21,8 @@ class PlannerState(struct.PyTreeNode):
     key: jax.Array
     mean: Array | None = None  # For CEM, iCEM
     elites: Array | None = None  # For iCEM
+    iter_costs: Array | None = None  # For convergence tracking
+    final_cost: Array | None = None  # Final best cost
 
 
 class Planner(NamedTuple):
@@ -341,6 +343,10 @@ def _icem_solve_internal(
         new_mean = (1 - learning_rate) * mean + learning_rate * elite_mean
         new_var = (1 - learning_rate) * var + learning_rate * elite_var
 
+        # Track iteration info: best_cost, mean_elite_cost, variance
+        mean_elite_cost = jnp.mean(costs[elite_indices])
+        mean_var = jnp.mean(new_var)
+
         return (
             new_mean,
             new_var,
@@ -348,7 +354,7 @@ def _icem_solve_internal(
             best_seq,
             best_cost,
             new_iter_elites,
-        ), None
+        ), {"best_cost": best_cost, "mean_elite_cost": mean_elite_cost, "mean_var": mean_var}
 
     init_carry = (
         state.mean,
@@ -358,15 +364,21 @@ def _icem_solve_internal(
         jnp.inf,
         jnp.zeros((num_elites, unrolled_dim)),
     )
-    final_carry, _ = jax.lax.scan(
+    final_carry, iter_info = jax.lax.scan(
         icem_iteration, init_carry, jnp.arange(max_iter)
     )
 
-    final_mean, _, final_key, final_best_seq, _, final_elites = final_carry
+    final_mean, _, final_key, final_best_seq, final_best_cost, final_elites = final_carry
     new_state = state.replace(
         mean=final_mean, elites=final_elites, key=final_key
     )
     best_controls = final_best_seq.reshape(horizon, dim_control)
+
+    # Attach convergence info to state for logging
+    new_state = new_state.replace(
+        iter_costs=iter_info["best_cost"],
+        final_cost=final_best_cost,
+    )
 
     return best_controls, new_state
 

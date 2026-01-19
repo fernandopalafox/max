@@ -363,7 +363,7 @@ def create_pursuit_evader_dynamics(
 
     return model, params
 
-
+# the following part is important!!!
 def create_unicycle_mpc_dynamics(
     config: dict,
     normalizer: Normalizer,
@@ -393,6 +393,10 @@ def create_unicycle_mpc_dynamics(
     weight_speed = config["dynamics_params"].get("weight_speed", 0.0)  # speed deviation penalty
     target_speed = config["dynamics_params"].get("target_speed", 1.0)  # desired cruising speed
     theta2_role = config["dynamics_params"].get("theta2_role", "accel_scaling")
+    mpc_horizon = config["dynamics_params"].get("mpc_horizon", 2)  # MPC horizon T
+    n_u = 2  # control dimension [w, a]
+
+    print(f"  -> Pursuer MPC horizon: {mpc_horizon}")
 
     # --- Unicycle helpers ---
     def unicycle_step(x2, u2, theta2):
@@ -415,39 +419,54 @@ def create_unicycle_mpc_dynamics(
 
         return jnp.array([p2x_next, p2y_next, alpha2_next, v2_next])
 
-    def rollout_2step(x2_0, u0, theta2):
-        """Rollout 2 steps. u1=0 since it doesn't affect terminal position."""
-        x2_1 = unicycle_step(x2_0, u0, theta2)
-        x2_2 = unicycle_step(x2_1, jnp.zeros(2), theta2)
-        return x2_2
+    def rollout_T(x2_0, u_seq, theta2):
+        """
+        Rollout T steps with control sequence.
+        u_seq: shape (T, 2) or flattened (T*2,)
+        Returns final state x2_T.
+        """
+        u_seq_2d = u_seq.reshape(mpc_horizon, n_u)
 
-    def mpc_cost(u0, x2_0, target_pos, theta1, theta2):
+        def step_fn(x2, u2):
+            x2_next = unicycle_step(x2, u2, theta2)
+            return x2_next, x2_next
+
+        x2_final, _ = jax.lax.scan(step_fn, x2_0, u_seq_2d)
+        return x2_final
+
+    def mpc_cost(u_flat, x2_0, target_pos, theta1, theta2):
         """
-        Opponent's MPC cost: track player 1's position + control penalties + speed penalty.
+        T-horizon MPC cost: terminal position tracking + control penalties.
+        u_flat: flattened control sequence, shape (T*2,)
         """
-        x2_2 = rollout_2step(x2_0, u0, theta2)
-        pos_err = x2_2[0:2] - target_pos
-        v2_final = x2_2[3]  # final speed
-        w, a = u0
-        # theta2 affects turn penalty if theta2_role is "turn_penalty"
+        u_seq = u_flat.reshape(mpc_horizon, n_u)
+        x2_T = rollout_T(x2_0, u_seq, theta2)
+
+        # Terminal position error
+        pos_err = x2_T[0:2] - target_pos
+        terminal_cost = theta1 * jnp.sum(pos_err**2)
+
+        # Control costs summed over horizon
         if theta2_role == "turn_penalty":
-            # Use exp(theta2) to ensure turn penalty is always positive
-            turn_cost = jnp.exp(theta2) * w**2
+            turn_cost = jnp.exp(theta2) * jnp.sum(u_seq[:, 0]**2)
         else:
-            turn_cost = weight_w * w**2
-        # Position tracking + control costs + speed regulation
-        return (theta1 * jnp.sum(pos_err**2)
-                + turn_cost
-                + weight_a * a**2
-                + weight_speed * (v2_final - target_speed)**2)
+            turn_cost = weight_w * jnp.sum(u_seq[:, 0]**2)
+        accel_cost = weight_a * jnp.sum(u_seq[:, 1]**2)
 
-    def kkt_residual(u0, x2_0, target_pos, theta1, theta2):
+        # Speed regulation at terminal state
+        v2_final = x2_T[3]
+        speed_cost = weight_speed * (v2_final - target_speed)**2
+
+        return terminal_cost + turn_cost + accel_cost + speed_cost
+
+    def kkt_residual(u_flat, x2_0, target_pos, theta1, theta2):
         """Stationarity condition: ∇_u cost = 0"""
-        return jax.grad(mpc_cost, argnums=0)(u0, x2_0, target_pos, theta1, theta2)
+        return jax.grad(mpc_cost, argnums=0)(u_flat, x2_0, target_pos, theta1, theta2)
 
-    # --- Newton solver ---
+    # --- Newton solver for T-horizon ---
     def newton_solve(x2_0, target_pos, theta1, theta2):
-        """Solve for optimal u0 via Newton's method."""
+        """Solve for optimal u sequence via Newton's method."""
+        u_dim = mpc_horizon * n_u
 
         def newton_step(u, _):
             r = kkt_residual(u, x2_0, target_pos, theta1, theta2)
@@ -455,11 +474,11 @@ def create_unicycle_mpc_dynamics(
                 u, x2_0, target_pos, theta1, theta2
             )
             # Damped Newton with regularization for stability
-            J_reg = J + 1e-6 * jnp.eye(2)
+            J_reg = J + 1e-6 * jnp.eye(u_dim)
             du = jnp.linalg.solve(J_reg, r)
             return u - du, None
 
-        u_init = jnp.zeros(2)
+        u_init = jnp.zeros(u_dim)
         u_star, _ = jax.lax.scan(newton_step, u_init, None, length=newton_iters)
         return u_star
 
@@ -467,7 +486,7 @@ def create_unicycle_mpc_dynamics(
     @jax.custom_vjp
     def solve_mpc(x2_0, target_pos, theta):
         """
-        Solve opponent's MPC. Returns optimal control u*.
+        Solve opponent's T-horizon MPC. Returns optimal control sequence u*.
         Differentiable w.r.t. theta via implicit differentiation.
         """
         theta1, theta2 = theta
@@ -480,6 +499,7 @@ def create_unicycle_mpc_dynamics(
     def solve_mpc_bwd(res, g):
         u_star, x2_0, target_pos, theta = res
         theta1, theta2 = theta
+        u_dim = mpc_horizon * n_u
 
         # Jacobians of KKT residual at solution
         dF_du = jax.jacobian(kkt_residual, argnums=0)(
@@ -493,7 +513,7 @@ def create_unicycle_mpc_dynamics(
         dF_dtheta = jax.jacobian(kkt_theta)(theta)
 
         # Solve [∂F/∂u]^T v = g
-        dF_du_reg = dF_du + 1e-6 * jnp.eye(2)
+        dF_du_reg = dF_du + 1e-6 * jnp.eye(u_dim)
         v = jnp.linalg.solve(dF_du_reg.T, g)
 
         # ∂L/∂theta = -v^T @ ∂F/∂theta
@@ -536,16 +556,15 @@ def create_unicycle_mpc_dynamics(
         # Player 2's target: player 1's current position
         target_pos = p1
 
-        # Solve MPC for player 2's control
-        u2_star = solve_mpc(x2_0, target_pos, theta)
+        # Solve MPC for player 2's control (returns flattened T*2 sequence)
+        u_seq_flat = solve_mpc(x2_0, target_pos, theta)
 
-        # Clamp MPC output to prevent blowup from Newton solver divergence
-        max_angular_vel = 10.0  # rad/s
-        max_accel = 20.0  # m/s^2
-        u2_star = jnp.array([
-            jnp.clip(u2_star[0], -max_angular_vel, max_angular_vel),
-            jnp.clip(u2_star[1], -max_accel, max_accel)
-        ])
+        # Extract first control action (receding horizon: only apply u0)
+        u2_star = u_seq_flat[0:n_u]
+
+        # NOTE: Removed clipping to preserve differentiability of du/dtheta
+        # If Newton solver diverges, consider increasing newton_iters or
+        # adding regularization in the MPC cost instead
 
         # --- Update player 1 (double integrator) ---
         next_v1 = v1 + a1 * dt
@@ -570,12 +589,43 @@ def create_unicycle_mpc_dynamics(
     init_theta1 = config["dynamics_params"]["init_theta1"]
     init_theta2 = config["dynamics_params"]["init_theta2"]
 
-    model_params = {
-        "theta1": jnp.array(init_theta1),
-        "theta2": jnp.array(init_theta2),
-    }
+    # Option to fix theta2 at known value (only learn theta1)
+    fix_theta2 = config["dynamics_params"].get("fix_theta2", False)
+    if fix_theta2:
+        # Use true theta2 from env_params if fixing
+        fixed_theta2_val = config["env_params"].get("true_theta2", init_theta2)
+        print(f"  -> Fixing theta2 at known value: {fixed_theta2_val}")
+        model_params = {
+            "theta1": jnp.array(init_theta1),
+        }
+        # Store fixed theta2 for use in pred_one_step
+        fixed_theta2 = jnp.array(fixed_theta2_val)
+    else:
+        model_params = {
+            "theta1": jnp.array(init_theta1),
+            "theta2": jnp.array(init_theta2),
+        }
+        fixed_theta2 = None
+
     params = {"model": model_params, "normalizer": None}
-    model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=None)
+
+    # Wrap pred_one_step to handle fixed theta2
+    if fix_theta2:
+        original_pred = pred_one_step
+        @jax.jit
+        def pred_one_step_fixed(params, state, action):
+            # Inject fixed theta2 into params for the original function
+            augmented_params = {
+                "model": {
+                    "theta1": params["model"]["theta1"],
+                    "theta2": fixed_theta2,
+                },
+                "normalizer": params["normalizer"],
+            }
+            return original_pred(augmented_params, state, action)
+        model = DynamicsModel(pred_one_step=pred_one_step_fixed, pred_norm_delta=None)
+    else:
+        model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=None)
 
     return model, params
 

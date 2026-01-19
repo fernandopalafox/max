@@ -34,6 +34,12 @@ class EnvParams:
     seeker_max_speed: float = 1.3
     epsilon_goal: float = 0.1
     epsilon_collide: float = 0.125
+
+    # Initial distance between agents (unicycle_mpc)
+    min_init_distance: float = 5.0
+
+    # Initial heading for pursuer (unicycle_mpc). None = random, otherwise fixed angle in radians
+    init_pursuer_heading: float = None
     reward_win: float = 10.0
     reward_collision_penalty: float = 1.0  # C_collide
     reward_shaping_k1: float = 0.01  # k_1 for goal-seeker potential
@@ -760,26 +766,40 @@ def make_unicycle_mpc_env(params: EnvParams, true_theta1, true_theta2, dynamics_
     def _step_dynamics(state: jnp.ndarray, evader_action: jnp.ndarray) -> jnp.ndarray:
         return dynamics_model.pred_one_step(true_params, state, evader_action)
 
+    # Get minimum initial distance from config (default: 0, no constraint)
+    min_init_distance = getattr(params, 'min_init_distance', 0.0)
+    # Get initial pursuer heading (None = random)
+    init_pursuer_heading = getattr(params, 'init_pursuer_heading', None)
+
     @jax.jit
     def reset_fn(key: jax.random.PRNGKey):
         """Reset environment with random initial positions."""
-        key1, key2, key3 = jax.random.split(key, 3)
+        key1, key2, key3, key4 = jax.random.split(key, 4)
 
-        # Evader (P1): random position, zero velocity
+        # Evader (P1): random position near center, zero velocity
         p1 = jax.random.uniform(
             key1, shape=(2,),
-            minval=-0.5 * params.box_half_width,
-            maxval=0.5 * params.box_half_width,
+            minval=-0.3 * params.box_half_width,
+            maxval=0.3 * params.box_half_width,
         )
         v1 = jnp.zeros(2)
 
-        # Opponent (P2): random position, random heading, some initial speed
-        p2 = jax.random.uniform(
-            key2, shape=(2,),
-            minval=-0.5 * params.box_half_width,
-            maxval=0.5 * params.box_half_width,
-        )
-        alpha2 = jax.random.uniform(key3, minval=-jnp.pi, maxval=jnp.pi)
+        # Opponent (P2): placed at min_init_distance from evader with random angle
+        angle = jax.random.uniform(key2, minval=-jnp.pi, maxval=jnp.pi)
+        # Distance is uniform between min_init_distance and 1.5*min_init_distance
+        dist = min_init_distance + jax.random.uniform(key3) * 0.5 * min_init_distance
+        # If min_init_distance is 0, fall back to random placement
+        dist = jnp.where(min_init_distance > 0, dist,
+                         jax.random.uniform(key3, minval=1.0, maxval=3.0))
+
+        p2 = p1 + dist * jnp.array([jnp.cos(angle), jnp.sin(angle)])
+
+        # Clip p2 to stay within bounds
+        p2 = jnp.clip(p2, -0.8 * params.box_half_width, 0.8 * params.box_half_width)
+
+        # Pursuer heading: use fixed value if specified, otherwise random
+        random_heading = jax.random.uniform(key4, minval=-jnp.pi, maxval=jnp.pi)
+        alpha2 = init_pursuer_heading if init_pursuer_heading is not None else random_heading
         v2 = 0.5  # initial speed
 
         # State: [p1x, p1y, v1x, v1y, p2x, p2y, alpha2, v2]
@@ -824,13 +844,19 @@ def init_env(config: Dict[str, Any]):
 
     # Hacky fix for LQR-specific params
     if env_name == "pursuit_evasion_lqr":
-        true_q_diag = env_params_dict.pop("true_q_diag", None)
-        true_r_diag = env_params_dict.pop("true_r_diag", None)
+        true_q_diag = env_params_dict.get("true_q_diag", None)
+        true_r_diag = env_params_dict.get("true_r_diag", None)
+        # Remove from dict for EnvParams (which doesn't have these fields)
+        env_params_dict = {k: v for k, v in env_params_dict.items()
+                          if k not in ["true_q_diag", "true_r_diag"]}
 
     # Hacky fix for unicycle-specific params
     if env_name == "unicycle_mpc":
-        true_theta1 = env_params_dict.pop("true_theta1", None)
-        true_theta2 = env_params_dict.pop("true_theta2", None)
+        true_theta1 = env_params_dict.get("true_theta1", None)
+        true_theta2 = env_params_dict.get("true_theta2", None)
+        # Remove from dict for EnvParams (which doesn't have these fields)
+        env_params_dict = {k: v for k, v in env_params_dict.items()
+                          if k not in ["true_theta1", "true_theta2"]}
         dynamics_config = config.get("dynamics_params", {})
 
     params = EnvParams(**env_params_dict)
