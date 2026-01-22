@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 from typing import Dict, Any
 from dataclasses import dataclass
-from max.dynamics import create_pursuit_evader_dynamics
+from max.dynamics import create_pursuit_evader_dynamics, create_pursuit_evader_dynamics_unicycle
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,11 @@ class EnvParams:
     reward_shaping_k1: float = 0.01  # k_1 for goal-seeker potential
     reward_shaping_k2: float = 0.01  # k_2 for blocker area denial
 
-    # Specific to LQR pursuit-evasion
+    # Specific to unicycle-double-integrator pursuit-evasion
+    true_tracking_weight: float = jnp.inf
+    mpc_horizon: int = -1
+    learning_rate: float = jnp.inf
+    
     
 
 
@@ -402,6 +406,69 @@ def make_pursuit_evasion_env(params: EnvParams):
         return jnp.stack([state] * num_agents)
 
     return reset_fn, step_fn, get_obs_fn
+
+
+def make_pursuit_evasion_unicycle_double_integrator_env(params: EnvParams, true_tracking_weight):
+    num_agents = params.num_agents
+    dt = params.dt
+
+    config_for_dynamics = {
+        "dynamics_params": {
+            "dt": dt,
+            "init_tracking_weight": true_tracking_weight,
+            "mpc_horizon": params.mpc_horizon,
+            "learning_rate": params.learning_rate,
+        }
+    }
+
+    dynamics_model, _ = create_pursuit_evader_dynamics_unicycle(config_for_dynamics, None, None)
+
+    true_params = {
+        "model": {
+            "tracking_weight": true_tracking_weight
+        },
+        "normalizer": None,
+    }
+
+    @jax.jit
+    def _step_dynamics(state: jnp.ndarray, evader_action: jnp.ndarray) -> jnp.ndarray:
+        return dynamics_model.pred_one_step(true_params, state, evader_action)
+
+    @jax.jit
+    def reset_fn(key: jax.random.PRNGKey):
+        agent_positions = jax.random.uniform(
+            key,
+            shape=(1, 4),
+            minval=-params.box_half_width,
+            maxval=params.box_half_width,
+        )
+        agent_velocities = jnp.zeros((1, 4))
+        agent_states = jnp.concatenate([agent_positions, agent_velocities], axis=1)
+        return agent_states.flatten()
+    
+    @jax.jit
+    def get_obs_fn(state: jnp.ndarray):
+        return state[None, :]
+
+    @jax.jit
+    def step_fn(state: jnp.ndarray, step_count: int, action: jnp.ndarray):
+        next_state = _step_dynamics(state, action)
+
+        terminated = False
+        truncated = step_count >= params.max_episode_steps
+
+        observations = get_obs_fn(next_state)
+
+        # Dummy reward
+        rewards = jnp.array([evader_reward])
+        evader_reward = 0.0
+        info = {"reward": evader_reward}
+
+        return next_state, observations, rewards, terminated, truncated, info
+
+    return reset_fn, step_fn, get_obs_fn
+
+
 
 
 def make_pursuit_evasion_lqr_env(params: EnvParams, true_q_diag, true_r_diag):
@@ -828,5 +895,8 @@ def init_env(config: Dict[str, Any]):
         return make_blocker_goal_seeker_env(params)
     elif env_name == "linear_tracking":
         return make_linear_tracking_env(params, true_A, true_B, target_point)
+    elif env_name == "unicycle":
+        true_tracking_weight = env_params_dict.pop("true_tracking_weight", None)
+        return make_pursuit_evasion_unicycle_double_integrator_env(params, true_tracking_weight)
     else:
         raise ValueError(f"Unknown environment name: '{env_name}'")

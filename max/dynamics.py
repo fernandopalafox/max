@@ -371,14 +371,84 @@ def create_pursuit_evader_dynamics_unicycle(
 ) -> tuple[NamedTuple, dict]:
     """
     Creates dynamics for a 2-player pursuer-evader planar system with a
-    trainable single-step LQR pursuit strategy.
+    trainable single-step unicycle pursuit strategy.
 
-    - State: An 8D vector [pe_x, pe_y, ve_x, ve_y, pp_x, pp_y, vp_x, vp_y].
+    - State: An 8D vector [pe_x, pe_y, ve_x, ve_y, pp_x, pp_y, theta, v].
     - Action: A 2D vector [ae_x, ae_y] for the evader's acceleration.
     - Trainable Params:
-        - `q_cholesky`: Cholesky factor of the state cost matrix Q (4x4).
-        - `r_cholesky`: Cholesky factor of the control cost matrix R (2x2).
+        - `tracking_weight`: learnable weight for tracking error in the cost function.
     """
+
+    dt = config["dynamics_params"]["dt"]
+    def rollout_unicycle(
+        x0: jnp.ndarray,
+        u_seq: jnp.ndarray,
+    ) -> jnp.ndarray:
+                    
+        def scan_fn(x, u):
+            p_pursuer = x[0:2]
+            speed_pursuer = x[2]
+            angle_pursuer = x[3]
+            a_pursuer = u[0]
+            omega_pursuer = u[1]
+            next_p_pursuer = p_pursuer + speed_pursuer * jnp.array([jnp.cos(angle_pursuer), jnp.sin(angle_pursuer)]) * dt
+            next_speed_pursuer = speed_pursuer + a_pursuer * dt 
+            next_angle_pursuer = angle_pursuer + omega_pursuer * dt 
+            x_next = jnp.array([next_p_pursuer[0], next_p_pursuer[1], next_speed_pursuer, next_angle_pursuer])
+            return x_next, x_next
+
+        _, xs_rest = jax.lax.scan(scan_fn, x0, u_seq)
+        xs = jnp.concatenate([x0[None, :], xs_rest], axis=0)
+        return xs
+    
+    def pursuit_cost(
+        u_flat: jnp.ndarray,
+        init_state_pursuer: jnp.ndarray,
+        p_target: jnp.ndarray,
+        tracking_weight: float,
+        ) -> float:    
+        u_seq = u_flat.reshape(2, 2)
+        
+        xs = rollout_unicycle(init_state_pursuer, u_seq)
+        ps = xs[:, :2]  # positions [px, py]
+        track = tracking_weight * jnp.sum((ps[1:] - p_target) ** 2)
+        reg = jnp.sum(u_seq[:, 0] ** 2) + jnp.sum(u_seq[:, 1] ** 2)
+
+        return track + reg
+
+    @jax.jit
+    def solve_unicycle_mpc(tracking_weight, state_evader, state_pursuer) -> jnp.ndarray:
+        """
+        Solve unicycle pursuit MPC using gradient descent.
+
+        Returns:
+            u_star : optimal control sequence, shape (T, 2)
+            J_star : optimal cost value
+        """
+        T = config["dynamics_params"]["mpc_horizon"]
+        u_init = jnp.zeros((T * 2,)) 
+
+        # Define cost function with fixed parameters
+        def cost_fn(u_flat):
+            return pursuit_cost(
+                u_flat, state_pursuer, state_evader[:2], tracking_weight
+            )
+
+        # Gradient of cost function
+        grad_fn = jax.grad(cost_fn)
+
+        def gd_step(u_flat, _):
+            """One step of gradient descent with fixed learning rate."""
+            grad = grad_fn(u_flat)
+            u_new = u_flat - config["dynamics_params"]["learning_rate"] * grad
+            return u_new, None
+
+        # Run gradient descent iterations (unrolled, fully differentiable)
+        u_star_flat, _ = jax.lax.scan(gd_step, u_init, None, length=config["dynamics_params"]["max_gd_iters"])
+
+        J_star = cost_fn(u_star_flat)
+
+        return u_star_flat.reshape(T, 2), J_star
 
     @jax.jit
     def pred_one_step(
@@ -391,76 +461,47 @@ def create_pursuit_evader_dynamics_unicycle(
         p_evader = state[0:2]
         v_evader = state[2:4]
         p_pursuer = state[4:6]
-        v_pursuer = state[6:8]
+        speed_pursuer = state[6]
+        angle_pursuer = state[7]
         a_evader = action.squeeze()
 
         # Construct full state vectors for clarity
         x_evader = jnp.concatenate([p_evader, v_evader])
-        x_pursuer = jnp.concatenate([p_pursuer, v_pursuer])
+        x_pursuer = jnp.concatenate([p_pursuer, speed_pursuer, angle_pursuer])
 
-        # --- Unpack Config and Construct LQR Matrices ---
-        dt = config["dynamics_params"]["dt"]
-
-        # State transition matrix (4x4)
-        A = jnp.array(
-            [[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]]
-        )
-
-        # Control matrix (4x2)
-        B = jnp.array([[0.5 * dt**2, 0], [0, 0.5 * dt**2], [dt, 0], [0, dt]])
-
-        # --- Construct Q and R from learnable Cholesky factors ---
-        q_cholesky = params["model"]["q_cholesky"]
-        r_cholesky = params["model"]["r_cholesky"]
-
-        Q = q_cholesky @ q_cholesky.T
-        R = r_cholesky @ r_cholesky.T + 1e-6 * jnp.eye(2)
+        # --- learnable parameter ---
+        tracking_weight = params["model"]["tracking_weight"]
+ 
 
         # --- Single-Step LQR Control Law (Pursuer) ---
-        # Implementing Eq (10): u* = -(R + B'QB)^-1 B'Q(Ax_pursuer - x_evader)
-        
-        # 1. Compute the inverse term: (R + B'QB)^-1
-        # shape: (2,2)
-        inv_term = jnp.linalg.inv(R + B.T @ Q @ B)
-
-        # 2. Compute the Gain component that does NOT depend on state: (R + B'QB)^-1 B'Q
-        # shape: (2,4)
-        Gain_prefix = inv_term @ B.T @ Q
-
-        # 3. Compute the specific error term defined in the paper: (Ax_p - x_e)
-        # The paper derivation minimizes ||Ax_p + Bu - x_e||^2, leading to this term.
-        # shape: (4,)
-        state_diff_term = (A @ x_pursuer) - x_evader
-
-        # 4. Calculate optimal acceleration
-        a_pursuer = -Gain_prefix @ state_diff_term
-
-        # --- Dynamics Update (Double Integrator) ---
-        next_v_evader = v_evader + a_evader * dt
-        next_v_pursuer = v_pursuer + a_pursuer * dt
+        u_star, J_star = solve_unicycle_mpc(tracking_weight, x_evader, x_pursuer)
+        a_pursuer = u_star[0, 0]
+        omega_pursuer = u_star[0, 1]
+        # --- Dynamics Update (Double Integrator + unicycle) ---
         next_p_evader = p_evader + 0.5 * a_evader * dt**2 + v_evader * dt
-        next_p_pursuer = p_pursuer + 0.5 * a_pursuer * dt**2 + v_pursuer * dt
+        next_v_evader = v_evader + a_evader * dt
+        
+
+        next_p_pursuer = p_pursuer + speed_pursuer * jnp.array([jnp.cos(angle_pursuer), jnp.sin(angle_pursuer)]) * dt
+        next_speed_pursuer = speed_pursuer + a_pursuer * dt 
+        next_angle_pursuer = angle_pursuer + omega_pursuer * dt 
 
         return jnp.concatenate(
-            [next_p_evader, next_v_evader, next_p_pursuer, next_v_pursuer],
+            [next_p_evader, next_v_evader, next_p_pursuer, next_speed_pursuer, next_angle_pursuer],
             axis=-1,
         )
 
     # --- Initialize Learnable Parameters ---
-    init_q_diag = jnp.array(config["dynamics_params"]["init_q_diag"])
-    init_r_diag = jnp.array(config["dynamics_params"]["init_r_diag"])
-
-    q_cholesky_init = jnp.diag(jnp.sqrt(init_q_diag))
-    r_cholesky_init = jnp.diag(jnp.sqrt(init_r_diag))
-
     model_params = {
-        "q_cholesky": q_cholesky_init,
-        "r_cholesky": r_cholesky_init,
+        "tracking_weight": config["dynamics_params"]["init_tracking_weight"],
     }
     params = {"model": model_params, "normalizer": None}
     model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=None)
 
     return model, params
+
+
+
 def create_linear_dynamics(
     config: dict,
     normalizer: Normalizer,
@@ -540,6 +581,11 @@ def init_dynamics(
 
     elif dynamics_type == "linear":
         return create_linear_dynamics(
+            config, normalizer, normalizer_params
+        )
+    
+    elif dynamics_type == "unicycle":
+        return create_pursuit_evader_dynamics_unicycle(
             config, normalizer, normalizer_params
         )
 
