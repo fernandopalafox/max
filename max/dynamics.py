@@ -467,7 +467,7 @@ def create_pursuit_evader_dynamics_unicycle(
 
         # Construct full state vectors for clarity
         x_evader = jnp.concatenate([p_evader, v_evader])
-        x_pursuer = jnp.concatenate([p_pursuer, speed_pursuer, angle_pursuer])
+        x_pursuer = jnp.concatenate([p_pursuer, jnp.atleast_1d(speed_pursuer), jnp.atleast_1d(angle_pursuer)])
 
         # --- learnable parameter ---
         tracking_weight = params["model"]["tracking_weight"]
@@ -487,7 +487,7 @@ def create_pursuit_evader_dynamics_unicycle(
         next_angle_pursuer = angle_pursuer + omega_pursuer * dt 
 
         return jnp.concatenate(
-            [next_p_evader, next_v_evader, next_p_pursuer, next_speed_pursuer, next_angle_pursuer],
+            [next_p_evader, next_v_evader, next_p_pursuer, jnp.atleast_1d(next_speed_pursuer), jnp.atleast_1d(next_angle_pursuer)],
             axis=-1,
         )
 

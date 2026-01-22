@@ -43,6 +43,7 @@ class EnvParams:
     true_tracking_weight: float = jnp.inf
     mpc_horizon: int = -1
     learning_rate: float = jnp.inf
+    max_gd_iters: int = 100
     
     
 
@@ -418,6 +419,7 @@ def make_pursuit_evasion_unicycle_double_integrator_env(params: EnvParams, true_
             "init_tracking_weight": true_tracking_weight,
             "mpc_horizon": params.mpc_horizon,
             "learning_rate": params.learning_rate,
+            "max_gd_iters": params.max_gd_iters,
         }
     }
 
@@ -460,8 +462,8 @@ def make_pursuit_evasion_unicycle_double_integrator_env(params: EnvParams, true_
         observations = get_obs_fn(next_state)
 
         # Dummy reward
-        rewards = jnp.array([evader_reward])
         evader_reward = 0.0
+        rewards = jnp.array([evader_reward])
         info = {"reward": evader_reward}
 
         return next_state, observations, rewards, terminated, truncated, info
