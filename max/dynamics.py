@@ -364,6 +364,103 @@ def create_pursuit_evader_dynamics(
     return model, params
 
 
+def create_pursuit_evader_dynamics_unicycle(
+    config: dict,
+    normalizer: Normalizer,
+    normalizer_params: Optional[jnp.ndarray] = None,
+) -> tuple[NamedTuple, dict]:
+    """
+    Creates dynamics for a 2-player pursuer-evader planar system with a
+    trainable single-step LQR pursuit strategy.
+
+    - State: An 8D vector [pe_x, pe_y, ve_x, ve_y, pp_x, pp_y, vp_x, vp_y].
+    - Action: A 2D vector [ae_x, ae_y] for the evader's acceleration.
+    - Trainable Params:
+        - `q_cholesky`: Cholesky factor of the state cost matrix Q (4x4).
+        - `r_cholesky`: Cholesky factor of the control cost matrix R (2x2).
+    """
+
+    @jax.jit
+    def pred_one_step(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """
+        Predicts the next state for the pursuer-evader system.
+        """
+        # --- Unpack State and Action ---
+        p_evader = state[0:2]
+        v_evader = state[2:4]
+        p_pursuer = state[4:6]
+        v_pursuer = state[6:8]
+        a_evader = action.squeeze()
+
+        # Construct full state vectors for clarity
+        x_evader = jnp.concatenate([p_evader, v_evader])
+        x_pursuer = jnp.concatenate([p_pursuer, v_pursuer])
+
+        # --- Unpack Config and Construct LQR Matrices ---
+        dt = config["dynamics_params"]["dt"]
+
+        # State transition matrix (4x4)
+        A = jnp.array(
+            [[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]]
+        )
+
+        # Control matrix (4x2)
+        B = jnp.array([[0.5 * dt**2, 0], [0, 0.5 * dt**2], [dt, 0], [0, dt]])
+
+        # --- Construct Q and R from learnable Cholesky factors ---
+        q_cholesky = params["model"]["q_cholesky"]
+        r_cholesky = params["model"]["r_cholesky"]
+
+        Q = q_cholesky @ q_cholesky.T
+        R = r_cholesky @ r_cholesky.T + 1e-6 * jnp.eye(2)
+
+        # --- Single-Step LQR Control Law (Pursuer) ---
+        # Implementing Eq (10): u* = -(R + B'QB)^-1 B'Q(Ax_pursuer - x_evader)
+        
+        # 1. Compute the inverse term: (R + B'QB)^-1
+        # shape: (2,2)
+        inv_term = jnp.linalg.inv(R + B.T @ Q @ B)
+
+        # 2. Compute the Gain component that does NOT depend on state: (R + B'QB)^-1 B'Q
+        # shape: (2,4)
+        Gain_prefix = inv_term @ B.T @ Q
+
+        # 3. Compute the specific error term defined in the paper: (Ax_p - x_e)
+        # The paper derivation minimizes ||Ax_p + Bu - x_e||^2, leading to this term.
+        # shape: (4,)
+        state_diff_term = (A @ x_pursuer) - x_evader
+
+        # 4. Calculate optimal acceleration
+        a_pursuer = -Gain_prefix @ state_diff_term
+
+        # --- Dynamics Update (Double Integrator) ---
+        next_v_evader = v_evader + a_evader * dt
+        next_v_pursuer = v_pursuer + a_pursuer * dt
+        next_p_evader = p_evader + 0.5 * a_evader * dt**2 + v_evader * dt
+        next_p_pursuer = p_pursuer + 0.5 * a_pursuer * dt**2 + v_pursuer * dt
+
+        return jnp.concatenate(
+            [next_p_evader, next_v_evader, next_p_pursuer, next_v_pursuer],
+            axis=-1,
+        )
+
+    # --- Initialize Learnable Parameters ---
+    init_q_diag = jnp.array(config["dynamics_params"]["init_q_diag"])
+    init_r_diag = jnp.array(config["dynamics_params"]["init_r_diag"])
+
+    q_cholesky_init = jnp.diag(jnp.sqrt(init_q_diag))
+    r_cholesky_init = jnp.diag(jnp.sqrt(init_r_diag))
+
+    model_params = {
+        "q_cholesky": q_cholesky_init,
+        "r_cholesky": r_cholesky_init,
+    }
+    params = {"model": model_params, "normalizer": None}
+    model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=None)
+
+    return model, params
 def create_linear_dynamics(
     config: dict,
     normalizer: Normalizer,
