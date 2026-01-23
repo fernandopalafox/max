@@ -261,15 +261,23 @@ def main(config, save_dir):
                 param_diff = sum(jnp.linalg.norm(leaf) for leaf in jax.tree_util.tree_leaves(diff_tree))
                 cov_trace = jnp.trace(train_state.covariance) if train_state.covariance is not None else 0.0
 
-                wandb.log(
-                    {
-                        "eval/multi_step_loss": multi_step_loss,
-                        "eval/one_step_loss": one_step_loss,
-                        "eval/param_diff": param_diff,
-                        "eval/cov_trace": cov_trace,
-                    },
-                    step=step,
-                )
+                # Compute MPC gradient norm (monitors MPC convergence)
+                eval_log = {
+                    "eval/multi_step_loss": multi_step_loss,
+                    "eval/one_step_loss": one_step_loss,
+                    "eval/param_diff": param_diff,
+                    "eval/cov_trace": cov_trace,
+                }
+                if dynamics_model.pred_one_step_with_info is not None:
+                    # Use current state and a dummy action to get MPC info
+                    dummy_action = jnp.zeros(config["dim_action"])
+                    _, mpc_info = dynamics_model.pred_one_step_with_info(
+                        train_state.params, state, dummy_action
+                    )
+                    eval_log["eval/mpc_grad_norm"] = float(mpc_info["mpc_grad_norm"])
+                    eval_log["eval/mpc_cost"] = float(mpc_info["mpc_cost"])
+
+                wandb.log(eval_log, step=step)
 
         # Handle Buffer Overflow
         if buffer_idx >= config["buffer_size"]:

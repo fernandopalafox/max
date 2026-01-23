@@ -1,7 +1,7 @@
 {
   "env_name": "unicycle",
   "num_agents": 1,
-  "total_steps": 250,
+  "total_steps": 150,
   "dim_state": 8,
   "dim_action": 2,
   "train_freq": 1,
@@ -18,9 +18,9 @@
   "dynamics_params": {
     "dt": 0.1,
     "mpc_horizon": 2,
-    "learning_rate": 0.01,
+    "learning_rate": 0.1,
     "init_tracking_weight": 1.0,
-    "max_gd_iters": 100
+    "max_gd_iters": 150
   },
   "env_params": {
     "num_agents": 1,
@@ -33,18 +33,18 @@
     "evader_max_accel": 4.0,
     "pursuer_max_speed": 1.0,
     "evader_max_speed": 1.3,
-    "true_tracking_weight": 10.0,
+    "true_tracking_weight": 2.0,
     "mpc_horizon": 2,
-    "learning_rate": 0.01,
-    "max_gd_iters": 100
+    "learning_rate": 0.1,
+    "max_gd_iters": 150
   },
   "trainer": "ekf",
   "trainer_params": {
     "learning_rate": 10.0,
     "weight_decay": 1.0,
-    "proc_noise_init": 0.0,
-    "proc_noise_decay": 1.0,
-    "proc_noise_floor": 0.0,
+    "proc_noise_init": 0.01,
+    "proc_noise_decay": 0.999,
+    "proc_noise_floor": 0.001,
     "init_cov_scale": 1.0,
     "jitter": 1e-6
   },
@@ -83,7 +83,7 @@
   "cost_fn_params": {
     "weight_jerk": 0.0,
     "weight_control": 10.0,
-    "weight_info": 1000.0,
+    "weight_info": 0.0, 
     "meas_noise_diag": [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
   }
 }

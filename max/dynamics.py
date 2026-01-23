@@ -24,6 +24,7 @@ class MLP(nn.Module):
 class DynamicsModel(NamedTuple):
     pred_one_step: Callable[[Any, jnp.ndarray, jnp.ndarray], jnp.ndarray]
     pred_norm_delta: Callable[[Any, jnp.ndarray, jnp.ndarray], jnp.ndarray]
+    pred_one_step_with_info: Callable[[Any, jnp.ndarray, jnp.ndarray], tuple] = None
 
 
 def _create_MLP_dynamics(
@@ -447,8 +448,11 @@ def create_pursuit_evader_dynamics_unicycle(
         u_star_flat, _ = jax.lax.scan(gd_step, u_init, None, length=config["dynamics_params"]["max_gd_iters"])
 
         J_star = cost_fn(u_star_flat)
+        # Compute terminal step gradient norm for monitoring MPC convergence
+        grad_terminal = grad_fn(u_star_flat)
+        grad_norm = jnp.linalg.norm(grad_terminal)
 
-        return u_star_flat.reshape(T, 2), J_star
+        return u_star_flat.reshape(T, 2), J_star, grad_norm
 
     @jax.jit
     def pred_one_step(
@@ -473,30 +477,43 @@ def create_pursuit_evader_dynamics_unicycle(
         tracking_weight = params["model"]["tracking_weight"]
  
 
-        # --- Single-Step LQR Control Law (Pursuer) ---
-        u_star, J_star = solve_unicycle_mpc(tracking_weight, x_evader, x_pursuer)
+        # --- Single-Step MPC Control Law (Pursuer) ---
+        u_star, J_star, grad_norm = solve_unicycle_mpc(tracking_weight, x_evader, x_pursuer)
         a_pursuer = u_star[0, 0]
         omega_pursuer = u_star[0, 1]
         # --- Dynamics Update (Double Integrator + unicycle) ---
         next_p_evader = p_evader + 0.5 * a_evader * dt**2 + v_evader * dt
         next_v_evader = v_evader + a_evader * dt
-        
+
 
         next_p_pursuer = p_pursuer + speed_pursuer * jnp.array([jnp.cos(angle_pursuer), jnp.sin(angle_pursuer)]) * dt
-        next_speed_pursuer = speed_pursuer + a_pursuer * dt 
-        next_angle_pursuer = angle_pursuer + omega_pursuer * dt 
+        next_speed_pursuer = speed_pursuer + a_pursuer * dt
+        next_angle_pursuer = angle_pursuer + omega_pursuer * dt
 
-        return jnp.concatenate(
+        next_state = jnp.concatenate(
             [next_p_evader, next_v_evader, next_p_pursuer, jnp.atleast_1d(next_speed_pursuer), jnp.atleast_1d(next_angle_pursuer)],
             axis=-1,
         )
+        return next_state, {"mpc_grad_norm": grad_norm, "mpc_cost": J_star}
+
+    @jax.jit
+    def pred_one_step_no_info(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Wrapper that returns only next_state for backward compatibility."""
+        next_state, _ = pred_one_step(params, state, action)
+        return next_state
 
     # --- Initialize Learnable Parameters ---
     model_params = {
         "tracking_weight": config["dynamics_params"]["init_tracking_weight"],
     }
     params = {"model": model_params, "normalizer": None}
-    model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=None)
+    model = DynamicsModel(
+        pred_one_step=pred_one_step_no_info,
+        pred_norm_delta=None,
+        pred_one_step_with_info=pred_one_step,
+    )
 
     return model, params
 
