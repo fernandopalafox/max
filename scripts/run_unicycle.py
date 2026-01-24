@@ -18,7 +18,7 @@ import copy
 import os
 import pickle
 import json
-
+import time  # TIMING
 
 def plot_unicycle_trajectory(buffers, buffer_idx, config):
     """Plot evader and pursuer x-y positions from unicycle buffer.
@@ -178,7 +178,11 @@ def main(config, save_dir):
     state = reset_fn(reset_key)
     current_obs = get_obs_fn(state)
 
+    # TIMING
+    t_loop_start = time.perf_counter()
+
     for step in range(1, config["total_steps"] + 1):
+
 
         # Compute actions
         cost_params = {
@@ -188,19 +192,33 @@ def main(config, save_dir):
         key, planner_key = jax.random.split(key)
         planner_state = planner_state.replace(key=planner_key)
 
+        _t0 = time.perf_counter()  # TIMING
         actions, planner_state = planner.solve(planner_state, state, cost_params)
         action = actions[0][None, :]  # hacky add agent dim
-        
+
+        print(state[0:4], action)
+
+        # TODO: REMOVE THIS
+        _, mpc_info = dynamics_model.pred_one_step_with_info(
+            train_state.params, state, action
+        )
+        mpc_grad_norm = float(mpc_info["mpc_grad_norm"])
+        mpc_cost = float(mpc_info["mpc_cost"])
+        _t_plan = time.perf_counter() - _t0  # TIMING
+
         # Step environment
+        _t0 = time.perf_counter()  # TIMING
         state, next_obs, rewards, terminated, truncated, info = step_fn(
             state, episode_length, action
         )
+        _t_step = time.perf_counter() - _t0  # TIMING
         done = terminated or truncated
         episode_length += 1
         for info_key in reward_component_keys_to_avg:
             episode_reward_components[info_key] += info[info_key]
 
         # Update buffer
+        _t0 = time.perf_counter()  # TIMING
         buffers = update_buffer_dynamic(
             buffers,
             buffer_idx,
@@ -211,7 +229,10 @@ def main(config, save_dir):
             jnp.zeros_like(rewards),  # dummy log_pi
             float(done),
         )
+        _t_buf = time.perf_counter() - _t0  # TIMING
         buffer_idx += 1
+
+        _t_train, _t_eval = 0., 0.  # TIMING
 
         current_obs = next_obs
 
@@ -240,15 +261,18 @@ def main(config, save_dir):
         # Train model
         # buffer_idx >= 2 to ensure we have at least one full transition
         if step % config["train_model_freq"] == 0 and buffer_idx >= 2:
+            _t0 = time.perf_counter()  # TIMING
             train_data = {
                 "states": buffers["states"][0, buffer_idx - 2 : buffer_idx - 1, :],
                 "actions": buffers["actions"][0, buffer_idx - 2 : buffer_idx - 1, :],
                 "next_states": buffers["states"][0, buffer_idx - 1 : buffer_idx, :],
             }
             train_state, loss = trainer.train(train_state, train_data, step=step)
+            _t_train = time.perf_counter() - _t0  # TIMING
             wandb.log({"train/model_loss": float(loss)}, step=step)
 
             if step % config["eval_freq"] == 0:
+                _t0 = time.perf_counter()  # TIMING
                 multi_step_loss = evaluator.compute_multi_step_loss(
                     train_state.params, eval_trajectory_data
                 )
@@ -267,17 +291,14 @@ def main(config, save_dir):
                     "eval/one_step_loss": one_step_loss,
                     "eval/param_diff": param_diff,
                     "eval/cov_trace": cov_trace,
+                    "eval/mpc_grad_norm": mpc_grad_norm,
+                    "eval/mpc_cost": mpc_cost,
                 }
-                if dynamics_model.pred_one_step_with_info is not None:
-                    # Use current state and a dummy action to get MPC info
-                    dummy_action = jnp.zeros(config["dim_action"])
-                    _, mpc_info = dynamics_model.pred_one_step_with_info(
-                        train_state.params, state, dummy_action
-                    )
-                    eval_log["eval/mpc_grad_norm"] = float(mpc_info["mpc_grad_norm"])
-                    eval_log["eval/mpc_cost"] = float(mpc_info["mpc_cost"])
+                _t_eval = time.perf_counter() - _t0  # TIMING
 
                 wandb.log(eval_log, step=step)
+
+        print(f"[{step}] plan={_t_plan:.3f} step={_t_step:.3f} buf={_t_buf:.3f} train={_t_train:.3f} eval={_t_eval:.3f}")  # TIMING
 
         # Handle Buffer Overflow
         if buffer_idx >= config["buffer_size"]:
@@ -288,6 +309,9 @@ def main(config, save_dir):
                 config["dim_action"],
             )
             buffer_idx = 0
+
+    # TIMING - print summary
+    print(f"\n[TIMING] total={time.perf_counter() - t_loop_start:.1f}s")
 
     # Save model parameters
     if save_dir:

@@ -438,15 +438,8 @@ def make_pursuit_evasion_unicycle_double_integrator_env(params: EnvParams, true_
 
     @jax.jit
     def reset_fn(key: jax.random.PRNGKey):
-        agent_positions = jax.random.uniform(
-            key,
-            shape=(1, 4),
-            minval=-params.box_half_width,
-            maxval=params.box_half_width,
-        )
-        agent_velocities = jnp.zeros((1, 4))
-        agent_states = jnp.concatenate([agent_positions, agent_velocities], axis=1)
-        return agent_states.flatten()
+        # TODO: Hardcoded right now
+        return jnp.array([-5.0, -5.0, 0.0, 0.0, 5.0, 5.0, 0.0, 0.0])
     
     @jax.jit
     def get_obs_fn(state: jnp.ndarray):

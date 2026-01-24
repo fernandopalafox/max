@@ -94,7 +94,10 @@ def _stage_cost_info_gathering(
         state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
     )
 
-    return -dist_sq + control_cost + exploration_term
+    # Penalize distance from origin
+    origin_cost = 1.0 * jnp.sum(p_evader**2)
+
+    return -dist_sq + control_cost + exploration_term + origin_cost
 
 
 def _terminal_cost_pursuit_evasion(state):

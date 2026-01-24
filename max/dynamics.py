@@ -381,6 +381,8 @@ def create_pursuit_evader_dynamics_unicycle(
     """
 
     dt = config["dynamics_params"]["dt"]
+    T = config["dynamics_params"]["mpc_horizon"]
+
     def rollout_unicycle(
         x0: jnp.ndarray,
         u_seq: jnp.ndarray,
@@ -393,8 +395,8 @@ def create_pursuit_evader_dynamics_unicycle(
             a_pursuer = u[0]
             omega_pursuer = u[1]
             next_p_pursuer = p_pursuer + speed_pursuer * jnp.array([jnp.cos(angle_pursuer), jnp.sin(angle_pursuer)]) * dt
-            next_speed_pursuer = speed_pursuer + a_pursuer * dt 
-            next_angle_pursuer = angle_pursuer + omega_pursuer * dt 
+            next_speed_pursuer = speed_pursuer + a_pursuer * dt
+            next_angle_pursuer = angle_pursuer + omega_pursuer * dt
             x_next = jnp.array([next_p_pursuer[0], next_p_pursuer[1], next_speed_pursuer, next_angle_pursuer])
             return x_next, x_next
 
@@ -405,17 +407,30 @@ def create_pursuit_evader_dynamics_unicycle(
     def pursuit_cost(
         u_flat: jnp.ndarray,
         init_state_pursuer: jnp.ndarray,
-        p_target: jnp.ndarray,
+        evader_state: jnp.ndarray,  # Now includes velocity
         tracking_weight: float,
-        ) -> float:    
-        u_seq = u_flat.reshape(2, 2)
-        
+    ) -> float:
+        u_seq = u_flat.reshape(T, 2)
         xs = rollout_unicycle(init_state_pursuer, u_seq)
-        ps = xs[:, :2]  # positions [px, py]
-        track = tracking_weight * jnp.sum((ps[1:] - p_target) ** 2)
-        reg = jnp.sum(u_seq[:, 0] ** 2) + jnp.sum(u_seq[:, 1] ** 2)
+        ps = xs[:, :2]
 
-        return track + reg
+        # Predict evader trajectory (simple constant-velocity prediction)
+        p_evader = evader_state[:2]
+        v_evader = evader_state[2:4]
+        
+        # Predicted evader positions over horizon
+        timesteps = jnp.arange(1, T + 1)
+        predicted_evader_positions = p_evader[None, :] + v_evader[None, :] * (timesteps[:, None] * dt)
+        
+        # Track predicted future positions
+        track = tracking_weight * jnp.sum((ps[1:] - predicted_evader_positions) ** 2)
+        
+        # Control regularization (smaller weight)
+        control_penalty = (jnp.sum(u_seq[:, 0] ** 2) + jnp.sum(u_seq[:, 1] ** 2))
+
+        speed_penalty = 0.1 * jnp.sum(xs[:, 2] ** 2)
+        
+        return track + 0.2 * control_penalty + speed_penalty
 
     @jax.jit
     def solve_unicycle_mpc(tracking_weight, state_evader, state_pursuer) -> jnp.ndarray:
@@ -426,13 +441,12 @@ def create_pursuit_evader_dynamics_unicycle(
             u_star : optimal control sequence, shape (T, 2)
             J_star : optimal cost value
         """
-        T = config["dynamics_params"]["mpc_horizon"]
-        u_init = jnp.zeros((T * 2,)) 
+        u_init = jnp.zeros((T * 2,))
 
         # Define cost function with fixed parameters
         def cost_fn(u_flat):
             return pursuit_cost(
-                u_flat, state_pursuer, state_evader[:2], tracking_weight
+                u_flat, state_pursuer, state_evader, tracking_weight
             )
 
         # Gradient of cost function
@@ -470,21 +484,20 @@ def create_pursuit_evader_dynamics_unicycle(
         a_evader = action.squeeze()
 
         # Construct full state vectors for clarity
-        x_evader = jnp.concatenate([p_evader, v_evader])
-        x_pursuer = jnp.concatenate([p_pursuer, jnp.atleast_1d(speed_pursuer), jnp.atleast_1d(angle_pursuer)])
+        state_evader = jnp.concatenate([p_evader, v_evader])
+        state_pursuer = jnp.concatenate([p_pursuer, jnp.atleast_1d(speed_pursuer), jnp.atleast_1d(angle_pursuer)])
 
         # --- learnable parameter ---
         tracking_weight = params["model"]["tracking_weight"]
  
-
+ 
         # --- Single-Step MPC Control Law (Pursuer) ---
-        u_star, J_star, grad_norm = solve_unicycle_mpc(tracking_weight, x_evader, x_pursuer)
+        u_star, J_star, grad_norm = solve_unicycle_mpc(tracking_weight, state_evader, state_pursuer)
         a_pursuer = u_star[0, 0]
         omega_pursuer = u_star[0, 1]
         # --- Dynamics Update (Double Integrator + unicycle) ---
         next_p_evader = p_evader + 0.5 * a_evader * dt**2 + v_evader * dt
         next_v_evader = v_evader + a_evader * dt
-
 
         next_p_pursuer = p_pursuer + speed_pursuer * jnp.array([jnp.cos(angle_pursuer), jnp.sin(angle_pursuer)]) * dt
         next_speed_pursuer = speed_pursuer + a_pursuer * dt
