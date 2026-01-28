@@ -573,6 +573,57 @@ def create_linear_dynamics(
     return model, params
 
 
+def create_damped_pendulum_dynamics(
+    config: dict,
+    normalizer: Normalizer,
+    normalizer_params: Optional[jnp.ndarray] = None,
+) -> tuple[NamedTuple, dict]:
+    """
+    Creates dynamics for a damped pendulum with learnable parameters.
+
+    State: [phi, phi_dot] (angle from down, angular velocity)
+    Action: [tau] (applied torque)
+    Trainable Params: b (damping), J (moment of inertia)
+    Known Constants: m=1.0, g=9.81, l=1.0, dt (from config)
+
+    Dynamics: phi_ddot = (tau - b * phi_dot - m * g * l * sin(phi)) / J
+    """
+    # Known constants
+    m = 1.0
+    g = 9.81
+    l = 1.0
+    dt = config["dynamics_params"]["dt"]
+
+    @jax.jit
+    def pred_one_step(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts the next state using damped pendulum dynamics."""
+        phi, phi_dot = state[0], state[1]
+        b = params["model"]["b"]
+        J = params["model"]["J"]
+        tau = action[0]
+
+        phi_ddot = (tau - b * phi_dot - m * g * l * jnp.sin(phi)) / J
+        phi_next = phi + phi_dot * dt
+        phi_dot_next = phi_dot + phi_ddot * dt
+
+        return jnp.array([phi_next, phi_dot_next])
+
+    # Initialize learnable parameters from config
+    init_b = config["dynamics_params"]["init_b"]
+    init_J = config["dynamics_params"]["init_J"]
+
+    model_params = {
+        "b": jnp.array(init_b),
+        "J": jnp.array(init_J),
+    }
+    params = {"model": model_params, "normalizer": None}
+    model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=None)
+
+    return model, params
+
+
 def init_dynamics(
     key: jax.Array,
     config: Any,
@@ -613,7 +664,12 @@ def init_dynamics(
         return create_linear_dynamics(
             config, normalizer, normalizer_params
         )
-    
+
+    elif dynamics_type == "damped_pendulum":
+        return create_damped_pendulum_dynamics(
+            config, normalizer, normalizer_params
+        )
+
     elif dynamics_type == "unicycle":
         return create_pursuit_evader_dynamics_unicycle(
             config, normalizer, normalizer_params

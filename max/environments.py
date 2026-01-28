@@ -858,6 +858,80 @@ def make_linear_tracking_env(params: EnvParams, true_A, true_B, target_point):
     return reset_fn, step_fn, get_obs_fn
 
 
+def make_damped_pendulum_env(params: EnvParams, true_b, true_J):
+    """
+    Factory function that creates a damped pendulum environment.
+
+    State: [phi, phi_dot] (angle from downward vertical, angular velocity)
+    Action: [tau] (applied torque)
+    Dynamics: Uses ground truth b (damping) and J (moment of inertia).
+
+    Args:
+        params: EnvParams dataclass with common environment parameters.
+        true_b: Ground truth damping coefficient.
+        true_J: Ground truth moment of inertia.
+
+    Returns:
+        Tuple of (reset_fn, step_fn, get_obs_fn).
+    """
+    # Known constants
+    m = 1.0
+    g = 9.81
+    l = 1.0
+    dt = params.dt
+
+    @jax.jit
+    def _step_dynamics(state: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
+        """Damped pendulum dynamics with ground truth parameters."""
+        phi, phi_dot = state[0], state[1]
+        tau = action[0]
+        phi_ddot = (tau - true_b * phi_dot - m * g * l * jnp.sin(phi)) / true_J
+        phi_next = phi + phi_dot * dt
+        phi_dot_next = phi_dot + phi_ddot * dt
+        return jnp.array([phi_next, phi_dot_next])
+
+    @jax.jit
+    def reset_fn(key: jax.random.PRNGKey):
+        """Reset to initial state: small angle from downward vertical, at rest."""
+        return jnp.array([0.1, 0.0], dtype=jnp.float32)
+
+    @jax.jit
+    def get_obs_fn(state: jnp.ndarray):
+        """Returns state with agent dimension."""
+        return state[None, :]  # Shape: (1, 2)
+
+    @jax.jit
+    def step_fn(state: jnp.ndarray, step_count: int, action: jnp.ndarray):
+        """Steps the environment forward."""
+        # Clip action to torque bounds
+        clipped_action = jnp.clip(action.squeeze(), -params.max_accel, params.max_accel)
+
+        # Step dynamics
+        next_state = _step_dynamics(state, jnp.atleast_1d(clipped_action))
+
+        # Compute reward: negative swing-up cost
+        phi, phi_dot = next_state[0], next_state[1]
+        cost = (phi - jnp.pi) ** 2 + 0.1 * phi_dot ** 2 + 0.01 * clipped_action ** 2
+        reward = -cost
+        rewards = jnp.array([reward])
+
+        # No early termination for pendulum
+        terminated = False
+
+        # Check truncation
+        truncated = step_count >= params.max_episode_steps
+
+        observations = get_obs_fn(next_state)
+        info = {
+            "reward": reward,
+            "angle_error": jnp.abs(phi - jnp.pi),
+        }
+
+        return next_state, observations, rewards, terminated, truncated, info
+
+    return reset_fn, step_fn, get_obs_fn
+
+
 def init_env(config: Dict[str, Any]):
     """
     Initialize environment functions based on configuration.
@@ -876,6 +950,11 @@ def init_env(config: Dict[str, Any]):
         true_B = env_params_dict.pop("true_B", None)
         target_point = env_params_dict.pop("target_point", None)
 
+    # Hacky fix for damped_pendulum-specific params
+    if env_name == "damped_pendulum":
+        true_b = env_params_dict.pop("true_b", None)
+        true_J = env_params_dict.pop("true_J", None)
+
     params = EnvParams(**env_params_dict)
 
     print(f"Initializing environment: {env_name}")
@@ -890,6 +969,8 @@ def init_env(config: Dict[str, Any]):
         return make_blocker_goal_seeker_env(params)
     elif env_name == "linear_tracking":
         return make_linear_tracking_env(params, true_A, true_B, target_point)
+    elif env_name == "damped_pendulum":
+        return make_damped_pendulum_env(params, true_b, true_J)
     elif env_name == "unicycle":
         true_tracking_weight = env_params_dict.pop("true_tracking_weight", None)
         return make_pursuit_evasion_unicycle_double_integrator_env(params, true_tracking_weight)
