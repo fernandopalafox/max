@@ -99,8 +99,8 @@ def main(config, save_dir):
     eval_actions = jax.random.uniform(
         action_key,
         shape=(config["eval_traj_horizon"], config["dim_action"]),
-        minval=jnp.array(config["normalization_params"]["action"]["min"]),
-        maxval=jnp.array(config["normalization_params"]["action"]["max"]),
+        minval=jnp.array(config["planner_params"]["action_low"]),
+        maxval=jnp.array(config["planner_params"]["action_high"]),
     )
 
     key, reset_key = jax.random.split(key)
