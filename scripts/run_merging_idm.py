@@ -188,9 +188,9 @@ def main(config, save_dir):
     )
     key = jax.random.key(config["seed"])
 
-    # Ground truth parameters for evaluation
-    true_T_vec = jnp.array(config["env_params"]["true_T_vec"])
-    true_b_vec = jnp.array(config["env_params"]["true_b_vec"])
+    # Ground truth parameters for evaluation (V3 & V4 only — V2 is fixed/known)
+    true_T_vec = jnp.array(config["env_params"]["true_T_vec"][1:])
+    true_b_vec = jnp.array(config["env_params"]["true_b_vec"][1:])
     true_params = {
         "model": {
             "T": true_T_vec,
@@ -431,7 +431,7 @@ def main(config, save_dir):
                     "eval/param_diff": param_diff,
                     "eval/cov_trace": cov_trace,
                 }
-                for j, name in enumerate(["v2", "v3", "v4"]):
+                for j, name in enumerate(["v3", "v4"]):
                     param_log[f"params/T_{name}"] = float(
                         learned_T[j]
                     )

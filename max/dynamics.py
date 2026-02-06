@@ -630,11 +630,12 @@ def create_merging_idm_dynamics(
     normalizer_params: Optional[jnp.ndarray] = None,
 ) -> tuple[NamedTuple, dict]:
     """
-    Creates dynamics for highway merging with 3 IDM vehicles and learnable parameters.
+    Creates dynamics for highway merging with 3 IDM vehicles.
 
     State: [ego_px, ego_py, ego_vx, ego_vy, v2_px, v2_vx, v3_px, v3_vx, v4_px, v4_vx] (10D)
     Action: [ax, ay] (2D ego acceleration)
-    Trainable Params: T (3,) time headway, b (3,) comfortable deceleration per IDM vehicle.
+    Trainable Params: T (2,) time headway, b (2,) comfortable deceleration for V3 & V4.
+    Fixed Params: V2 (lead vehicle) T and b from config.
     Known Constants: v0, s0, a_max, delta, L, k_lat, d0, k_lon, s_min, p_y_target, dt.
     """
     dp = config["dynamics_params"]
@@ -649,14 +650,18 @@ def create_merging_idm_dynamics(
     k_lon = dp["k_lon"]
     s_min = dp["s_min"]
     p_y_target = dp["p_y_target"]
+    fixed_T_v2 = dp["fixed_T_v2"]
+    fixed_b_v2 = dp["fixed_b_v2"]
 
     @jax.jit
     def pred_one_step(
         params: Any, state: jnp.ndarray, action: jnp.ndarray
     ) -> jnp.ndarray:
-        """Predicts next state using merging IDM dynamics with learnable T, b."""
-        T_vec = params["model"]["T"]  # (3,)
-        b_vec = params["model"]["b"]  # (3,)
+        """Predicts next state using merging IDM dynamics with learnable T, b for V3/V4."""
+        T_learn = params["model"]["T"]  # (2,) — V3, V4 only
+        b_learn = params["model"]["b"]  # (2,)
+        T_vec = jnp.concatenate([jnp.array([fixed_T_v2]), T_learn])
+        b_vec = jnp.concatenate([jnp.array([fixed_b_v2]), b_learn])
 
         ego_px, ego_py, ego_vx, ego_vy = state[0], state[1], state[2], state[3]
         ax, ay = action[0], action[1]
