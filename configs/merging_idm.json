@@ -1,7 +1,7 @@
 {
   "env_name": "merging_idm",
   "num_agents": 1,
-  "total_steps": 250,
+  "total_steps": 300,
   "dim_state": 6,
   "dim_action": 2,
   "train_freq": 1,
@@ -29,10 +29,10 @@
     "k_lon": 1.0,
     "s_min": 0.1,
     "p_y_target": 0.0,
-    "init_T": 5.0,
-    "init_b": 5.0,
-    "init_k_lat": 3.0,
-    "init_d0": 1.0
+    "init_T": 0.5,
+    "init_b": 1.0,
+    "init_k_lat": 5.0,
+    "init_d0": 0.5
   },
 
   "env_params": {
@@ -40,10 +40,10 @@
     "max_episode_steps": 1000,
     "dt": 0.1,
     "max_accel": 2.0,
-    "true_T": 0.3,
-    "true_b": 0.5,
-    "true_k_lat": 10.0,
-    "true_d0": 0.5,
+    "true_T": 2.0,
+    "true_b": 3.0,
+    "true_k_lat": 2.0,
+    "true_d0": 2.0,
     "idm_params": {
       "v0": 10.0,
       "s0": 2.0,
@@ -65,14 +65,14 @@
     "proc_noise_init": 0.0,
     "proc_noise_decay": 1.0,
     "proc_noise_floor": 0.0,
-    "init_cov_scale": 0.1,
+    "init_cov_scale": 0.5,
     "jitter": 1e-6
   },
 
   "normalization_params": {
     "state": {
       "min": [-10.0, -7.0, 0.0, -5.0, -10.0, 0.0],
-      "max": [100.0, 3.5, 15.0, 5.0, 100.0, 15.0]
+      "max": [200.0, 3.5, 15.0, 5.0, 200.0, 15.0]
     },
     "action": {
       "min": [-2.0, -2.0],
@@ -108,7 +108,7 @@
     "q_vs": 10.0,
     "q_vd": 0.1,
     "q_s": 0.0,
-    "q_d": 10.0,
+    "q_d": 1.0,
     "q_f_d": 10000.0,
     "q_I": 5000000.0,
     "v_g": 10.0,
