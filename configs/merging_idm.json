@@ -1,0 +1,116 @@
+{
+  "env_name": "merging_idm",
+  "num_agents": 1,
+  "total_steps": 1000,
+  "dim_state": 10,
+  "dim_action": 2,
+  "train_freq": 1,
+  "train_model_freq": 1,
+  "train_policy_freq": 1,
+  "normalize_freq": 1000000,
+  "eval_freq": 10,
+  "eval_traj_horizon": 50,
+  "buffer_size": 2000,
+
+  "normalization": {
+    "method": "static"
+  },
+
+  "dynamics": "merging_idm",
+  "dynamics_params": {
+    "dt": 0.1,
+    "v0": 30.0,
+    "s0": 2.0,
+    "a_max": 2.0,
+    "delta": 4,
+    "L": 5.0,
+    "k_lat": 3.0,
+    "d0": 1.75,
+    "k_lon": 1.0,
+    "s_min": 0.1,
+    "p_y_target": 0.0,
+    "init_T": [1.4, 1.4, 1.4],
+    "init_b": [1.75, 1.75, 1.75]
+  },
+
+  "env_params": {
+    "num_agents": 1,
+    "max_episode_steps": 1000,
+    "dt": 0.1,
+    "max_accel": 2.0,
+    "true_T_vec": [2.0, 0.8, 0.8],
+    "true_b_vec": [2.5, 1.0, 1.0],
+    "idm_params": {
+      "v0": 30.0,
+      "s0": 2.0,
+      "a_max": 2.0,
+      "delta": 4,
+      "L": 5.0,
+      "k_lat": 3.0,
+      "d0": 1.75,
+      "k_lon": 1.0,
+      "s_min": 0.1,
+      "p_y_target": 0.0
+    }
+  },
+
+  "trainer": "ekf",
+  "trainer_params": {
+    "learning_rate": 10.0,
+    "weight_decay": 1.0,
+    "proc_noise_init": 0.001,
+    "proc_noise_decay": 0.999,
+    "proc_noise_floor": 0.0001,
+    "init_cov_scale": 0.5,
+    "jitter": 1e-6
+  },
+
+  "normalization_params": {
+    "state": {
+      "min": [-10.0, -7.0, 0.0, -5.0, -10.0, 0.0, -10.0, 0.0, -10.0, 0.0],
+      "max": [100.0, 3.5, 30.0, 5.0, 100.0, 30.0, 100.0, 30.0, 100.0, 30.0]
+    },
+    "action": {
+      "min": [-2.0, -2.0],
+      "max": [2.0, 2.0]
+    }
+  },
+
+  "state_labels": [
+    "ego_px", "ego_py", "ego_vx", "ego_vy",
+    "v2_px", "v2_vx", "v3_px", "v3_vx", "v4_px", "v4_vx"
+  ],
+
+  "cost_type": "merging_idm_info",
+  "planner_type": "icem",
+  "planner_params": {
+    "horizon": 30,
+    "batch_size": 300,
+    "max_iter": 5,
+    "elit_frac": 0.1,
+    "learning_rate": 0.9,
+    "dim_control": 2,
+    "action_low": [-2.0, -2.0],
+    "action_high": [2.0, 2.0]
+  },
+
+  "cost_fn_params": {
+    "weight_jerk": 0.01,
+    "weight_control": 0.01,
+    "weight_info": 0.0,
+    "meas_noise_diag": [
+      0.01, 0.01, 0.01, 0.01,
+      0.05, 0.05, 0.05, 0.05, 0.05, 0.05
+    ],
+    "q_vs": 10.0,
+    "q_vd": 0.1,
+    "q_s": 0.0,
+    "q_d": 10.0,
+    "q_f_d": 10000.0,
+    "q_I": 1000000.0,
+    "v_g": 10.0,
+    "p_y_target": 0.0,
+    "L": 5.0,
+    "lane_width": 2.0
+  }
+}

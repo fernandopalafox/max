@@ -164,6 +164,8 @@ def _terminal_cost_linear_tracking(state, target_point):
     return jnp.sum((state - target_point) ** 2)
 
 
+<<<<<<< Updated upstream
+=======
 def _stage_cost_pendulum_swing_up(
     state, control, cost_params, weight_control, weight_info, info_term_fn
 ):
@@ -205,6 +207,88 @@ def _terminal_cost_pendulum_swing_up(state):
     return (phi - jnp.pi) ** 2 + 0.1 * phi_dot ** 2
 
 
+def _stage_cost_merging_idm(
+    state, control, cost_params,
+    Q_diag, q_I, p_y_target, v_g, L, lane_width,
+    weight_control, weight_info, info_term_fn,
+):
+    """
+    Stage cost for merging IDM: quadratic tracking + indicator penalties + info gathering.
+    """
+    # Goal: [0, p_y_target, v_g, 0, 0, 0, 0, 0, 0, 0]
+    goal = jnp.zeros(10).at[1].set(p_y_target).at[2].set(v_g)
+
+    # Quadratic tracking
+    err = state - goal
+    tracking_cost = jnp.sum(Q_diag * err**2)
+
+    # Control penalty
+    control_cost = weight_control * jnp.sum(control**2)
+
+    # Indicator penalties
+    ego_px, ego_py = state[0], state[1]
+
+    # 1. Collision: bounding-box overlap with each IDM vehicle
+    def check_collision_j(vj_px):
+        lon_overlap = (jnp.abs(ego_px - vj_px) < L)
+        lat_overlap = (jnp.abs(ego_py - p_y_target) < lane_width)
+        return jnp.logical_and(lon_overlap, lat_overlap).astype(jnp.float32)
+
+    collision = jnp.maximum(jnp.maximum(
+        check_collision_j(state[4]), check_collision_j(state[6])),
+        check_collision_j(state[8]))
+
+    # 2. Road boundary
+    road = jnp.logical_or(ego_py < -7.0, ego_py > 3.5).astype(jnp.float32)
+
+    # 3. Invalid merge: ego merged laterally but not between v2 and v4
+    merged = (jnp.abs(ego_py - p_y_target) < 1.0)
+    between = jnp.logical_and(ego_px < state[4], ego_px > state[8])
+    invalid = jnp.logical_and(merged, jnp.logical_not(between)).astype(jnp.float32)
+
+    indicator_cost = q_I * (collision + road + invalid)
+
+    # Information gathering term
+    exploration_term = 0.0
+    if info_term_fn is not None:
+        exploration_term = -weight_info * info_term_fn(
+            state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
+        )
+
+    return tracking_cost + control_cost + indicator_cost + exploration_term
+
+
+def _terminal_cost_merging_idm(state, Qf_diag, q_I, p_y_target, v_g, L, lane_width):
+    """
+    Terminal cost for merging IDM: large lateral penalty + indicator penalties.
+    """
+    goal = jnp.zeros(10).at[1].set(p_y_target).at[2].set(v_g)
+    err = state - goal
+    terminal_tracking = jnp.sum(Qf_diag * err**2)
+
+    ego_px, ego_py = state[0], state[1]
+
+    def check_collision_j(vj_px):
+        lon_overlap = (jnp.abs(ego_px - vj_px) < L)
+        lat_overlap = (jnp.abs(ego_py - p_y_target) < lane_width)
+        return jnp.logical_and(lon_overlap, lat_overlap).astype(jnp.float32)
+
+    collision = jnp.maximum(jnp.maximum(
+        check_collision_j(state[4]), check_collision_j(state[6])),
+        check_collision_j(state[8]))
+
+    road = jnp.logical_or(ego_py < -7.0, ego_py > 3.5).astype(jnp.float32)
+
+    merged = (jnp.abs(ego_py - p_y_target) < 1.0)
+    between = jnp.logical_and(ego_px < state[4], ego_px > state[8])
+    invalid = jnp.logical_and(merged, jnp.logical_not(between)).astype(jnp.float32)
+
+    indicator_cost = q_I * (collision + road + invalid)
+
+    return terminal_tracking + indicator_cost
+
+
+>>>>>>> Stashed changes
 # --- Main factory function ---
 
 
@@ -319,6 +403,8 @@ def init_cost(config, dynamics_model):
 
         return cost_fn
 
+<<<<<<< Updated upstream
+=======
     elif cost_type == "pendulum_swing_up_info":
         # Extract params
         params = config["cost_fn_params"]
@@ -368,5 +454,76 @@ def init_cost(config, dynamics_model):
 
         return cost_fn
 
+    elif cost_type == "merging_idm_info":
+        params_cfg = config["cost_fn_params"]
+        weight_jerk = params_cfg.get("weight_jerk", 0.0)
+        weight_control = params_cfg["weight_control"]
+        weight_info = params_cfg["weight_info"]
+        meas_noise_diag = jnp.array(params_cfg["meas_noise_diag"])
+
+        q_vs = params_cfg["q_vs"]
+        q_vd = params_cfg["q_vd"]
+        q_s = params_cfg["q_s"]
+        q_d = params_cfg["q_d"]
+        q_f_d = params_cfg["q_f_d"]
+        q_I = params_cfg["q_I"]
+        v_g = params_cfg["v_g"]
+        p_y_target = params_cfg["p_y_target"]
+        L_cost = params_cfg["L"]
+        lane_width = params_cfg.get("lane_width", 2.0)
+
+        Q_diag = jnp.array([
+            q_s, q_d, q_vs, q_vd,
+            0., 0., 0., 0., 0., 0.,
+        ])
+        Qf_diag = jnp.array([
+            0., q_f_d, 0., 0.,
+            0., 0., 0., 0., 0., 0.,
+        ])
+
+        info_term_fn = None
+        if weight_info > 0:
+            info_term_fn = make_info_gathering_term(
+                dynamics_model.pred_one_step, meas_noise_diag
+            )
+
+        stage_cost_vmap = jax.vmap(
+            lambda s, u, cp: _stage_cost_merging_idm(
+                s, u, cp,
+                Q_diag, q_I, p_y_target, v_g,
+                L_cost, lane_width,
+                weight_control, weight_info, info_term_fn,
+            ),
+            in_axes=(0, 0, None),
+        )
+
+        @jax.jit
+        def cost_fn(init_state, controls, cost_params):
+            states = _rollout(
+                init_state, controls, cost_params,
+                dynamics_model.pred_one_step,
+            )
+            stage_costs = stage_cost_vmap(
+                states[:-1], controls, cost_params,
+            )
+            terminal = _terminal_cost_merging_idm(
+                states[-1], Qf_diag, q_I,
+                p_y_target, v_g, L_cost, lane_width,
+            )
+
+            jerk = 0.0
+            if weight_jerk > 0:
+                control_diffs = jnp.diff(controls, axis=0)
+                jerk = weight_jerk * jnp.sum(
+                    control_diffs**2
+                )
+
+            return (
+                jnp.sum(stage_costs) + terminal + jerk
+            )
+
+        return cost_fn
+
+>>>>>>> Stashed changes
     else:
         raise ValueError(f"Unknown cost type: '{cost_type}'")
