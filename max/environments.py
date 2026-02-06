@@ -813,8 +813,8 @@ def make_linear_tracking_env(params: EnvParams, true_A, true_B, target_point):
         pos = jax.random.uniform(
             key,
             shape=(2,),
-            minval=-params.box_half_width,
-            maxval=params.box_half_width,
+            minval=-0.1 * params.box_half_width,
+            maxval=0.1 * params.box_half_width,
             dtype=jnp.float32,
         )
         vel = jnp.zeros(2, dtype=jnp.float32)
