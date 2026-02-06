@@ -634,9 +634,10 @@ def create_merging_idm_dynamics(
 
     State: [ego_px, ego_py, ego_vx, ego_vy, v2_px, v2_vx, v3_px, v3_vx, v4_px, v4_vx] (10D)
     Action: [ax, ay] (2D ego acceleration)
-    Trainable Params: T (2,) time headway, b (2,) comfortable deceleration for V3 & V4.
+    Trainable Params: T (2,) time headway, b (2,) comfortable deceleration for V3 & V4,
+                      k_lat (scalar) lateral sigmoid steepness, d0 (scalar) lateral distance threshold.
     Fixed Params: V2 (lead vehicle) T and b from config.
-    Known Constants: v0, s0, a_max, delta, L, k_lat, d0, k_lon, s_min, p_y_target, dt.
+    Known Constants: v0, s0, a_max, delta, L, k_lon, s_min, p_y_target, dt.
     """
     dp = config["dynamics_params"]
     dt = dp["dt"]
@@ -645,8 +646,6 @@ def create_merging_idm_dynamics(
     a_max_idm = dp["a_max"]
     delta = dp["delta"]
     L = dp["L"]
-    k_lat = dp["k_lat"]
-    d0 = dp["d0"]
     k_lon = dp["k_lon"]
     s_min = dp["s_min"]
     p_y_target = dp["p_y_target"]
@@ -657,9 +656,11 @@ def create_merging_idm_dynamics(
     def pred_one_step(
         params: Any, state: jnp.ndarray, action: jnp.ndarray
     ) -> jnp.ndarray:
-        """Predicts next state using merging IDM dynamics with learnable T, b for V3/V4."""
+        """Predicts next state using merging IDM dynamics with learnable T, b, k_lat, d0."""
         T_learn = params["model"]["T"]  # (2,) — V3, V4 only
         b_learn = params["model"]["b"]  # (2,)
+        k_lat_val = params["model"]["k_lat"]  # scalar
+        d0_val = params["model"]["d0"]  # scalar
         T_vec = jnp.concatenate([jnp.array([fixed_T_v2]), T_learn])
         b_vec = jnp.concatenate([jnp.array([fixed_b_v2]), b_learn])
 
@@ -673,7 +674,7 @@ def create_merging_idm_dynamics(
         next_ego_vy = ego_vy + ay * dt
 
         # Lateral proximity sigmoid (shared)
-        sigma_lat = 1.0 / (1.0 + jnp.exp(k_lat * (jnp.abs(ego_py - p_y_target) - d0)))
+        sigma_lat = 1.0 / (1.0 + jnp.exp(k_lat_val * (jnp.abs(ego_py - p_y_target) - d0_val)))
 
         # IDM vehicle states
         v2_px, v2_vx = state[4], state[5]
@@ -720,10 +721,14 @@ def create_merging_idm_dynamics(
     # Initialize learnable parameters
     init_T = jnp.array(dp["init_T"])
     init_b = jnp.array(dp["init_b"])
+    init_k_lat = jnp.array(dp["init_k_lat"])
+    init_d0 = jnp.array(dp["init_d0"])
 
     model_params = {
         "T": init_T,
         "b": init_b,
+        "k_lat": init_k_lat,
+        "d0": init_d0,
     }
     params = {"model": model_params, "normalizer": None}
     model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=None)

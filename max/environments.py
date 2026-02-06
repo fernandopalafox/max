@@ -1095,6 +1095,8 @@ def init_env(config: Dict[str, Any]):
     if env_name == "merging_idm":
         true_T_vec = jnp.array(env_params_dict.pop("true_T_vec"))
         true_b_vec = jnp.array(env_params_dict.pop("true_b_vec"))
+        env_params_dict.pop("true_k_lat", None)
+        env_params_dict.pop("true_d0", None)
         merging_idm_params = env_params_dict.pop("idm_params")
 
     params = EnvParams(**env_params_dict)

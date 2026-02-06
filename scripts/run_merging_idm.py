@@ -91,7 +91,7 @@ def plot_merging_trajectory(buffers, buffer_idx, config):
     return fig
 
 
-def make_merging_animation(buffers, buffer_idx, config, fps=20):
+def make_merging_animation(buffers, buffer_idx, config, fps=30):
     """Create a GIF animation showing car blocks moving over time."""
     states = np.array(buffers["states"][0, :buffer_idx, :])
     dt = config["env_params"]["dt"]
@@ -191,10 +191,14 @@ def main(config, save_dir):
     # Ground truth parameters for evaluation (V3 & V4 only — V2 is fixed/known)
     true_T_vec = jnp.array(config["env_params"]["true_T_vec"][1:])
     true_b_vec = jnp.array(config["env_params"]["true_b_vec"][1:])
+    true_k_lat = jnp.array(config["env_params"]["true_k_lat"])
+    true_d0 = jnp.array(config["env_params"]["true_d0"])
     true_params = {
         "model": {
             "T": true_T_vec,
             "b": true_b_vec,
+            "k_lat": true_k_lat,
+            "d0": true_d0,
         },
         "normalizer": None,
     }
@@ -467,6 +471,16 @@ def main(config, save_dir):
                     param_log[f"params/b_{name}_err"] = float(
                         jnp.abs(learned_b[j] - true_b_vec[j])
                     )
+                learned_k_lat = train_state.params["model"]["k_lat"]
+                learned_d0 = train_state.params["model"]["d0"]
+                param_log["params/k_lat"] = float(learned_k_lat)
+                param_log["params/d0"] = float(learned_d0)
+                param_log["params/k_lat_err"] = float(
+                    jnp.abs(learned_k_lat - true_k_lat)
+                )
+                param_log["params/d0_err"] = float(
+                    jnp.abs(learned_d0 - true_d0)
+                )
                 wandb.log(param_log, step=step)
 
         # Handle Buffer Overflow
