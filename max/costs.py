@@ -211,10 +211,11 @@ def _stage_cost_merging_idm(
     weight_control, weight_info, info_term_fn,
 ):
     """
-    Stage cost for merging IDM: quadratic tracking + indicator penalties + info gathering.
+    Stage cost for merging IDM (1 vehicle): quadratic tracking
+    + indicator penalties + info gathering.
     """
-    # Goal: [0, p_y_target, v_g, 0, 0, 0, 0, 0, 0, 0]
-    goal = jnp.zeros(10).at[1].set(p_y_target).at[2].set(v_g)
+    # Goal: [0, p_y_target, v_g, 0, 0, 0]
+    goal = jnp.zeros(6).at[1].set(p_y_target).at[2].set(v_g)
 
     # Quadratic tracking
     err = state - goal
@@ -225,24 +226,28 @@ def _stage_cost_merging_idm(
 
     # Indicator penalties
     ego_px, ego_py = state[0], state[1]
+    idm_px = state[4]
 
-    # 1. Collision: bounding-box overlap with each IDM vehicle
-    def check_collision_j(vj_px):
-        lon_overlap = (jnp.abs(ego_px - vj_px) < L)
-        lat_overlap = (jnp.abs(ego_py - p_y_target) < lane_width)
-        return jnp.logical_and(lon_overlap, lat_overlap).astype(jnp.float32)
-
-    collision = jnp.maximum(jnp.maximum(
-        check_collision_j(state[4]), check_collision_j(state[6])),
-        check_collision_j(state[8]))
+    # 1. Collision with the single IDM vehicle
+    lon_overlap = (jnp.abs(ego_px - idm_px) < L)
+    lat_overlap = (
+        jnp.abs(ego_py - p_y_target) < lane_width
+    )
+    collision = jnp.logical_and(
+        lon_overlap, lat_overlap
+    ).astype(jnp.float32)
 
     # 2. Road boundary
-    road = jnp.logical_or(ego_py < -7.0, ego_py > 3.5).astype(jnp.float32)
+    road = jnp.logical_or(
+        ego_py < -7.0, ego_py > 3.5
+    ).astype(jnp.float32)
 
-    # 3. Invalid merge: ego merged laterally but not between v2 and v4
+    # 3. Invalid merge: ego in target lane but behind IDM
     merged = (jnp.abs(ego_py - p_y_target) < 1.0)
-    between = jnp.logical_and(ego_px < state[4], ego_px > state[8])
-    invalid = jnp.logical_and(merged, jnp.logical_not(between)).astype(jnp.float32)
+    behind = (ego_px < idm_px)
+    invalid = jnp.logical_and(
+        merged, behind
+    ).astype(jnp.float32)
 
     indicator_cost = q_I * (collision + road + invalid)
 
@@ -250,36 +255,47 @@ def _stage_cost_merging_idm(
     exploration_term = 0.0
     if info_term_fn is not None:
         exploration_term = -weight_info * info_term_fn(
-            state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
+            state, control,
+            cost_params["dyn_params"],
+            cost_params["params_cov_model"],
         )
 
-    return tracking_cost + control_cost + indicator_cost + exploration_term
+    return (
+        tracking_cost + control_cost
+        + indicator_cost + exploration_term
+    )
 
 
-def _terminal_cost_merging_idm(state, Qf_diag, q_I, p_y_target, v_g, L, lane_width):
+def _terminal_cost_merging_idm(
+    state, Qf_diag, q_I, p_y_target, v_g, L, lane_width,
+):
     """
-    Terminal cost for merging IDM: large lateral penalty + indicator penalties.
+    Terminal cost for merging IDM (1 vehicle).
     """
-    goal = jnp.zeros(10).at[1].set(p_y_target).at[2].set(v_g)
+    goal = jnp.zeros(6).at[1].set(p_y_target).at[2].set(v_g)
     err = state - goal
     terminal_tracking = jnp.sum(Qf_diag * err**2)
 
     ego_px, ego_py = state[0], state[1]
+    idm_px = state[4]
 
-    def check_collision_j(vj_px):
-        lon_overlap = (jnp.abs(ego_px - vj_px) < L)
-        lat_overlap = (jnp.abs(ego_py - p_y_target) < lane_width)
-        return jnp.logical_and(lon_overlap, lat_overlap).astype(jnp.float32)
+    lon_overlap = (jnp.abs(ego_px - idm_px) < L)
+    lat_overlap = (
+        jnp.abs(ego_py - p_y_target) < lane_width
+    )
+    collision = jnp.logical_and(
+        lon_overlap, lat_overlap
+    ).astype(jnp.float32)
 
-    collision = jnp.maximum(jnp.maximum(
-        check_collision_j(state[4]), check_collision_j(state[6])),
-        check_collision_j(state[8]))
-
-    road = jnp.logical_or(ego_py < -7.0, ego_py > 3.5).astype(jnp.float32)
+    road = jnp.logical_or(
+        ego_py < -7.0, ego_py > 3.5
+    ).astype(jnp.float32)
 
     merged = (jnp.abs(ego_py - p_y_target) < 1.0)
-    between = jnp.logical_and(ego_px < state[4], ego_px > state[8])
-    invalid = jnp.logical_and(merged, jnp.logical_not(between)).astype(jnp.float32)
+    behind = (ego_px < idm_px)
+    invalid = jnp.logical_and(
+        merged, behind
+    ).astype(jnp.float32)
 
     indicator_cost = q_I * (collision + road + invalid)
 
@@ -468,12 +484,10 @@ def init_cost(config, dynamics_model):
         lane_width = params_cfg.get("lane_width", 2.0)
 
         Q_diag = jnp.array([
-            q_s, q_d, q_vs, q_vd,
-            0., 0., 0., 0., 0., 0.,
+            q_s, q_d, q_vs, q_vd, 0., 0.,
         ])
         Qf_diag = jnp.array([
-            0., q_f_d, 0., 0.,
-            0., 0., 0., 0., 0., 0.,
+            0., q_f_d, 0., 0., 0., 0.,
         ])
 
         info_term_fn = None

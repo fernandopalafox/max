@@ -2,7 +2,7 @@
   "env_name": "merging_idm",
   "num_agents": 1,
   "total_steps": 250,
-  "dim_state": 10,
+  "dim_state": 6,
   "dim_action": 2,
   "train_freq": 1,
   "train_model_freq": 1,
@@ -29,10 +29,8 @@
     "k_lon": 1.0,
     "s_min": 0.1,
     "p_y_target": 0.0,
-    "fixed_T_v2": 2.0,
-    "fixed_b_v2": 2.5,
-    "init_T": [8.0, 8.0],
-    "init_b": [8.0, 8.0],
+    "init_T": 5.0,
+    "init_b": 5.0,
     "init_k_lat": 3.0,
     "init_d0": 1.0
   },
@@ -42,8 +40,8 @@
     "max_episode_steps": 1000,
     "dt": 0.1,
     "max_accel": 2.0,
-    "true_T_vec": [2.0, 0.3, 0.3],
-    "true_b_vec": [2.5, 0.5, 0.5],
+    "true_T": 0.3,
+    "true_b": 0.5,
     "true_k_lat": 10.0,
     "true_d0": 0.5,
     "idm_params": {
@@ -73,8 +71,8 @@
 
   "normalization_params": {
     "state": {
-      "min": [-10.0, -7.0, 0.0, -5.0, -10.0, 0.0, -10.0, 0.0, -10.0, 0.0],
-      "max": [100.0, 3.5, 15.0, 5.0, 100.0, 15.0, 100.0, 15.0, 100.0, 15.0]
+      "min": [-10.0, -7.0, 0.0, -5.0, -10.0, 0.0],
+      "max": [100.0, 3.5, 15.0, 5.0, 100.0, 15.0]
     },
     "action": {
       "min": [-2.0, -2.0],
@@ -84,7 +82,7 @@
 
   "state_labels": [
     "ego_px", "ego_py", "ego_vx", "ego_vy",
-    "v2_px", "v2_vx", "v3_px", "v3_vx", "v4_px", "v4_vx"
+    "idm_px", "idm_vx"
   ],
 
   "cost_type": "merging_idm_info",
@@ -105,8 +103,7 @@
     "weight_control": 0.01,
     "weight_info": 0.0,
     "meas_noise_diag": [
-      0.01, 0.01, 0.01, 0.01,
-      0.05, 0.05, 0.05, 0.05, 0.05, 0.05
+      0.01, 0.01, 0.01, 0.01, 0.05, 0.05
     ],
     "q_vs": 10.0,
     "q_vd": 0.1,

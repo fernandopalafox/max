@@ -932,19 +932,20 @@ def make_damped_pendulum_env(params: EnvParams, true_b, true_J):
     return reset_fn, step_fn, get_obs_fn
 
 
-def make_merging_idm_env(params: EnvParams, true_T_vec, true_b_vec, idm_params):
+def make_merging_idm_env(params: EnvParams, true_T, true_b, idm_params):
     """
     Factory function for the highway merging IDM environment.
 
-    State: [ego_px, ego_py, ego_vx, ego_vy, v2_px, v2_vx, v3_px, v3_vx, v4_px, v4_vx] (10D)
+    State: [ego_px, ego_py, ego_vx, ego_vy, idm_px, idm_vx] (6D)
     Action: [ax, ay] (2D ego acceleration)
-    Dynamics: Ego double-integrator + 3 IDM vehicles with sigmoid-blended lead selection.
+    Dynamics: Ego double-integrator + 1 IDM vehicle with
+              sigmoid-blended lead selection.
 
     Args:
-        params: EnvParams dataclass with dt, max_episode_steps, max_accel.
-        true_T_vec: jnp.ndarray (3,) -- ground truth time headway per IDM vehicle.
-        true_b_vec: jnp.ndarray (3,) -- ground truth comfortable deceleration per IDM vehicle.
-        idm_params: dict with IDM constants (v0, s0, a_max, delta, L, k_lat, d0, k_lon, s_min, p_y_target).
+        params: EnvParams dataclass.
+        true_T: scalar ground truth time headway.
+        true_b: scalar ground truth comfortable deceleration.
+        idm_params: dict with IDM constants.
 
     Returns:
         Tuple of (reset_fn, step_fn, get_obs_fn).
@@ -962,9 +963,12 @@ def make_merging_idm_env(params: EnvParams, true_T_vec, true_b_vec, idm_params):
     p_y_target = idm_params["p_y_target"]
 
     @jax.jit
-    def _step_dynamics(state: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
+    def _step_dynamics(
+        state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
         """Merging IDM dynamics with ground truth parameters."""
-        ego_px, ego_py, ego_vx, ego_vy = state[0], state[1], state[2], state[3]
+        ego_px, ego_py = state[0], state[1]
+        ego_vx, ego_vy = state[2], state[3]
         ax, ay = action[0], action[1]
 
         # Ego double integrator
@@ -973,27 +977,28 @@ def make_merging_idm_env(params: EnvParams, true_T_vec, true_b_vec, idm_params):
         next_ego_vx = jnp.maximum(ego_vx + ax * dt, 0.0)
         next_ego_vy = ego_vy + ay * dt
 
-        # Lateral proximity sigmoid (shared)
-        sigma_lat = 1.0 / (1.0 + jnp.exp(k_lat * (jnp.abs(ego_py - p_y_target) - d0)))
+        # Lateral proximity sigmoid
+        sigma_lat = 1.0 / (
+            1.0 + jnp.exp(
+                k_lat * (jnp.abs(ego_py - p_y_target) - d0)
+            )
+        )
 
-        # IDM vehicle states
-        v2_px, v2_vx = state[4], state[5]
-        v3_px, v3_vx = state[6], state[7]
-        v4_px, v4_vx = state[8], state[9]
+        # IDM vehicle state
+        idm_px, idm_vx = state[4], state[5]
 
-        veh_px = jnp.array([v2_px, v3_px, v4_px])
-        veh_vx = jnp.array([v2_vx, v3_vx, v4_vx])
+        # No in-lane leader
+        s_lane = 1000.0
+        dv_lane = 0.0
 
-        # In-lane gaps and approach rates
-        s_lane = jnp.array([1000.0, v2_px - v3_px - L, v3_px - v4_px - L])
-        dv_lane = jnp.array([0.0, v3_vx - v2_vx, v4_vx - v3_vx])
-
-        # Gaps and approach rates w.r.t. ego
-        s_ego = ego_px - veh_px - L
-        dv_ego = veh_vx - ego_vx
+        # Gap and approach rate w.r.t. ego
+        s_ego = ego_px - idm_px - L
+        dv_ego = idm_vx - ego_vx
 
         # Blending weights
-        sigma_lon = 1.0 / (1.0 + jnp.exp(-k_lon * (ego_px - veh_px)))
+        sigma_lon = 1.0 / (
+            1.0 + jnp.exp(-k_lon * (ego_px - idm_px))
+        )
         alpha = sigma_lat * sigma_lon
 
         # Blended effective quantities
@@ -1003,49 +1008,63 @@ def make_merging_idm_env(params: EnvParams, true_T_vec, true_b_vec, idm_params):
         # Safety clamp
         s_eff = jax.nn.softplus(s_eff - s_min) + s_min
 
-        # IDM acceleration for each vehicle
-        s_star = s0 + veh_vx * true_T_vec + veh_vx * dv_eff / (2.0 * jnp.sqrt(a_max_idm * true_b_vec + 1e-8))
-        a_idm = a_max_idm * (1.0 - (veh_vx / v0) ** delta - (s_star / s_eff) ** 2)
+        # IDM acceleration
+        s_star = (
+            s0
+            + idm_vx * true_T
+            + idm_vx * dv_eff
+            / (2.0 * jnp.sqrt(a_max_idm * true_b + 1e-8))
+        )
+        a_idm = a_max_idm * (
+            1.0
+            - (idm_vx / v0) ** delta
+            - (s_star / s_eff) ** 2
+        )
 
-        # Update IDM vehicles
-        next_veh_px = veh_px + veh_vx * dt + 0.5 * a_idm * dt**2
-        next_veh_vx = jnp.maximum(veh_vx + a_idm * dt, 0.0)
+        # Update IDM vehicle
+        next_idm_px = (
+            idm_px + idm_vx * dt + 0.5 * a_idm * dt**2
+        )
+        next_idm_vx = jnp.maximum(idm_vx + a_idm * dt, 0.0)
 
         return jnp.array([
-            next_ego_px, next_ego_py, next_ego_vx, next_ego_vy,
-            next_veh_px[0], next_veh_vx[0],
-            next_veh_px[1], next_veh_vx[1],
-            next_veh_px[2], next_veh_vx[2],
+            next_ego_px, next_ego_py,
+            next_ego_vx, next_ego_vy,
+            next_idm_px, next_idm_vx,
         ])
 
     @jax.jit
     def reset_fn(key: jax.random.PRNGKey):
         """
-        Reset: ego in merge lane alongside gap between v3 and v4.
-        
-        Ego (5m) is at 12.0m. 
-        V3 is at 16.0m, V4 is at 8.0m. 
-        This creates a 3m physical gap—a guaranteed collision if 
-        the aggressive ground-truth vehicles don't yield.
+        Reset: ego in merge lane behind the IDM vehicle.
+        Ego merges in front of the IDM vehicle.
         """
         return jnp.array([
-            4.0, -3.5, 10.0, 0.0,  # Agent 1 (ego): [px, py, vx, vy]
-            24.0, 10.0,                        # Agent 2 (front): [px, vx]
-            16.0, 10.0,                        # Agent 3 (middle): [px, vx]
-            8.0, 10.0,                         # Agent 4 (rear): [px, vx]
+            4.0, -3.5, 12.0, 0.0,  # ego
+            15.0, 10.0,             # IDM vehicle (ahead)
         ], dtype=jnp.float32)
 
     @jax.jit
     def get_obs_fn(state: jnp.ndarray):
         """Returns state with agent dimension."""
-        return state[None, :]  # Shape: (1, 10)
+        return state[None, :]  # Shape: (1, 6)
 
     @jax.jit
-    def step_fn(state: jnp.ndarray, step_count: int, action: jnp.ndarray):
+    def step_fn(
+        state: jnp.ndarray,
+        step_count: int,
+        action: jnp.ndarray,
+    ):
         """Steps the merging IDM environment forward."""
-        clipped_action = jnp.clip(action.squeeze(), -params.max_accel, params.max_accel)
+        clipped_action = jnp.clip(
+            action.squeeze(),
+            -params.max_accel,
+            params.max_accel,
+        )
 
-        next_state = _step_dynamics(state, jnp.atleast_1d(clipped_action))
+        next_state = _step_dynamics(
+            state, jnp.atleast_1d(clipped_action)
+        )
 
         # Reward: penalize deviation from target speed and lane
         ego_vx_err = (next_state[2] - 10.0) ** 2
@@ -1063,7 +1082,10 @@ def make_merging_idm_env(params: EnvParams, true_T_vec, true_b_vec, idm_params):
             "ego_vx": next_state[2],
         }
 
-        return next_state, observations, rewards, terminated, truncated, info
+        return (
+            next_state, observations, rewards,
+            terminated, truncated, info,
+        )
 
     return reset_fn, step_fn, get_obs_fn
 
@@ -1093,8 +1115,8 @@ def init_env(config: Dict[str, Any]):
 
     # Hacky fix for merging_idm-specific params
     if env_name == "merging_idm":
-        true_T_vec = jnp.array(env_params_dict.pop("true_T_vec"))
-        true_b_vec = jnp.array(env_params_dict.pop("true_b_vec"))
+        true_T = jnp.array(env_params_dict.pop("true_T"))
+        true_b = jnp.array(env_params_dict.pop("true_b"))
         env_params_dict.pop("true_k_lat", None)
         env_params_dict.pop("true_d0", None)
         merging_idm_params = env_params_dict.pop("idm_params")
@@ -1116,7 +1138,9 @@ def init_env(config: Dict[str, Any]):
     elif env_name == "damped_pendulum":
         return make_damped_pendulum_env(params, true_b, true_J)
     elif env_name == "merging_idm":
-        return make_merging_idm_env(params, true_T_vec, true_b_vec, merging_idm_params)
+        return make_merging_idm_env(
+            params, true_T, true_b, merging_idm_params,
+        )
     elif env_name == "unicycle":
         true_tracking_weight = env_params_dict.pop("true_tracking_weight", None)
         return make_pursuit_evasion_unicycle_double_integrator_env(params, true_tracking_weight)
