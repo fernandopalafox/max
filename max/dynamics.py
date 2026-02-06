@@ -573,8 +573,6 @@ def create_linear_dynamics(
     return model, params
 
 
-<<<<<<< Updated upstream
-=======
 def create_damped_pendulum_dynamics(
     config: dict,
     normalizer: Normalizer,
@@ -728,7 +726,6 @@ def create_merging_idm_dynamics(
     return model, params
 
 
->>>>>>> Stashed changes
 def init_dynamics(
     key: jax.Array,
     config: Any,
@@ -770,8 +767,6 @@ def init_dynamics(
             config, normalizer, normalizer_params
         )
 
-<<<<<<< Updated upstream
-=======
     elif dynamics_type == "damped_pendulum":
         return create_damped_pendulum_dynamics(
             config, normalizer, normalizer_params
@@ -787,6 +782,5 @@ def init_dynamics(
             config, normalizer, normalizer_params
         )
 
->>>>>>> Stashed changes
     else:
         raise ValueError(f"Unknown dynamics type: '{dynamics_type}'")

@@ -164,8 +164,6 @@ def _terminal_cost_linear_tracking(state, target_point):
     return jnp.sum((state - target_point) ** 2)
 
 
-<<<<<<< Updated upstream
-=======
 def _stage_cost_pendulum_swing_up(
     state, control, cost_params, weight_control, weight_info, info_term_fn
 ):
@@ -288,7 +286,6 @@ def _terminal_cost_merging_idm(state, Qf_diag, q_I, p_y_target, v_g, L, lane_wid
     return terminal_tracking + indicator_cost
 
 
->>>>>>> Stashed changes
 # --- Main factory function ---
 
 
@@ -403,8 +400,6 @@ def init_cost(config, dynamics_model):
 
         return cost_fn
 
-<<<<<<< Updated upstream
-=======
     elif cost_type == "pendulum_swing_up_info":
         # Extract params
         params = config["cost_fn_params"]
@@ -524,6 +519,5 @@ def init_cost(config, dynamics_model):
 
         return cost_fn
 
->>>>>>> Stashed changes
     else:
         raise ValueError(f"Unknown cost type: '{cost_type}'")

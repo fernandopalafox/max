@@ -858,8 +858,6 @@ def make_linear_tracking_env(params: EnvParams, true_A, true_B, target_point):
     return reset_fn, step_fn, get_obs_fn
 
 
-<<<<<<< Updated upstream
-=======
 def make_damped_pendulum_env(params: EnvParams, true_b, true_J):
     """
     Factory function that creates a damped pendulum environment.
@@ -1063,7 +1061,6 @@ def make_merging_idm_env(params: EnvParams, true_T_vec, true_b_vec, idm_params):
     return reset_fn, step_fn, get_obs_fn
 
 
->>>>>>> Stashed changes
 def init_env(config: Dict[str, Any]):
     """
     Initialize environment functions based on configuration.
@@ -1082,8 +1079,6 @@ def init_env(config: Dict[str, Any]):
         true_B = env_params_dict.pop("true_B", None)
         target_point = env_params_dict.pop("target_point", None)
 
-<<<<<<< Updated upstream
-=======
     # Hacky fix for damped_pendulum-specific params
     if env_name == "damped_pendulum":
         true_b = env_params_dict.pop("true_b", None)
@@ -1095,7 +1090,6 @@ def init_env(config: Dict[str, Any]):
         true_b_vec = jnp.array(env_params_dict.pop("true_b_vec"))
         merging_idm_params = env_params_dict.pop("idm_params")
 
->>>>>>> Stashed changes
     params = EnvParams(**env_params_dict)
 
     print(f"Initializing environment: {env_name}")
@@ -1110,8 +1104,6 @@ def init_env(config: Dict[str, Any]):
         return make_blocker_goal_seeker_env(params)
     elif env_name == "linear_tracking":
         return make_linear_tracking_env(params, true_A, true_B, target_point)
-<<<<<<< Updated upstream
-=======
     elif env_name == "damped_pendulum":
         return make_damped_pendulum_env(params, true_b, true_J)
     elif env_name == "merging_idm":
@@ -1119,6 +1111,5 @@ def init_env(config: Dict[str, Any]):
     elif env_name == "unicycle":
         true_tracking_weight = env_params_dict.pop("true_tracking_weight", None)
         return make_pursuit_evasion_unicycle_double_integrator_env(params, true_tracking_weight)
->>>>>>> Stashed changes
     else:
         raise ValueError(f"Unknown environment name: '{env_name}'")
