@@ -18,6 +18,9 @@ import copy
 import os
 import pickle
 import json
+import tempfile
+from matplotlib.animation import FuncAnimation
+from matplotlib.patches import Rectangle
 
 
 def plot_merging_trajectory(buffers, buffer_idx, config):
@@ -86,6 +89,93 @@ def plot_merging_trajectory(buffers, buffer_idx, config):
 
     plt.tight_layout()
     return fig
+
+
+def make_merging_animation(buffers, buffer_idx, config, fps=20):
+    """Create a GIF animation showing car blocks moving over time."""
+    states = np.array(buffers["states"][0, :buffer_idx, :])
+    dt = config["env_params"]["dt"]
+    p_y_target = config["cost_fn_params"]["p_y_target"]
+    car_l, car_w = 4.0, 1.8  # car length and width for drawing
+
+    # Subsample frames to keep gif manageable
+    skip = max(1, len(states) // 200)
+    frames = states[::skip]
+
+    # Fixed y limits, x will track cars each frame
+    y_lo, y_hi = p_y_target - 7, p_y_target + 5
+    x_window = 60.0  # visible window width in meters
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+
+    # Lane markings (drawn long enough to always be visible)
+    all_px = np.concatenate([
+        frames[:, 0], frames[:, 4], frames[:, 6], frames[:, 8],
+    ])
+    lane_x_lo, lane_x_hi = all_px.min() - 20, all_px.max() + 20
+    for y_lane, ls in [
+        (p_y_target + 1.75, "-"), (p_y_target - 1.75, "-"),
+        (p_y_target - 3.5 + 1.75, ":"),
+        (p_y_target - 3.5 - 1.75, ":"),
+    ]:
+        ax.plot([lane_x_lo, lane_x_hi], [y_lane, y_lane],
+                color="gray", lw=1, ls=ls)
+    ax.set_ylim(y_lo, y_hi)
+    ax.set_aspect("equal")
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+
+    colors = {"ego": "dodgerblue", "V2": "orange",
+              "V3": "purple", "V4": "brown"}
+    rects = {}
+    labels = {}
+    for name in colors:
+        r = Rectangle((0, 0), car_l, car_w, fc=colors[name],
+                       ec="black", lw=0.8, alpha=0.85)
+        ax.add_patch(r)
+        rects[name] = r
+        t = ax.text(0, 0, name, ha="center", va="center",
+                    fontsize=7, fontweight="bold")
+        labels[name] = t
+
+    time_text = ax.text(0.02, 0.95, "", transform=ax.transAxes,
+                        fontsize=9)
+
+    def update(i):
+        s = frames[i]
+        # Ego
+        rects["ego"].set_xy(
+            (s[0] - car_l / 2, s[1] - car_w / 2)
+        )
+        labels["ego"].set_position((s[0], s[1]))
+        # IDM vehicles on target lane
+        for j, name in enumerate(["V2", "V3", "V4"]):
+            px = s[4 + 2 * j]
+            py = p_y_target
+            rects[name].set_xy(
+                (px - car_l / 2, py - car_w / 2)
+            )
+            labels[name].set_position((px, py))
+        # Pan x-axis to follow the leftmost car
+        x_min = min(s[0], s[4], s[6], s[8])
+        ax.set_xlim(x_min - 10, x_min - 10 + x_window)
+        time_text.set_text(f"t = {i * skip * dt:.1f}s")
+        return (
+            list(rects.values())
+            + list(labels.values())
+            + [time_text]
+        )
+
+    # blit=False needed since we update axis limits each frame
+    anim = FuncAnimation(
+        fig, update, frames=len(frames),
+        interval=1000 // fps, blit=False,
+    )
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".gif", delete=False)
+    anim.save(tmp.name, writer="pillow", fps=fps)
+    plt.close(fig)
+    return tmp.name
 
 
 def main(config, save_dir):
@@ -332,15 +422,29 @@ def main(config, save_dir):
                     else 0.0
                 )
 
-                wandb.log(
-                    {
-                        "eval/multi_step_loss": multi_step_loss,
-                        "eval/one_step_loss": one_step_loss,
-                        "eval/param_diff": param_diff,
-                        "eval/cov_trace": cov_trace,
-                    },
-                    step=step,
-                )
+                # Individual parameter errors
+                learned_T = train_state.params["model"]["T"]
+                learned_b = train_state.params["model"]["b"]
+                param_log = {
+                    "eval/multi_step_loss": multi_step_loss,
+                    "eval/one_step_loss": one_step_loss,
+                    "eval/param_diff": param_diff,
+                    "eval/cov_trace": cov_trace,
+                }
+                for j, name in enumerate(["v2", "v3", "v4"]):
+                    param_log[f"params/T_{name}"] = float(
+                        learned_T[j]
+                    )
+                    param_log[f"params/b_{name}"] = float(
+                        learned_b[j]
+                    )
+                    param_log[f"params/T_{name}_err"] = float(
+                        jnp.abs(learned_T[j] - true_T_vec[j])
+                    )
+                    param_log[f"params/b_{name}_err"] = float(
+                        jnp.abs(learned_b[j] - true_b_vec[j])
+                    )
+                wandb.log(param_log, step=step)
 
         # Handle Buffer Overflow
         if buffer_idx >= config["buffer_size"]:
@@ -397,6 +501,22 @@ def main(config, save_dir):
         )
         plt.close(fig)
         print("Trajectory plot logged to wandb.")
+
+        # Animation
+        print("Generating merging animation...")
+        gif_path = make_merging_animation(
+            buffers, buffer_idx, config
+        )
+        wandb.log(
+            {
+                "trajectory/animation": wandb.Video(
+                    gif_path, format="gif"
+                ),
+            },
+            step=config["total_steps"],
+        )
+        os.remove(gif_path)
+        print("Animation logged to wandb.")
 
     wandb.finish()
     print("Run complete.")
