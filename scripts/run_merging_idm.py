@@ -422,6 +422,27 @@ def main(config, save_dir):
                     else 0.0
                 )
 
+                # Lane tracking error (mean |ego_py - p_y_target|)
+                p_y_target = config["cost_fn_params"]["p_y_target"]
+                buf_states = buffers["states"][0, :buffer_idx]
+                ego_py_buf = buf_states[:, 1]
+                lane_error = float(
+                    jnp.mean(jnp.abs(ego_py_buf - p_y_target))
+                )
+
+                # Safety: mean sum of distances to V3 and V4
+                ego_px = buf_states[:, 0]
+                ego_py = buf_states[:, 1]
+                d_v3 = jnp.sqrt(
+                    (ego_px - buf_states[:, 6]) ** 2
+                    + (ego_py - p_y_target) ** 2
+                )
+                d_v4 = jnp.sqrt(
+                    (ego_px - buf_states[:, 8]) ** 2
+                    + (ego_py - p_y_target) ** 2
+                )
+                safety_dist = float(jnp.mean(d_v3 + d_v4))
+
                 # Individual parameter errors
                 learned_T = train_state.params["model"]["T"]
                 learned_b = train_state.params["model"]["b"]
@@ -430,6 +451,8 @@ def main(config, save_dir):
                     "eval/one_step_loss": one_step_loss,
                     "eval/param_diff": param_diff,
                     "eval/cov_trace": cov_trace,
+                    "eval/lane_error": lane_error,
+                    "eval/safety_dist": safety_dist,
                 }
                 for j, name in enumerate(["v3", "v4"]):
                     param_log[f"params/T_{name}"] = float(
@@ -533,16 +556,17 @@ if __name__ == "__main__":
         help="Custom name for the W&B run.",
     )
     parser.add_argument(
-        "--num-seeds",
-        type=int,
-        default=1,
-        help="Number of random seeds to run.",
+        "--lambdas",
+        type=float,
+        nargs="+",
+        default=None,
+        help="List of weight_info (lambda) values to sweep over.",
     )
     parser.add_argument(
-        "--meta-seed",
+        "--seed",
         type=int,
         default=42,
-        help="A seed to generate the run seeds.",
+        help="Random seed.",
     )
     parser.add_argument(
         "--save-dir",
@@ -560,28 +584,23 @@ if __name__ == "__main__":
     with open(config_path, "r") as f:
         CONFIG = json.load(f)
 
-    if args.meta_seed is not None:
-        rng = np.random.default_rng(args.meta_seed)
-        seeds = rng.integers(
-            low=0, high=2**32 - 1, size=args.num_seeds
-        )
+    run_name_base = args.run_name or "merging_idm"
+
+    if args.lambdas is None:
+        lambdas = [CONFIG["cost_fn_params"]["weight_info"]]
     else:
-        seeds = range(args.num_seeds)
+        lambdas = args.lambdas
 
-    for seed_idx, seed in enumerate(seeds):
-        print(f"--- Starting run for seed #{seed} ---")
+    for lam in lambdas:
+        print(f"--- Starting run for lambda={lam} ---")
         run_config = copy.deepcopy(CONFIG)
-        run_config["seed"] = int(seed)
+        run_config["seed"] = args.seed
         run_config["wandb_group"] = "merging_idm"
+        run_config["cost_fn_params"]["weight_info"] = lam
 
-        if args.run_name:
-            run_name_base = args.run_name
-        else:
-            run_name_base = "merging_idm"
-
-        if args.num_seeds > 1:
+        if len(lambdas) > 1:
             run_config["wandb_run_name"] = (
-                f"{run_name_base}_seed_{seed_idx}"
+                f"{run_name_base}_lam_{lam}"
             )
         else:
             run_config["wandb_run_name"] = run_name_base

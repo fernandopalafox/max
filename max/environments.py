@@ -1020,12 +1020,19 @@ def make_merging_idm_env(params: EnvParams, true_T_vec, true_b_vec, idm_params):
 
     @jax.jit
     def reset_fn(key: jax.random.PRNGKey):
-        """Reset: ego in merge lane alongside gap between v3 and v4."""
+        """
+        Reset: ego in merge lane alongside gap between v3 and v4.
+        
+        Ego (5m) is at 12.0m. 
+        V3 is at 16.0m, V4 is at 8.0m. 
+        This creates a 3m physical gap—a guaranteed collision if 
+        the aggressive ground-truth vehicles don't yield.
+        """
         return jnp.array([
-            12.0, p_y_target - 3.5, 10.0, 0.0,  # ego
-            24.0, 10.0,  # v2
-            16.0, 10.0,  # v3
-            8.0, 10.0,   # v4
+            4.0, -3.5, 10.0, 0.0,  # Agent 1 (ego): [px, py, vx, vy]
+            24.0, 10.0,                        # Agent 2 (front): [px, vx]
+            16.0, 10.0,                        # Agent 3 (middle): [px, vx]
+            8.0, 10.0,                         # Agent 4 (rear): [px, vx]
         ], dtype=jnp.float32)
 
     @jax.jit

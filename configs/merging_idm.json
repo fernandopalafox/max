@@ -1,7 +1,7 @@
 {
   "env_name": "merging_idm",
   "num_agents": 1,
-  "total_steps": 150,
+  "total_steps": 250,
   "dim_state": 10,
   "dim_action": 2,
   "train_freq": 1,
@@ -31,8 +31,8 @@
     "p_y_target": 0.0,
     "fixed_T_v2": 2.0,
     "fixed_b_v2": 2.5,
-    "init_T": [1.4, 1.4],
-    "init_b": [1.75, 1.75]
+    "init_T": [8.0, 8.0], 
+    "init_b": [8.0, 8.0]
   },
 
   "env_params": {
@@ -40,8 +40,8 @@
     "max_episode_steps": 1000,
     "dt": 0.1,
     "max_accel": 2.0,
-    "true_T_vec": [2.0, 0.8, 0.8],
-    "true_b_vec": [2.5, 1.0, 1.0],
+    "true_T_vec": [2.0, 0.3, 0.3], 
+    "true_b_vec": [2.5, 0.5, 0.5],
     "idm_params": {
       "v0": 10.0,
       "s0": 2.0,
@@ -60,10 +60,10 @@
   "trainer_params": {
     "learning_rate": 10.0,
     "weight_decay": 1.0,
-    "proc_noise_init": 0.001,
-    "proc_noise_decay": 0.999,
-    "proc_noise_floor": 0.0001,
-    "init_cov_scale": 0.5,
+    "proc_noise_init": 0.0,
+    "proc_noise_decay": 1.0,
+    "proc_noise_floor": 0.0,
+    "init_cov_scale": 0.1,
     "jitter": 1e-6
   },
 
