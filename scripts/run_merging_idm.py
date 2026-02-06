@@ -91,7 +91,7 @@ def plot_merging_trajectory(buffers, buffer_idx, config):
     return fig
 
 
-def make_merging_animation(buffers, buffer_idx, config, fps=30):
+def make_merging_animation(buffers, buffer_idx, config, fps=40):
     """Create a GIF animation showing car blocks moving over time."""
     states = np.array(buffers["states"][0, :buffer_idx, :])
     dt = config["env_params"]["dt"]
@@ -459,12 +459,6 @@ def main(config, save_dir):
                     "eval/safety_dist": safety_dist,
                 }
                 for j, name in enumerate(["v3", "v4"]):
-                    param_log[f"params/T_{name}"] = float(
-                        learned_T[j]
-                    )
-                    param_log[f"params/b_{name}"] = float(
-                        learned_b[j]
-                    )
                     param_log[f"params/T_{name}_err"] = float(
                         jnp.abs(learned_T[j] - true_T_vec[j])
                     )
@@ -473,8 +467,6 @@ def main(config, save_dir):
                     )
                 learned_k_lat = train_state.params["model"]["k_lat"]
                 learned_d0 = train_state.params["model"]["d0"]
-                param_log["params/k_lat"] = float(learned_k_lat)
-                param_log["params/d0"] = float(learned_d0)
                 param_log["params/k_lat_err"] = float(
                     jnp.abs(learned_k_lat - true_k_lat)
                 )
