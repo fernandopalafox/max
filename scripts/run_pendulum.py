@@ -1,4 +1,4 @@
-# run_linear.py
+# run_pendulum.py
 
 import jax
 import jax.numpy as jnp
@@ -20,36 +20,41 @@ import pickle
 import json
 
 
-def plot_linear_trajectory(buffers, buffer_idx, config):
-    """Plot agent trajectory and target point."""
+def plot_pendulum_trajectory(buffers, buffer_idx, config):
+    """Plot pendulum angle trajectory and phase portrait."""
     # Extract states (agent 0, valid timesteps only)
     states = np.array(buffers["states"][0, :buffer_idx, :])
 
-    # Extract positions
-    pos_x, pos_y = states[:, 0], states[:, 1]
-    target = config["cost_fn_params"]["target_point"]
+    # Extract angle and angular velocity
+    phi, phi_dot = states[:, 0], states[:, 1]
+    time = np.arange(len(phi)) * config["env_params"]["dt"]
 
-    # Create plot
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.plot(pos_x, pos_y, label="Agent Path", color="blue", linewidth=2, alpha=0.8)
+    # Create plot with two subplots
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Mark start (circle) and end (x) points
-    ax.scatter(pos_x[0], pos_y[0], marker="o", s=100, color="blue",
-               label="Start", zorder=5)
-    ax.scatter(pos_x[-1], pos_y[-1], marker="x", s=100, color="blue",
-               label="End", zorder=5)
+    # Left: Angle over time
+    axes[0].plot(time, phi, label="phi", color="blue", linewidth=2)
+    axes[0].axhline(y=np.pi, color="red", linestyle="--", label="Target (pi)")
+    axes[0].set_xlabel("Time (s)")
+    axes[0].set_ylabel("Angle (rad)")
+    axes[0].set_title("Pendulum Angle Over Time")
+    axes[0].legend(loc="best")
+    axes[0].grid(True, alpha=0.3)
 
-    # Mark target point
-    ax.scatter(target[0], target[1], marker="*", s=200, color="red",
-               label="Target", zorder=5)
+    # Right: Phase portrait
+    axes[1].plot(phi, phi_dot, color="blue", linewidth=2, alpha=0.7)
+    axes[1].scatter(phi[0], phi_dot[0], marker="o", s=100, color="green",
+                    label="Start", zorder=5)
+    axes[1].scatter(phi[-1], phi_dot[-1], marker="x", s=100, color="red",
+                    label="End", zorder=5)
+    axes[1].scatter([np.pi], [0], marker="*", s=200, color="gold",
+                    label="Goal", zorder=5)
+    axes[1].set_xlabel("phi (rad)")
+    axes[1].set_ylabel("phi_dot (rad/s)")
+    axes[1].set_title("Phase Portrait")
+    axes[1].legend(loc="best")
+    axes[1].grid(True, alpha=0.3)
 
-    # Formatting
-    ax.set_xlabel("X Position")
-    ax.set_ylabel("Y Position")
-    ax.set_title("Linear Tracking Trajectory")
-    ax.legend(loc="best")
-    ax.grid(True, alpha=0.3)
-    ax.axis("equal")
     plt.tight_layout()
 
     return fig
@@ -57,7 +62,7 @@ def plot_linear_trajectory(buffers, buffer_idx, config):
 
 def main(config, save_dir):
     wandb.init(
-        project="linear",
+        project="pendulum",
         config=config,
         group=config.get("wandb_group"),
         name=config.get("wandb_run_name"),
@@ -65,13 +70,13 @@ def main(config, save_dir):
     )
     key = jax.random.key(config["seed"])
 
-    # Ground truth parameters for evaluation (extract before init_env modifies config)
-    true_A = jnp.array(config["env_params"]["true_A"])
-    true_B = jnp.array(config["env_params"]["true_B"])
+    # Ground truth parameters for evaluation
+    true_b = config["env_params"]["true_b"]
+    true_J = config["env_params"]["true_J"]
     true_params = {
         "model": {
-            "A": true_A,
-            "B": true_B,
+            "b": jnp.array(true_b),
+            "J": jnp.array(true_J),
         },
         "normalizer": None,
     }
@@ -99,8 +104,8 @@ def main(config, save_dir):
     eval_actions = jax.random.uniform(
         action_key,
         shape=(config["eval_traj_horizon"], config["dim_action"]),
-        minval=jnp.array(config["planner_params"]["action_low"]),
-        maxval=jnp.array(config["planner_params"]["action_high"]),
+        minval=jnp.array(config["normalization_params"]["action"]["min"]),
+        maxval=jnp.array(config["normalization_params"]["action"]["max"]),
     )
 
     key, reset_key = jax.random.split(key)
@@ -153,7 +158,7 @@ def main(config, save_dir):
     episode_length = 0
 
     # Reward component accumulators
-    reward_component_keys_to_avg = ["reward", "dist_to_target"]
+    reward_component_keys_to_avg = ["reward", "angle_error"]
     episode_reward_components = {
         info_key: 0.0 for info_key in reward_component_keys_to_avg
     }
@@ -242,9 +247,18 @@ def main(config, save_dir):
                 )
 
                 # Compute parameter difference from true dynamics
-                diff_tree = jax.tree.map(lambda x, y: x - y, train_state.params, true_params)
-                param_diff = sum(jnp.linalg.norm(leaf) for leaf in jax.tree_util.tree_leaves(diff_tree))
-                cov_trace = jnp.trace(train_state.covariance) if train_state.covariance is not None else 0.0
+                diff_tree = jax.tree.map(
+                    lambda x, y: x - y, train_state.params, true_params
+                )
+                param_diff = sum(
+                    jnp.linalg.norm(leaf)
+                    for leaf in jax.tree_util.tree_leaves(diff_tree)
+                )
+                cov_trace = (
+                    jnp.trace(train_state.covariance)
+                    if train_state.covariance is not None
+                    else 0.0
+                )
 
                 wandb.log(
                     {
@@ -268,7 +282,7 @@ def main(config, save_dir):
 
     # Save model parameters
     if save_dir:
-        run_name = config.get("wandb_run_name", f"linear_model_{config['seed']}")
+        run_name = config.get("wandb_run_name", f"pendulum_model_{config['seed']}")
         save_path = os.path.join(save_dir, run_name)
         os.makedirs(save_path, exist_ok=True)
         print(f"\nSaving final model parameters to {save_path}...")
@@ -287,8 +301,10 @@ def main(config, save_dir):
     # Plot and log trajectory
     if buffer_idx > 0:
         print("\nGenerating trajectory plot...")
-        fig = plot_linear_trajectory(buffers, buffer_idx, config)
-        wandb.log({"trajectory/xy_plot": wandb.Image(fig)}, step=config["total_steps"])
+        fig = plot_pendulum_trajectory(buffers, buffer_idx, config)
+        wandb.log(
+            {"trajectory/pendulum_plot": wandb.Image(fig)}, step=config["total_steps"]
+        )
         plt.close(fig)
         print("Trajectory plot logged to wandb.")
 
@@ -297,7 +313,7 @@ def main(config, save_dir):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run linear tracking experiments.")
+    parser = argparse.ArgumentParser(description="Run pendulum experiments.")
     parser.add_argument(
         "--run-name",
         type=str,
@@ -325,7 +341,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Load config from JSON file
-    config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "linear.json")
+    config_path = os.path.join(
+        os.path.dirname(__file__), "..", "configs", "pendulum.json"
+    )
     with open(config_path, "r") as f:
         CONFIG = json.load(f)
 
@@ -339,12 +357,12 @@ if __name__ == "__main__":
         print(f"--- Starting run for seed #{seed} ---")
         run_config = copy.deepcopy(CONFIG)
         run_config["seed"] = int(seed)
-        run_config["wandb_group"] = "linear_tracking"
+        run_config["wandb_group"] = "pendulum_swing_up"
 
         if args.run_name:
             run_name_base = args.run_name
         else:
-            run_name_base = "linear"
+            run_name_base = "pendulum"
 
         if args.num_seeds > 1:
             run_config["wandb_run_name"] = f"{run_name_base}_seed_{seed_idx}"

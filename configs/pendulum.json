@@ -1,0 +1,78 @@
+{
+  "env_name": "damped_pendulum",
+  "num_agents": 1,
+  "total_steps": 400,
+  "dim_state": 2,
+  "dim_action": 1,
+  "train_freq": 1,
+  "train_model_freq": 1,
+  "train_policy_freq": 1,
+  "normalize_freq": 1000000,
+  "eval_freq": 10,
+  "eval_traj_horizon": 50,
+  "buffer_size": 1000,
+
+  "normalization": {
+    "method": "static"
+  },
+
+  "dynamics": "damped_pendulum",
+  "dynamics_params": {
+    "dt": 0.05,
+    "init_b": 0.2,
+    "init_J": 0.5
+  },
+
+  "env_params": {
+    "num_agents": 1,
+    "max_episode_steps": 400,
+    "dt": 0.05,
+    "max_accel": 5.0,
+    "true_b": 0.5,
+    "true_J": 1.0
+  },
+
+  "trainer": "ekf",
+  "trainer_params": {
+    "learning_rate": 10.0,
+    "weight_decay": 1.0,
+    "proc_noise_init": 0.001,
+    "proc_noise_decay": 0.999,
+    "proc_noise_floor": 0.0001,
+    "init_cov_scale": 0.5,
+    "jitter": 0.0
+  },
+
+  "normalization_params": {
+    "state": {
+      "min": [-6.3, -10.0],
+      "max": [6.3, 10.0]
+    },
+    "action": {
+      "min": [-5.0],
+      "max": [5.0]
+    }
+  },
+
+  "state_labels": ["phi", "phi_dot"],
+
+  "cost_type": "pendulum_swing_up_info",
+  "planner_type": "icem",
+  "planner_params": {
+    "horizon": 20,
+    "batch_size": 300,
+    "max_iter": 5,
+    "elit_frac": 0.1,
+    "learning_rate": 0.9,
+    "dim_control": 1,
+    "action_low": [-5.0],
+    "action_high": [5.0]
+  },
+
+  "cost_fn_params": {
+    "weight_jerk": 0.01,
+    "weight_control": 0.01,
+    "weight_info": 0.0,
+    "meas_noise_diag": [0.01, 0.01]
+  }
+}

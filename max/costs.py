@@ -94,7 +94,10 @@ def _stage_cost_info_gathering(
         state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
     )
 
-    return -dist_sq + control_cost + exploration_term
+    # Penalize distance from origin
+    origin_cost = 1.0 * jnp.sum(p_evader**2)
+
+    return -dist_sq + control_cost + exploration_term + origin_cost
 
 
 def _terminal_cost_pursuit_evasion(state):
@@ -159,6 +162,47 @@ def _stage_cost_linear_tracking(
 def _terminal_cost_linear_tracking(state, target_point):
     """Terminal cost: squared distance to target."""
     return jnp.sum((state - target_point) ** 2)
+
+
+def _stage_cost_pendulum_swing_up(
+    state, control, cost_params, weight_control, weight_info, info_term_fn
+):
+    """
+    Stage cost for pendulum swing-up: goal at phi=pi with zero velocity.
+
+    Args:
+        state: [phi, phi_dot]
+        control: [tau]
+        cost_params: Dict with 'dyn_params' and 'params_cov_model'
+        weight_control: Control penalty weight
+        weight_info: Information gathering weight
+        info_term_fn: Information term function (can be None)
+
+    Returns:
+        Stage cost scalar
+    """
+    phi, phi_dot = state[0], state[1]
+
+    # Swing-up cost: (phi - pi)^2 + 0.1 * phi_dot^2
+    goal_cost = (phi - jnp.pi) ** 2 + 0.1 * phi_dot ** 2
+
+    # Control penalty
+    control_cost = weight_control * jnp.sum(control ** 2)
+
+    # Information gathering bonus (optional)
+    exploration_term = 0.0
+    if info_term_fn is not None:
+        exploration_term = -weight_info * info_term_fn(
+            state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
+        )
+
+    return goal_cost + control_cost + exploration_term
+
+
+def _terminal_cost_pendulum_swing_up(state):
+    """Terminal cost: emphasize reaching inverted position."""
+    phi, phi_dot = state[0], state[1]
+    return (phi - jnp.pi) ** 2 + 0.1 * phi_dot ** 2
 
 
 # --- Main factory function ---
@@ -270,6 +314,55 @@ def init_cost(config, dynamics_model):
             if weight_jerk > 0:
                 control_diffs = jnp.diff(controls, axis=0)
                 jerk = weight_jerk * jnp.sum(control_diffs**2)
+
+            return jnp.sum(stage_costs) + terminal + jerk
+
+        return cost_fn
+
+    elif cost_type == "pendulum_swing_up_info":
+        # Extract params
+        params = config["cost_fn_params"]
+        weight_jerk = params.get("weight_jerk", 0.0)
+        weight_control = params["weight_control"]
+        weight_info = params["weight_info"]
+        meas_noise_diag = jnp.array(params["meas_noise_diag"])
+
+        # Create the info term calculator (JIT-able helper)
+        info_term_fn = None
+        if weight_info > 0:
+            info_term_fn = make_info_gathering_term(
+                dynamics_model.pred_one_step, meas_noise_diag
+            )
+
+        # Vectorize stage cost over the horizon
+        stage_cost_vmap = jax.vmap(
+            lambda s, u, cp: _stage_cost_pendulum_swing_up(
+                s, u, cp, weight_control, weight_info, info_term_fn
+            ),
+            in_axes=(0, 0, None),
+        )
+
+        @jax.jit
+        def cost_fn(init_state, controls, cost_params):
+            """
+            Calculates total trajectory cost for pendulum swing-up.
+            """
+            # 1. Rollout trajectory
+            states = _rollout(
+                init_state, controls, cost_params, dynamics_model.pred_one_step
+            )
+
+            # 2. Calculate stage costs (on states 0 to T-1)
+            stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
+
+            # 3. Calculate terminal cost (on state T)
+            terminal = _terminal_cost_pendulum_swing_up(states[-1])
+
+            # 4. Calculate Jerk Cost (on controls)
+            jerk = 0.0
+            if weight_jerk > 0:
+                control_diffs = jnp.diff(controls, axis=0)
+                jerk = weight_jerk * jnp.sum(control_diffs ** 2)
 
             return jnp.sum(stage_costs) + terminal + jerk
 
