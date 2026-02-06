@@ -1,7 +1,7 @@
 {
   "env_name": "merging_idm",
   "num_agents": 1,
-  "total_steps": 1000,
+  "total_steps": 150,
   "dim_state": 10,
   "dim_action": 2,
   "train_freq": 1,
@@ -19,7 +19,7 @@
   "dynamics": "merging_idm",
   "dynamics_params": {
     "dt": 0.1,
-    "v0": 30.0,
+    "v0": 10.0,
     "s0": 2.0,
     "a_max": 2.0,
     "delta": 4,
@@ -29,8 +29,10 @@
     "k_lon": 1.0,
     "s_min": 0.1,
     "p_y_target": 0.0,
-    "init_T": [1.4, 1.4, 1.4],
-    "init_b": [1.75, 1.75, 1.75]
+    "fixed_T_v2": 2.0,
+    "fixed_b_v2": 2.5,
+    "init_T": [1.4, 1.4],
+    "init_b": [1.75, 1.75]
   },
 
   "env_params": {
@@ -41,7 +43,7 @@
     "true_T_vec": [2.0, 0.8, 0.8],
     "true_b_vec": [2.5, 1.0, 1.0],
     "idm_params": {
-      "v0": 30.0,
+      "v0": 10.0,
       "s0": 2.0,
       "a_max": 2.0,
       "delta": 4,
@@ -68,7 +70,7 @@
   "normalization_params": {
     "state": {
       "min": [-10.0, -7.0, 0.0, -5.0, -10.0, 0.0, -10.0, 0.0, -10.0, 0.0],
-      "max": [100.0, 3.5, 30.0, 5.0, 100.0, 30.0, 100.0, 30.0, 100.0, 30.0]
+      "max": [100.0, 3.5, 15.0, 5.0, 100.0, 15.0, 100.0, 15.0, 100.0, 15.0]
     },
     "action": {
       "min": [-2.0, -2.0],
