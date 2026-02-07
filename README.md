@@ -1,6 +1,6 @@
 # ⚠️ MAX: A JAX-based **Research** Library for Online RL ⚠️
 
-**MAX** is a highly **experimental and rapidly evolving** modular reinforcement learning library built on JAX. It is **primarily designed** to prioritize **online adaptation algorithms** and **information-gathering strategies** in reinforcement learning, with a focus on both model-based and model-free control, and first-class support for multi-agent systems.
+**MAX** is a highly **experimental and rapidly evolving** modular reinforcement learning library built on JAX. It is primarily designed for research in **online adaptation** and **information-gathering** in reinforcement learning.
 
 ## Features
 
