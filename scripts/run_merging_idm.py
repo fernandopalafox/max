@@ -235,33 +235,43 @@ def main(config, save_dir):
         dynamics_model.pred_one_step
     )
 
-    # Scripted eval trajectory: ego in lane above traffic,
-    # oscillating laterally to excite k_lat / d0.
+    # Scripted eval trajectory: ego in front of IDM,
+    # oscillating laterally to excite k_lat / d0
+    # transitions (IDM sees/loses ego as lead).
     H_eval = config["eval_traj_horizon"]
     dt_eval = config["dynamics_params"]["dt"]
 
-    osc_freq = 0.3   # Hz
+    # Pick freq & amplitude so peak |ay| = A*w^2
+    # stays under max_accel (2.0 m/s^2).
+    # freq=0.1 Hz, amp=3.0 m  =>  peak ay = 1.18.
+    # Use H=100 for one full oscillation cycle (10 s).
+    osc_freq = 0.1   # Hz
     osc_amp = 3.0     # m
     omega = 2.0 * jnp.pi * osc_freq
+    H_eval = 100
     t_eval = jnp.arange(H_eval) * dt_eval
     ay_eval = (
         -osc_amp * omega**2 * jnp.sin(omega * t_eval)
     )
 
-    # Small constant forward accel
-    ax_eval = jnp.full(H_eval, 0.3)
+    # Match IDM desired speed to stay in front
+    ax_eval = jnp.zeros(H_eval)
 
     eval_actions = jnp.stack(
         [ax_eval, ay_eval], axis=-1
     )
 
-    # Custom eval initial state: ego above traffic
+    # Custom eval initial state: ego ahead of IDM,
+    # starting on the target lane.
+    # For py(t) = p_y_target + A*sin(wt), we need
+    # vy(0) = A*w so position actually oscillates.
+    # Ego starts 20m ahead so IDM sees it as lead.
     # State: [ego_px, ego_py, ego_vx, ego_vy,
     #         idm_px, idm_vx]
-    p_y_tgt = config["dynamics_params"]["p_y_target"]
+    p_y_tgt = config["cost_fn_params"]["p_y_target"]
     eval_init_state = jnp.array([
-        2.0, p_y_tgt + 3.5, 11.0, 0.0,  # ego
-        15.0, 10.0,                       # IDM
+        20.0, p_y_tgt, 10.0, osc_amp * omega,  # ego
+        0.0, 10.0,                               # IDM
     ], dtype=jnp.float32)
     eval_trajectory = [eval_init_state]
     current_state = eval_init_state

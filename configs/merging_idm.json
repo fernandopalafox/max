@@ -42,7 +42,7 @@
     "max_accel": 2.0,
     "true_T": 2.0,
     "true_b": 3.0,
-    "true_k_lat": 2.0,
+    "true_k_lat": 3.0,
     "true_d0": 2.0,
     "idm_params": {
       "v0": 10.0,
@@ -65,7 +65,7 @@
     "proc_noise_init": 0.0,
     "proc_noise_decay": 1.0,
     "proc_noise_floor": 0.0,
-    "init_cov_scale": 0.5,
+    "init_cov_scale": 2.5,
     "jitter": 1e-6
   },
 
@@ -103,7 +103,7 @@
     "weight_control": 0.01,
     "weight_info": 0.0,
     "meas_noise_diag": [
-      0.01, 0.01, 0.01, 0.01, 0.05, 0.05
+      0.01, 0.01, 0.01, 0.01, 0.01, 0.01
     ],
     "q_vs": 10.0,
     "q_vd": 0.1,

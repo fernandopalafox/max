@@ -1040,7 +1040,7 @@ def make_merging_idm_env(params: EnvParams, true_T, true_b, idm_params):
         Ego merges in front of the IDM vehicle.
         """
         return jnp.array([
-            4.0, -3.5, 12.0, 0.0,  # ego
+            8.0, -3.5, 12.0, 0.0,  # ego
             15.0, 10.0,             # IDM vehicle (ahead)
         ], dtype=jnp.float32)
 
