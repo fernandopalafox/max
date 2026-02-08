@@ -8,7 +8,7 @@ from max.dynamics import DynamicsModel, PETSDynamicsModel
 from flax import struct
 from flax.traverse_util import path_aware_map
 import jax.flatten_util
-from max.estimators import EKFCovArgs
+from max.estimators import EKFCovArgs, LOFI
 from max.normalizers import STANDARD_NORMALIZER
 
 
@@ -56,6 +56,10 @@ def init_trainer(
     elif trainer_type == "pets":
         trainer, train_state = create_probabilistic_ensemble_trainer(
             config, dynamics_model, init_params, key
+        )
+    elif trainer_type == "lofi":
+        trainer, train_state = create_LOFI_trainer(
+            config, dynamics_model, init_params
         )
     else:
         raise ValueError(f"Unknown trainer type: {trainer_type}")
@@ -362,5 +366,132 @@ def create_probabilistic_ensemble_trainer(
         bootstrapped_data = jax.tree_map(lambda x: x[bootstrap_indices], data)
         new_train_state, loss = train_step(train_state, bootstrapped_data)
         return new_train_state.replace(key=key), loss
+
+    return Trainer(train_fn=train_fn), train_state
+
+def create_LOFI_trainer(
+    config: Any,
+    dynamics_model: DynamicsModel,
+    init_params: Any
+) -> tuple[Trainer, TrainState]:
+    """Creates a trainer that updates model parameters using the LOFI filter.
+
+    Notes:
+    - The LOFI estimator in belief.estimators expects flattened parameter vectors.
+    - train_state.covariance stores (Upsilon, W) where Upsilon is a (P,) vector and
+      W has shape (P, L_rank).
+    - gamma defaults to weight_decay if not provided. q_init defaults to proc_noise_init.
+    """
+    
+    dim_state: int = config["dim_state"]
+    trainer_params = config.get("trainer_params", {})
+    learning_rate: float = trainer_params.get("learning_rate", 1e-3)
+    weight_decay: float = trainer_params.get("weight_decay", 1.0)
+    jitter: float = trainer_params.get("jitter", 1e-6)
+    init_cov_scale: float = trainer_params.get("init_cov_scale", 1.0)
+    L_rank: int = trainer_params.get("L_rank", 12)
+    gamma: float = trainer_params.get("gamma", 1.0)
+    q_init: float = trainer_params.get("q_init", 1e-4)
+
+    flat_params_vec, unflatten_fn_unoptimized = jax.flatten_util.ravel_pytree(init_params)
+    unflatten_fn = jax.jit(unflatten_fn_unoptimized)
+    dim_params = flat_params_vec.shape[0]
+    L = min(L_rank, int(dim_params)) # should just be L, NN is large
+    #L = int(dim_params)
+
+    # initialize LOFI latent rep: diag part and low-rank part
+    Upsilon_init = jnp.ones((dim_params,)) * init_cov_scale
+    W_init = jnp.zeros((dim_params, L))
+
+    # store initial (Upsilon, W) in train_state.covariance
+    train_state = TrainState(params=init_params, covariance={"Upsilon": Upsilon_init, "W": W_init})
+
+    # avoid NaNs lol
+    gamma = weight_decay if gamma is None else gamma
+
+    @jax.jit
+    def parameter_dynamics_fn(params_flat, _):
+        # simple decay on flattened parameters
+        return params_flat * weight_decay
+
+    # apply_fn accepts flattened params and a concatenated x = [state, action]
+    @jax.jit
+    def apply_fn_flat(params_flat, x):
+        state = x[:dim_state]
+        action = x[dim_state:]
+        # flat_t = time.time()
+        params_pytree = unflatten_fn(params_flat)
+        # flat_t = time.time() - flat_t
+        # print(f"Unflattening params took {flat_t}s")
+        # pred_t = time.time()
+        pred_next = dynamics_model.pred_one_step(params_pytree, state, action)
+        # pred_t = time.time() - pred_t
+        # print(f"Predicting took {pred_t}s")
+        return pred_next
+
+    # observation covariance provider used by LOFI internals
+    @jax.jit
+    def observation_cov_fn(x_state, params_flat):
+        return jnp.eye(dim_state) / learning_rate
+
+    estimator = LOFI(
+        dynamics_fn=parameter_dynamics_fn,
+        observation_fn=apply_fn_flat,
+        observation_cov_fn=observation_cov_fn,
+        jitter=jitter,
+        compute_diagnostics=False,  # Set True for debugging, False for speed
+    )
+
+    @jax.jit
+    def train_step(train_state: TrainState, data: dict, step_idx: int):
+        """Performs a single LOFI online update on one data point (batch size 1)."""
+
+        # Expect online updates with batch size 1 (like EKF trainer)
+        batch_size = data["states"].shape[0]
+        if batch_size != 1:
+            raise ValueError(
+                f"LOFI trainer only supports a batch size of 1 for online learning. "
+                f"Received batch of size {batch_size}."
+            )
+
+        # extract single sample
+        state = jnp.squeeze(data["states"], axis=0)
+        action = jnp.squeeze(data["actions"], axis=0)
+        next_state = jnp.squeeze(data["next_states"], axis=0)
+
+        x = jnp.concatenate([state, action], axis=-1)
+        y = next_state
+
+        # per-step hyperparams for LOFI call
+        q_val = q_init
+        gamma_val = gamma
+
+        # flatten train params for LOFI
+        flat_params, _ = jax.flatten_util.ravel_pytree(train_state.params)
+        cov_init = train_state.covariance  # Upsilon: (P,), W: (P, L)
+
+        # Single-step LOFI estimate
+        params_flat_new, cov_new, y_hat, diagnostics = estimator.estimate(
+            flat_params, cov_init, x, y, gamma_val, q_val, L, step_idx
+        )
+
+        final_params_pytree = unflatten_fn(params_flat_new)
+        new_train_state = train_state.replace(
+            params=final_params_pytree, covariance=cov_new
+        )
+
+        loss = jnp.mean((y - y_hat) ** 2)
+        return new_train_state, loss
+
+    def train_fn(train_state: TrainState, data: dict, **kwargs):
+        batch_size = data["states"].shape[0]
+        if batch_size != 1:
+            raise ValueError(
+                f"LOFI trainer only supports a batch size of 1 for online learning. "
+                f"Received batch of size {batch_size}."
+            )
+
+        step_idx = kwargs.get("step", 0)
+        return train_step(train_state, data, step_idx)
 
     return Trainer(train_fn=train_fn), train_state

@@ -32,15 +32,15 @@
     "true_J": 1.0
   },
 
-  "trainer": "ekf",
+  "trainer": "lofi",
   "trainer_params": {
-    "learning_rate": 10.0,
+    "learning_rate": 0.1,
     "weight_decay": 1.0,
-    "proc_noise_init": 0.001,
-    "proc_noise_decay": 0.999,
-    "proc_noise_floor": 0.0001,
-    "init_cov_scale": 0.5,
-    "jitter": 0.0
+    "gamma": 1.0,
+    "q_init": 0.0001,
+    "init_cov_scale": 1.0,
+    "jitter": 1e-4,
+    "L_rank": 12
   },
 
   "normalization_params": {

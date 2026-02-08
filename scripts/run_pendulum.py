@@ -19,6 +19,36 @@ import os
 import pickle
 import json
 
+def covariance_trace(cov):
+    if cov is None:
+        return 0.0
+    # LOFI stores an approximation of the *precision* matrix as
+    # Lambda ≈ diag(Upsilon) + W @ W.T. We want trace(Sigma) where
+    # Sigma ≈ Lambda^{-1}. Use Woodbury identity to compute
+    # trace(Lambda^{-1}) = trace(D^{-1}) - trace((I + W^T D^{-1} W)^{-1} W^T D^{-2} W)
+    if isinstance(cov, dict):
+        U = cov["Upsilon"]
+        W = cov["W"]
+        # safe inverse for diagonal (avoid div-by-zero)
+        eps = 1e-12
+        Dinv = jnp.where(U != 0.0, 1.0 / U, 1.0 / (U + eps))
+
+        # trace of D^{-1}
+        trace_Dinv = jnp.sum(Dinv)
+
+        # A = W^T D^{-1} W  (shape L x L)
+        A = W.T @ (Dinv[:, None] * W)
+        # inv_term = (I + A)^{-1}
+        L_rank = A.shape[0]
+        inv_term = jnp.linalg.inv(jnp.eye(L_rank) + A)
+
+        # B = W^T D^{-2} W
+        B = W.T @ ((Dinv ** 2)[:, None] * W)
+
+        correction = jnp.trace(inv_term @ B)
+        return trace_Dinv - correction
+    # fallback for a full covariance matrix
+    return jnp.trace(cov)
 
 def plot_pendulum_trajectory(buffers, buffer_idx, config):
     """Plot pendulum angle trajectory and phase portrait."""
@@ -254,11 +284,12 @@ def main(config, save_dir):
                     jnp.linalg.norm(leaf)
                     for leaf in jax.tree_util.tree_leaves(diff_tree)
                 )
-                cov_trace = (
-                    jnp.trace(train_state.covariance)
-                    if train_state.covariance is not None
-                    else 0.0
-                )
+                # cov_trace = (
+                #     jnp.trace(train_state.covariance)
+                #     if train_state.covariance is not None
+                #     else 0.0
+                # )
+                cov_trace = covariance_trace(train_state.covariance)
 
                 wandb.log(
                     {
