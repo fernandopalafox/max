@@ -932,6 +932,114 @@ def make_damped_pendulum_env(params: EnvParams, true_b, true_J):
     return reset_fn, step_fn, get_obs_fn
 
 
+def make_planar_drone_wind_env(params: EnvParams, drone_params, true_wind_amplitude, true_wind_frequency):
+    """
+    Factory function that creates a planar drone environment with sinusoidal wind.
+
+    State: [p_x, p_y, phi, v_x, v_y, phi_dot] (6D)
+        - p_x, p_y: 2D position
+        - phi: pitch angle
+        - v_x, v_y: linear velocities
+        - phi_dot: angular velocity
+    Action: [T_1, T_2] (left/right rotor thrust, non-negative)
+    Dynamics: Nominal drone physics + sinusoidal wind disturbance.
+
+    Args:
+        params: EnvParams dataclass with common environment parameters.
+        drone_params: Dict with mass, gravity, arm_length, inertia.
+        true_wind_amplitude: Ground truth amplitude of wind force (A_w).
+        true_wind_frequency: Ground truth angular frequency of wind (omega).
+
+    Returns:
+        Tuple of (reset_fn, step_fn, get_obs_fn).
+    """
+    # Physical parameters from config
+    m = drone_params["mass"]
+    g = drone_params["gravity"]
+    L = drone_params["arm_length"]
+    I = drone_params["inertia"]
+    dt = params.dt
+    A_w = true_wind_amplitude
+    omega = true_wind_frequency
+
+    @jax.jit
+    def _step_dynamics(state: jnp.ndarray, action: jnp.ndarray, t: float) -> jnp.ndarray:
+        """Planar drone dynamics with sinusoidal wind disturbance."""
+        p_x, p_y, phi, v_x, v_y, phi_dot = state
+        T_1, T_2 = action[0], action[1]
+
+        # Total thrust
+        T_total = T_1 + T_2
+
+        # Nominal accelerations
+        a_x_nom = (1 / m) * T_total * jnp.sin(phi)
+        a_y_nom = (1 / m) * T_total * jnp.cos(phi) - g
+        alpha_nom = (L / I) * (T_2 - T_1)
+
+        # Wind disturbance (sinusoidal, time-varying)
+        a_x_wind = (A_w / m) * jnp.cos(omega * t)
+        a_y_wind = (A_w / m) * jnp.sin(omega * t)
+
+        # Total accelerations
+        a_x = a_x_nom + a_x_wind
+        a_y = a_y_nom + a_y_wind
+        alpha = alpha_nom
+
+        # Euler integration
+        p_x_next = p_x + v_x * dt
+        p_y_next = p_y + v_y * dt
+        phi_next = phi + phi_dot * dt
+        v_x_next = v_x + a_x * dt
+        v_y_next = v_y + a_y * dt
+        phi_dot_next = phi_dot + alpha * dt
+
+        return jnp.array([p_x_next, p_y_next, phi_next, v_x_next, v_y_next, phi_dot_next])
+
+    @jax.jit
+    def reset_fn(key: jax.random.PRNGKey):
+        """Reset to initial hovering state near origin."""
+        return jnp.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float32)
+
+    @jax.jit
+    def get_obs_fn(state: jnp.ndarray):
+        """Returns state with agent dimension."""
+        return state[None, :]  # Shape: (1, 6)
+
+    @jax.jit
+    def step_fn(state: jnp.ndarray, step_count: int, action: jnp.ndarray):
+        """Steps the environment forward."""
+        # Compute current time
+        t = step_count * dt
+
+        # Clip action to thrust bounds (non-negative)
+        clipped_action = jnp.clip(action.squeeze(), 0.0, params.max_accel)
+
+        # Step dynamics
+        next_state = _step_dynamics(state, clipped_action, t)
+
+        # Compute reward: negative tracking error to goal (0, 1)
+        goal_position = jnp.array([0.0, 1.0])
+        position = next_state[:2]
+        position_error_sq = jnp.sum((position - goal_position) ** 2)
+        control_cost = 0.01 * jnp.sum(clipped_action ** 2)
+        reward = -(position_error_sq + control_cost)
+        rewards = jnp.array([reward])
+
+        # No early termination
+        terminated = False
+        truncated = step_count >= params.max_episode_steps
+
+        observations = get_obs_fn(next_state)
+        info = {
+            "reward": reward,
+            "position_error": jnp.sqrt(position_error_sq),
+        }
+
+        return next_state, observations, rewards, terminated, truncated, info
+
+    return reset_fn, step_fn, get_obs_fn
+
+
 def make_merging_idm_env(params: EnvParams, true_T, true_b, idm_params):
     """
     Factory function for the highway merging IDM environment.
@@ -1121,6 +1229,17 @@ def init_env(config: Dict[str, Any]):
         env_params_dict.pop("true_d0", None)
         merging_idm_params = env_params_dict.pop("idm_params")
 
+    # Hacky fix for planar_drone_wind-specific params
+    if env_name == "planar_drone_wind":
+        drone_params = {
+            "mass": env_params_dict.pop("mass"),
+            "gravity": env_params_dict.pop("gravity"),
+            "arm_length": env_params_dict.pop("arm_length"),
+            "inertia": env_params_dict.pop("inertia"),
+        }
+        true_wind_amplitude = env_params_dict.pop("true_wind_amplitude")
+        true_wind_frequency = env_params_dict.pop("true_wind_frequency")
+
     params = EnvParams(**env_params_dict)
 
     print(f"Initializing environment: {env_name}")
@@ -1144,5 +1263,7 @@ def init_env(config: Dict[str, Any]):
     elif env_name == "unicycle":
         true_tracking_weight = env_params_dict.pop("true_tracking_weight", None)
         return make_pursuit_evasion_unicycle_double_integrator_env(params, true_tracking_weight)
+    elif env_name == "planar_drone_wind":
+        return make_planar_drone_wind_env(params, drone_params, true_wind_amplitude, true_wind_frequency)
     else:
         raise ValueError(f"Unknown environment name: '{env_name}'")
