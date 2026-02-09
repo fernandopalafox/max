@@ -56,10 +56,17 @@ def plot_drone_trajectory(buffers, buffer_idx, config):
     return fig
 
 
-def make_drone_animation(buffers, buffer_idx, config, fps=40):
-    """Create a GIF animation showing the drone flying."""
+def make_drone_animation(buffers, buffer_idx, config, fps=50):
+    """
+    Create a GIF animation showing the drone flying with a wind vector arrow.
+    Adjusted to ensure the wind arrow UI fits within the frame.
+    """
     states = np.array(buffers["states"][0, :buffer_idx, :])
     dt = config["env_params"]["dt"]
+    
+    # Get wind parameters for visualization
+    A_w = config["env_params"]["true_wind_amplitude"]
+    omega = config["env_params"]["true_wind_frequency"]
 
     # Get goal state
     goal_state = config["cost_fn_params"]["goal_state"]
@@ -69,29 +76,20 @@ def make_drone_animation(buffers, buffer_idx, config, fps=40):
     arm_length = config["env_params"]["arm_length"]
     rotor_radius = 0.08
 
-    # Subsample frames for reasonable GIF size
+    # Subsample frames
     skip = max(1, len(states) // 400)
     frames = states[::skip]
 
-    # Compute axis limits with padding
+    # Compute axis limits
     p_x_all, p_y_all = states[:, 0], states[:, 1]
-    x_min, x_max = p_x_all.min(), p_x_all.max()
-    y_min, y_max = p_y_all.min(), p_y_all.max()
+    x_min, x_max = min(p_x_all.min(), goal_pos[0]), max(p_x_all.max(), goal_pos[0])
+    y_min, y_max = min(p_y_all.min(), goal_pos[1]), max(p_y_all.max(), goal_pos[1])
 
-    # Include goal in bounds
-    x_min = min(x_min, goal_pos[0])
-    x_max = max(x_max, goal_pos[0])
-    y_min = min(y_min, goal_pos[1])
-    y_max = max(y_max, goal_pos[1])
-
-    # Add padding and ensure equal aspect ratio
-    padding = 0.5
-    x_range = x_max - x_min + 2 * padding
-    y_range = y_max - y_min + 2 * padding
-    max_range = max(x_range, y_range)
-
-    x_center = (x_min + x_max) / 2
-    y_center = (y_min + y_max) / 2
+    # --- MODIFICATION 1: Increase padding ---
+    # Increased padding to give more breathing room around the trajectory
+    padding = 1.0
+    max_range = max(x_max - x_min, y_max - y_min) + 2 * padding
+    x_center, y_center = (x_min + x_max) / 2, (y_min + y_max) / 2
 
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.set_xlim(x_center - max_range / 2, x_center + max_range / 2)
@@ -99,68 +97,66 @@ def make_drone_animation(buffers, buffer_idx, config, fps=40):
     ax.set_aspect('equal', adjustable='box')
     ax.set_xlabel("X Position (m)")
     ax.set_ylabel("Y Position (m)")
-    ax.set_title("Drone Flight Animation")
+    ax.set_title("Drone Flight with Time-Varying Wind")
     ax.grid(True, alpha=0.3)
 
-    # Goal marker (static)
-    ax.scatter(
-        [goal_pos[0]], [goal_pos[1]], marker="*", s=300,
-        color="gold", edgecolors="black", linewidths=0.5,
-        label="Goal", zorder=10
+    # --- WIND ARROW SETUP ---
+    # Position the arrow in the top-left corner (in axes coordinates)
+    # --- MODIFICATION 2 & 3: Smaller arrow, shifted position ---
+    # Moved anchor slightly inward from (0.1, 0.9) to (0.12, 0.88)
+    # Increased scale from 5 to 10 (larger scale = smaller visual arrow)
+    wind_arrow = ax.quiver(
+        0.12, 0.88, 0, 0,
+        transform=ax.transAxes,
+        color='teal',
+        scale=10,
+        width=0.008,
+        zorder=20 # Ensure it's on top
     )
+    # Adjusted text position to align with new arrow position
+    wind_text = ax.text(0.12, 0.82, "Wind Dir.", transform=ax.transAxes, 
+                        color='teal', fontweight='bold', ha='center', fontsize=9, zorder=20)
 
-    # Trajectory line (will be updated)
+    # Goal marker
+    ax.scatter([goal_pos[0]], [goal_pos[1]], marker="*", s=300, color="gold", edgecolors="black", label="Goal", zorder=10)
+
     traj_line, = ax.plot([], [], color="blue", linewidth=1.5, alpha=0.5)
-
-    # Drone body (line between rotors)
-    drone_body, = ax.plot([], [], color="black", linewidth=3, solid_capstyle="round")
-
-    # Rotors (circles)
-    rotor_left = Circle((0, 0), rotor_radius, fc="red", ec="darkred", lw=1)
-    rotor_right = Circle((0, 0), rotor_radius, fc="red", ec="darkred", lw=1)
+    drone_body, = ax.plot([], [], color="black", linewidth=3, solid_capstyle="round", zorder=15)
+    rotor_left = Circle((0, 0), rotor_radius, fc="red", ec="darkred", lw=1, zorder=15)
+    rotor_right = Circle((0, 0), rotor_radius, fc="red", ec="darkred", lw=1, zorder=15)
     ax.add_patch(rotor_left)
     ax.add_patch(rotor_right)
 
-    # Time text
-    time_text = ax.text(
-        0.02, 0.95, "", transform=ax.transAxes,
-        fontsize=11, fontweight="bold",
-        bbox=dict(boxstyle="round", facecolor="white", alpha=0.8)
-    )
+    # Moved time text slightly to avoid crowding the wind arrow
+    time_text = ax.text(0.02, 0.96, "", transform=ax.transAxes, fontsize=10, fontweight="bold",
+                        bbox=dict(boxstyle="round", facecolor="white", alpha=0.8, pad=0.3), zorder=20)
 
     ax.legend(loc="upper right")
 
     def update(i):
+        t = i * skip * dt
         s = frames[i]
         p_x, p_y, phi = s[0], s[1], s[2]
 
-        # Update trajectory (show path up to current frame)
+        # 1. Update Wind Arrow based on dynamics equation
+        w_x = A_w * np.cos(omega * t)
+        w_y = A_w * np.sin(omega * t)
+        wind_arrow.set_UVC(w_x, w_y)
+
+        # 2. Update Drone
         traj_line.set_data(frames[:i + 1, 0], frames[:i + 1, 1])
-
-        # Compute rotor positions based on drone angle
-        dx = arm_length * np.cos(phi)
-        dy = arm_length * np.sin(phi)
-
+        dx, dy = arm_length * np.cos(phi), arm_length * np.sin(phi)
         left_x, left_y = p_x - dx, p_y - dy
         right_x, right_y = p_x + dx, p_y + dy
 
-        # Update drone body
         drone_body.set_data([left_x, right_x], [left_y, right_y])
-
-        # Update rotors
         rotor_left.set_center((left_x, left_y))
         rotor_right.set_center((right_x, right_y))
+        time_text.set_text(f"t = {t:.2f}s")
 
-        # Update time
-        time_text.set_text(f"t = {i * skip * dt:.2f}s")
+        return [traj_line, drone_body, rotor_left, rotor_right, time_text, wind_arrow, wind_text]
 
-        return [traj_line, drone_body, rotor_left, rotor_right, time_text]
-
-    anim = FuncAnimation(
-        fig, update, frames=len(frames),
-        interval=1000 // fps, blit=True
-    )
-
+    anim = FuncAnimation(fig, update, frames=len(frames), interval=1000 // fps, blit=True)
     tmp = tempfile.NamedTemporaryFile(suffix=".gif", delete=False)
     anim.save(tmp.name, writer="pillow", fps=fps)
     plt.close(fig)
