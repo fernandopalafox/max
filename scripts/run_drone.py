@@ -32,8 +32,9 @@ def plot_drone_trajectory(buffers, buffer_idx, config):
     phi_dot = states[:, 5]
     time = np.arange(len(p_x)) * config["env_params"]["dt"]
 
-    # Get goal position
-    goal_pos = config["cost_fn_params"]["goal_position"]
+    # Get goal state (position is first 2 elements)
+    goal_state = config["cost_fn_params"]["goal_state"]
+    goal_pos = goal_state[:2]
 
     # Create plot with four subplots
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))

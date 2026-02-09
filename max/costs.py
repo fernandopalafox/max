@@ -205,17 +205,18 @@ def _terminal_cost_pendulum_swing_up(state):
     return (phi - jnp.pi) ** 2 + 0.1 * phi_dot ** 2
 
 
-def _stage_cost_drone_point_tracking(
-    state, control, cost_params, goal_position, weight_control, weight_info, info_term_fn
+def _stage_cost_drone_state_tracking(
+    state, control, cost_params, goal_state, state_weights, weight_control, weight_info, info_term_fn
 ):
     """
-    Stage cost for drone point tracking: position error + control penalty - info bonus.
+    Stage cost for drone state tracking: weighted state error + control penalty - info bonus.
 
     Args:
         state: [p_x, p_y, phi, v_x, v_y, phi_dot] (6,)
         control: [T_1, T_2] (2,)
         cost_params: Dict with 'dyn_params' and 'params_cov_model'
-        goal_position: Target position [p_x_goal, p_y_goal] (2,)
+        goal_state: Target state [p_x, p_y, phi, v_x, v_y, phi_dot] (6,)
+        state_weights: Weights for each state dimension (6,)
         weight_control: Control penalty weight
         weight_info: Information gathering weight
         info_term_fn: Information term function (can be None)
@@ -223,9 +224,8 @@ def _stage_cost_drone_point_tracking(
     Returns:
         Stage cost scalar
     """
-    # Position tracking error
-    position = state[:2]
-    position_error = jnp.sum((position - goal_position) ** 2)
+    # Weighted state tracking error
+    state_error = jnp.sum(state_weights * (state - goal_state) ** 2)
 
     # Control penalty (penalize large thrusts)
     control_cost = weight_control * jnp.sum(control ** 2)
@@ -237,13 +237,12 @@ def _stage_cost_drone_point_tracking(
             state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
         )
 
-    return position_error + control_cost + exploration_term
+    return state_error + control_cost + exploration_term
 
 
-def _terminal_cost_drone_point_tracking(state, goal_position):
-    """Terminal cost: squared position error to goal."""
-    position = state[:2]
-    return jnp.sum((position - goal_position) ** 2)
+def _terminal_cost_drone_state_tracking(state, goal_state, state_weights):
+    """Terminal cost: weighted squared state error to goal."""
+    return jnp.sum(state_weights * (state - goal_state) ** 2)
 
 
 def _stage_cost_merging_idm(
@@ -574,13 +573,14 @@ def init_cost(config, dynamics_model):
 
         return cost_fn
 
-    elif cost_type == "drone_point_tracking_info":
+    elif cost_type == "drone_state_tracking_info":
         # Extract params
         params = config["cost_fn_params"]
         weight_jerk = params.get("weight_jerk", 0.0)
         weight_control = params["weight_control"]
         weight_info = params["weight_info"]
-        goal_position = jnp.array(params["goal_position"])
+        goal_state = jnp.array(params["goal_state"])
+        state_weights = jnp.array(params["state_weights"])
         meas_noise_diag = jnp.array(params["meas_noise_diag"])
 
         # Create the info term calculator (JIT-able helper)
@@ -592,8 +592,8 @@ def init_cost(config, dynamics_model):
 
         # Vectorize stage cost over the horizon
         stage_cost_vmap = jax.vmap(
-            lambda s, u, cp: _stage_cost_drone_point_tracking(
-                s, u, cp, goal_position, weight_control, weight_info, info_term_fn
+            lambda s, u, cp: _stage_cost_drone_state_tracking(
+                s, u, cp, goal_state, state_weights, weight_control, weight_info, info_term_fn
             ),
             in_axes=(0, 0, None),
         )
@@ -601,7 +601,7 @@ def init_cost(config, dynamics_model):
         @jax.jit
         def cost_fn(init_state, controls, cost_params):
             """
-            Calculates total trajectory cost for drone point tracking.
+            Calculates total trajectory cost for drone state tracking.
             """
             # 1. Rollout trajectory
             states = _rollout(
@@ -612,7 +612,7 @@ def init_cost(config, dynamics_model):
             stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
 
             # 3. Calculate terminal cost (on state T)
-            terminal = _terminal_cost_drone_point_tracking(states[-1], goal_position)
+            terminal = _terminal_cost_drone_state_tracking(states[-1], goal_state, state_weights)
 
             # 4. Calculate Jerk Cost (on controls)
             jerk = 0.0

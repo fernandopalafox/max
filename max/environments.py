@@ -18,6 +18,7 @@ class EnvParams:
 
     # Default for cooperative task
     max_accel: float = 2.0
+    max_thrust: float = 20.0
 
     # Specific to pursuit-evasion
     pursuer_size: float = 0.075
@@ -964,7 +965,7 @@ def make_planar_drone_wind_env(params: EnvParams, drone_params, true_wind_amplit
 
     @jax.jit
     def _step_dynamics(state: jnp.ndarray, action: jnp.ndarray, t: float) -> jnp.ndarray:
-        """Planar drone dynamics with sinusoidal wind disturbance."""
+        """Planar drone dynamics with sinusoidal wind disturbance (Semi-Implicit Euler)."""
         p_x, p_y, phi, v_x, v_y, phi_dot = state
         T_1, T_2 = action[0], action[1]
 
@@ -985,13 +986,17 @@ def make_planar_drone_wind_env(params: EnvParams, drone_params, true_wind_amplit
         a_y = a_y_nom + a_y_wind
         alpha = alpha_nom
 
-        # Euler integration
-        p_x_next = p_x + v_x * dt
-        p_y_next = p_y + v_y * dt
-        phi_next = phi + phi_dot * dt
+        # --- SEMI-IMPLICIT EULER INTEGRATION ---
+
+        # 1. Update velocities FIRST
         v_x_next = v_x + a_x * dt
         v_y_next = v_y + a_y * dt
         phi_dot_next = phi_dot + alpha * dt
+
+        # 2. Update positions using new velocities
+        p_x_next = p_x + v_x_next * dt
+        p_y_next = p_y + v_y_next * dt
+        phi_next = phi + phi_dot_next * dt
 
         return jnp.array([p_x_next, p_y_next, phi_next, v_x_next, v_y_next, phi_dot_next])
 
@@ -1012,7 +1017,7 @@ def make_planar_drone_wind_env(params: EnvParams, drone_params, true_wind_amplit
         t = step_count * dt
 
         # Clip action to thrust bounds (non-negative)
-        clipped_action = jnp.clip(action.squeeze(), 0.0, params.max_accel)
+        clipped_action = jnp.clip(action.squeeze(), 0.0, params.max_thrust)
 
         # Step dynamics
         next_state = _step_dynamics(state, clipped_action, t)

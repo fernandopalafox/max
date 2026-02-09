@@ -30,8 +30,8 @@
     "num_agents": 1,
     "max_episode_steps": 500,
     "dt": 0.02,
-    "max_accel": 15.0,
-    "true_wind_amplitude": 2.0,
+    "max_thrust": 20.0,
+    "true_wind_amplitude": 0.0,
     "true_wind_frequency": 1.0,
     "mass": 1.0,
     "gravity": 9.81,
@@ -60,14 +60,14 @@
       "max": [15.0, 15.0]
     },
     "delta": {
-      "min": [-0.5, -0.5, -0.5, -2.0, -2.0, -2.0],
-      "max": [0.5, 0.5, 0.5, 2.0, 2.0, 2.0]
+      "min": [-2.0, -2.0],
+      "max": [2.0, 2.0]
     }
   },
 
   "state_labels": ["p_x", "p_y", "phi", "v_x", "v_y", "phi_dot"],
 
-  "cost_type": "drone_point_tracking_info",
+  "cost_type": "drone_state_tracking_info",
   "planner_type": "icem",
   "planner_params": {
     "horizon": 25,
@@ -84,7 +84,8 @@
     "weight_jerk": 0.001,
     "weight_control": 0.01,
     "weight_info": 0.0,
-    "goal_position": [0.0, 1.0],
+    "goal_state": [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+    "state_weights": [1.0, 1.0, 1.0, 0.5, 0.5, 1.0],
     "meas_noise_diag": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
   }
 }

@@ -638,7 +638,7 @@ def create_planar_drone_dynamics(
 
     The robot model uses:
     - Nominal drone dynamics (known physics)
-    - NN residual predicting acceleration corrections [delta_a_x, delta_a_y, delta_alpha]
+    - NN residual predicting linear acceleration corrections [delta_a_x, delta_a_y]
 
     Trainable Params: NN weights for the residual network
     Known Constants: mass, gravity, arm_length, inertia, dt (from config)
@@ -654,7 +654,7 @@ def create_planar_drone_dynamics(
 
     # Create MLP for residual acceleration prediction
     # Input: state (6) + action (2) = 8
-    # Output: acceleration residuals (3) for [delta_a_x, delta_a_y, delta_alpha]
+    # Output: linear acceleration residuals (2) for [delta_a_x, delta_a_y]
     class ResidualMLP(nn.Module):
         features: Sequence[int]
 
@@ -664,7 +664,7 @@ def create_planar_drone_dynamics(
             for feat in self.features:
                 x = nn.Dense(feat)(x)
                 x = nn.tanh(x)
-            return nn.Dense(3)(x)  # 3 acceleration residuals
+            return nn.Dense(2)(x)  # 2 linear acceleration residuals
 
     # Initialize the NN
     residual_net = ResidualMLP(features=nn_features)
@@ -676,7 +676,7 @@ def create_planar_drone_dynamics(
     def pred_one_step(
         params: Any, state: jnp.ndarray, action: jnp.ndarray
     ) -> jnp.ndarray:
-        """Predicts next state using nominal dynamics + NN residual."""
+        """Predicts next state using nominal dynamics + NN residual (Semi-Implicit)."""
         p_x, p_y, phi, v_x, v_y, phi_dot = state
         T_1, T_2 = action[0], action[1]
 
@@ -689,29 +689,29 @@ def create_planar_drone_dynamics(
         alpha_nom = (L / I) * (T_2 - T_1)
 
         # NN residual for acceleration corrections
-        # Normalize inputs if normalizer is provided
-        if params["normalizer"] is not None:
-            norm_state = normalizer.normalize(params["normalizer"]["state"], state)
-            norm_action = normalizer.normalize(params["normalizer"]["action"], action)
-        else:
-            norm_state = state
-            norm_action = action
+        norm_state = normalizer.normalize(params["normalizer"]["state"], state)
+        norm_action = normalizer.normalize(params["normalizer"]["action"], action)
 
-        residual = residual_net.apply(params["model"], norm_state, norm_action)
-        delta_a_x, delta_a_y, delta_alpha = residual[0], residual[1], residual[2]
+        residual_normalized = residual_net.apply(params["model"], norm_state, norm_action)
+        residual = normalizer.unnormalize(params["normalizer"]["delta"], residual_normalized)
+        delta_a_x, delta_a_y = residual[0], residual[1]
 
         # Total accelerations
         a_x = a_x_nom + delta_a_x
         a_y = a_y_nom + delta_a_y
-        alpha = alpha_nom + delta_alpha
+        alpha = alpha_nom
 
-        # Euler integration
-        p_x_next = p_x + v_x * dt
-        p_y_next = p_y + v_y * dt
-        phi_next = phi + phi_dot * dt
+        # --- SEMI-IMPLICIT EULER INTEGRATION ---
+
+        # 1. Update velocities and angular rate FIRST
         v_x_next = v_x + a_x * dt
         v_y_next = v_y + a_y * dt
         phi_dot_next = phi_dot + alpha * dt
+
+        # 2. Update positions and angle using the NEW velocities
+        p_x_next = p_x + v_x_next * dt
+        p_y_next = p_y + v_y_next * dt
+        phi_next = phi + phi_dot_next * dt
 
         return jnp.array([p_x_next, p_y_next, phi_next, v_x_next, v_y_next, phi_dot_next])
 
