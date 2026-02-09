@@ -631,16 +631,16 @@ def create_planar_drone_dynamics(
     normalizer_params: Optional[jnp.ndarray] = None,
 ) -> tuple[NamedTuple, dict]:
     """
-    Creates dynamics for a planar drone with NN residual for wind compensation.
+    Planar drone model with trainable MLP residual.
 
     State: [p_x, p_y, phi, v_x, v_y, phi_dot] (6D)
     Action: [T_1, T_2] (2D rotor thrusts, non-negative)
 
-    The robot model uses:
+    The model combines:
     - Nominal drone dynamics (known physics)
-    - NN residual predicting linear acceleration corrections [delta_a_x, delta_a_y]
+    - Trainable MLP residual predicting acceleration corrections [delta_a_x, delta_a_y]
 
-    Trainable Params: NN weights for the residual network
+    Trainable Params: All MLP weights (hidden + output layers)
     Known Constants: mass, gravity, arm_length, inertia, dt (from config)
     """
     # Physical parameters from config
@@ -727,6 +727,130 @@ def create_planar_drone_dynamics(
         return delta
 
     params = {"model": nn_params, "normalizer": normalizer_params}
+    model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=pred_norm_delta)
+
+    return model, params
+
+
+def create_planar_drone_dynamics_last_layer(
+    key: jax.Array,
+    config: dict,
+    normalizer: Normalizer,
+    normalizer_params: Optional[jnp.ndarray] = None,
+) -> tuple[NamedTuple, dict]:
+    """
+    Planar drone model with only the last MLP layer trainable.
+
+    Same architecture as create_planar_drone_dynamics, but only the output layer
+    is exposed for training. Hidden layers are randomly initialized and frozen
+    (baked into the model closure).
+
+    State: [p_x, p_y, phi, v_x, v_y, phi_dot] (6D)
+    Action: [T_1, T_2] (2D rotor thrusts, non-negative)
+
+    Trainable Params: Only output layer weights
+    Frozen Params: Hidden layer weights (baked into closure)
+    Known Constants: mass, gravity, arm_length, inertia, dt (from config)
+    """
+    # Physical parameters from config
+    dyn_params = config["dynamics_params"]
+    m = dyn_params["mass"]
+    g = dyn_params["gravity"]
+    L = dyn_params["arm_length"]
+    I = dyn_params["inertia"]
+    dt = dyn_params["dt"]
+    nn_features = dyn_params["nn_features"]
+
+    # Create MLP for residual acceleration prediction
+    class ResidualMLP(nn.Module):
+        features: Sequence[int]
+
+        @nn.compact
+        def __call__(self, state, action):
+            x = jnp.concatenate([state, action], axis=-1)
+            for feat in self.features:
+                x = nn.Dense(feat)(x)
+                x = nn.tanh(x)
+            return nn.Dense(2)(x)  # 2 linear acceleration residuals
+
+    # Initialize the full NN
+    residual_net = ResidualMLP(features=nn_features)
+    dummy_state = jnp.ones((6,))
+    dummy_action = jnp.ones((2,))
+    full_nn_params = residual_net.init(key, dummy_state, dummy_action)
+
+    # Split params: hidden layers (frozen) vs output layer (trainable)
+    # Flax names layers as Dense_0, Dense_1, ..., Dense_n where n is the output
+    num_hidden = len(nn_features)
+    output_layer_name = f"Dense_{num_hidden}"
+
+    # Extract frozen hidden layer params (baked into closure)
+    frozen_params = {"params": {}}
+    for i in range(num_hidden):
+        layer_name = f"Dense_{i}"
+        frozen_params["params"][layer_name] = full_nn_params["params"][layer_name]
+
+    # Extract trainable output layer params
+    trainable_params = {"params": {output_layer_name: full_nn_params["params"][output_layer_name]}}
+
+    @jax.jit
+    def pred_one_step(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts next state using nominal dynamics + NN residual (Semi-Implicit)."""
+        p_x, p_y, phi, v_x, v_y, phi_dot = state
+        T_1, T_2 = action[0], action[1]
+
+        # Total thrust
+        T_total = T_1 + T_2
+
+        # Nominal accelerations (known physics, no wind)
+        a_x_nom = (1 / m) * T_total * jnp.sin(phi)
+        a_y_nom = (1 / m) * T_total * jnp.cos(phi) - g
+        alpha_nom = (L / I) * (T_2 - T_1)
+
+        # NN residual for acceleration corrections
+        norm_state = normalizer.normalize(params["normalizer"]["state"], state)
+        norm_action = normalizer.normalize(params["normalizer"]["action"], action)
+
+        # Reconstruct full NN params: frozen (from closure) + trainable (from input)
+        full_params = {"params": {**frozen_params["params"], **params["model"]["params"]}}
+        residual_normalized = residual_net.apply(full_params, norm_state, norm_action)
+        residual = normalizer.unnormalize(params["normalizer"]["delta"], residual_normalized)
+        delta_a_x, delta_a_y = residual[0], residual[1]
+
+        # Total accelerations
+        a_x = a_x_nom + delta_a_x
+        a_y = a_y_nom + delta_a_y
+        alpha = alpha_nom
+
+        # --- SEMI-IMPLICIT EULER INTEGRATION ---
+
+        # 1. Update velocities and angular rate FIRST
+        v_x_next = v_x + a_x * dt
+        v_y_next = v_y + a_y * dt
+        phi_dot_next = phi_dot + alpha * dt
+
+        # 2. Update positions and angle using the NEW velocities
+        p_x_next = p_x + v_x_next * dt
+        p_y_next = p_y + v_y_next * dt
+        phi_next = phi + phi_dot_next * dt
+
+        return jnp.array([p_x_next, p_y_next, phi_next, v_x_next, v_y_next, phi_dot_next])
+
+    @jax.jit
+    def pred_norm_delta(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts the normalized change in state (for training)."""
+        next_state = pred_one_step(params, state, action)
+        delta = next_state - state
+        if params["normalizer"] is not None:
+            return normalizer.normalize(params["normalizer"]["delta"], delta)
+        return delta
+
+    # Only expose trainable (output layer) params
+    params = {"model": trainable_params, "normalizer": normalizer_params}
     model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=pred_norm_delta)
 
     return model, params
@@ -890,6 +1014,11 @@ def init_dynamics(
 
     elif dynamics_type == "planar_drone":
         return create_planar_drone_dynamics(
+            key, config, normalizer, normalizer_params
+        )
+
+    elif dynamics_type == "planar_drone_last_layer":
+        return create_planar_drone_dynamics_last_layer(
             key, config, normalizer, normalizer_params
         )
 
