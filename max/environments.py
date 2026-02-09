@@ -45,8 +45,16 @@ class EnvParams:
     mpc_horizon: int = -1
     learning_rate: float = jnp.inf
     max_gd_iters: int = 100
-    
-    
+
+    # Specific to planar drone
+    mass: float = 1.0
+    gravity: float = 9.81
+    arm_length: float = 0.25
+    inertia: float = 0.1
+    true_wind_amplitude: float = 0.0
+    true_wind_frequency: float = 1.0
+
+
 
 
 def make_env(params: EnvParams):
@@ -933,7 +941,7 @@ def make_damped_pendulum_env(params: EnvParams, true_b, true_J):
     return reset_fn, step_fn, get_obs_fn
 
 
-def make_planar_drone_wind_env(params: EnvParams, drone_params, true_wind_amplitude, true_wind_frequency):
+def make_planar_drone_wind_env(params: EnvParams):
     """
     Factory function that creates a planar drone environment with sinusoidal wind.
 
@@ -946,22 +954,20 @@ def make_planar_drone_wind_env(params: EnvParams, drone_params, true_wind_amplit
     Dynamics: Nominal drone physics + sinusoidal wind disturbance.
 
     Args:
-        params: EnvParams dataclass with common environment parameters.
-        drone_params: Dict with mass, gravity, arm_length, inertia.
-        true_wind_amplitude: Ground truth amplitude of wind force (A_w).
-        true_wind_frequency: Ground truth angular frequency of wind (omega).
+        params: EnvParams dataclass with environment parameters including
+            mass, gravity, arm_length, inertia, true_wind_amplitude, true_wind_frequency.
 
     Returns:
         Tuple of (reset_fn, step_fn, get_obs_fn).
     """
-    # Physical parameters from config
-    m = drone_params["mass"]
-    g = drone_params["gravity"]
-    L = drone_params["arm_length"]
-    I = drone_params["inertia"]
+    # Physical parameters from EnvParams
+    m = params.mass
+    g = params.gravity
+    L = params.arm_length
+    I = params.inertia
     dt = params.dt
-    A_w = true_wind_amplitude
-    omega = true_wind_frequency
+    A_w = params.true_wind_amplitude
+    omega = params.true_wind_frequency
 
     @jax.jit
     def _step_dynamics(state: jnp.ndarray, action: jnp.ndarray, t: float) -> jnp.ndarray:
@@ -1212,38 +1218,28 @@ def init_env(config: Dict[str, Any]):
 
     # Hacky fix for LQR-specific params
     if env_name == "pursuit_evasion_lqr":
-        true_q_diag = env_params_dict.pop("true_q_diag", None)
-        true_r_diag = env_params_dict.pop("true_r_diag", None)
+        true_q_diag = env_params_dict.get("true_q_diag", None)
+        true_r_diag = env_params_dict.get("true_r_diag", None)
 
     # Hacky fix for linear_tracking-specific params
     if env_name == "linear_tracking":
-        true_A = env_params_dict.pop("true_A", None)
-        true_B = env_params_dict.pop("true_B", None)
-        target_point = env_params_dict.pop("target_point", None)
+        true_A = env_params_dict.get("true_A", None)
+        true_B = env_params_dict.get("true_B", None)
+        target_point = env_params_dict.get("target_point", None)
 
     # Hacky fix for damped_pendulum-specific params
     if env_name == "damped_pendulum":
-        true_b = env_params_dict.pop("true_b", None)
-        true_J = env_params_dict.pop("true_J", None)
+        true_b = env_params_dict.get("true_b", None)
+        true_J = env_params_dict.get("true_J", None)
 
     # Hacky fix for merging_idm-specific params
     if env_name == "merging_idm":
-        true_T = jnp.array(env_params_dict.pop("true_T"))
-        true_b = jnp.array(env_params_dict.pop("true_b"))
-        env_params_dict.pop("true_k_lat", None)
-        env_params_dict.pop("true_d0", None)
-        merging_idm_params = env_params_dict.pop("idm_params")
+        true_T = jnp.array(env_params_dict.get("true_T"))
+        true_b = jnp.array(env_params_dict.get("true_b"))
+        env_params_dict.get("true_k_lat", None)
+        env_params_dict.get("true_d0", None)
+        merging_idm_params = env_params_dict.get("idm_params")
 
-    # Hacky fix for planar_drone_wind-specific params
-    if env_name == "planar_drone_wind":
-        drone_params = {
-            "mass": env_params_dict.pop("mass"),
-            "gravity": env_params_dict.pop("gravity"),
-            "arm_length": env_params_dict.pop("arm_length"),
-            "inertia": env_params_dict.pop("inertia"),
-        }
-        true_wind_amplitude = env_params_dict.pop("true_wind_amplitude")
-        true_wind_frequency = env_params_dict.pop("true_wind_frequency")
 
     params = EnvParams(**env_params_dict)
 
@@ -1269,6 +1265,6 @@ def init_env(config: Dict[str, Any]):
         true_tracking_weight = env_params_dict.pop("true_tracking_weight", None)
         return make_pursuit_evasion_unicycle_double_integrator_env(params, true_tracking_weight)
     elif env_name == "planar_drone_wind":
-        return make_planar_drone_wind_env(params, drone_params, true_wind_amplitude, true_wind_frequency)
+        return make_planar_drone_wind_env(params)
     else:
         raise ValueError(f"Unknown environment name: '{env_name}'")

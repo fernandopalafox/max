@@ -4,6 +4,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from matplotlib.patches import FancyBboxPatch, Circle
+import tempfile
 import wandb
 from max.normalizers import init_normalizer
 from max.buffers import init_jax_buffers, update_buffer_dynamic
@@ -21,70 +24,147 @@ import json
 
 
 def plot_drone_trajectory(buffers, buffer_idx, config):
-    """Plot drone trajectory and state evolution."""
-    # Extract states (agent 0, valid timesteps only)
+    # Extract XY and Goal
+    pts = buffers["states"][0, :buffer_idx, :2]
+    goal = config["cost_fn_params"]["goal_state"][:2]
+
+    fig, ax = plt.subplots()
+    ax.plot(pts[:, 0], pts[:, 1], label="Path")
+    ax.scatter(*goal, color='red', marker='*', label="Goal", zorder=5)
+    
+    # Combine data to find overall bounds
+    all_x = np.concatenate([pts[:, 0], [goal[0]]])
+    all_y = np.concatenate([pts[:, 1], [goal[1]]])
+    
+    # Calculate the range and the midpoint
+    max_range = max(all_x.max() - all_x.min(), all_y.max() - all_y.min())
+    mid_x = (all_x.max() + all_x.min()) / 2
+    mid_y = (all_y.max() + all_y.min()) / 2
+    
+    # Add padding (e.g., 10% extra space)
+    padding = 1.1 
+    half_span = (max_range * padding) / 2
+    
+    # Set symmetric limits
+    ax.set_xlim(mid_x - half_span, mid_x + half_span)
+    ax.set_ylim(mid_y - half_span, mid_y + half_span)
+    
+    ax.set_aspect('equal')
+    ax.grid(True, linestyle='--', alpha=0.6)
+    ax.legend()
+    
+    return fig
+
+
+def make_drone_animation(buffers, buffer_idx, config, fps=40):
+    """Create a GIF animation showing the drone flying."""
     states = np.array(buffers["states"][0, :buffer_idx, :])
+    dt = config["env_params"]["dt"]
 
-    # Extract position, angle, and velocities
-    p_x, p_y = states[:, 0], states[:, 1]
-    phi = states[:, 2]
-    v_x, v_y = states[:, 3], states[:, 4]
-    phi_dot = states[:, 5]
-    time = np.arange(len(p_x)) * config["env_params"]["dt"]
-
-    # Get goal state (position is first 2 elements)
+    # Get goal state
     goal_state = config["cost_fn_params"]["goal_state"]
     goal_pos = goal_state[:2]
 
-    # Create plot with four subplots
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    # Drone dimensions
+    arm_length = config["env_params"]["arm_length"]
+    rotor_radius = 0.08
 
-    # Top-left: XY trajectory
-    axes[0, 0].plot(p_x, p_y, color="blue", linewidth=2, alpha=0.7, label="Trajectory")
-    axes[0, 0].scatter(p_x[0], p_y[0], marker="o", s=100, color="green",
-                       label="Start", zorder=5)
-    axes[0, 0].scatter(p_x[-1], p_y[-1], marker="x", s=100, color="red",
-                       label="End", zorder=5)
-    axes[0, 0].scatter([goal_pos[0]], [goal_pos[1]], marker="*", s=200, color="gold",
-                       label="Goal", zorder=5)
-    axes[0, 0].set_xlabel("X Position (m)")
-    axes[0, 0].set_ylabel("Y Position (m)")
-    axes[0, 0].set_title("Drone XY Trajectory")
-    axes[0, 0].legend(loc="best")
-    axes[0, 0].grid(True, alpha=0.3)
-    axes[0, 0].set_aspect('equal')
+    # Subsample frames for reasonable GIF size
+    skip = max(1, len(states) // 400)
+    frames = states[::skip]
 
-    # Top-right: Position over time
-    axes[0, 1].plot(time, p_x, label="p_x", color="blue", linewidth=2)
-    axes[0, 1].plot(time, p_y, label="p_y", color="orange", linewidth=2)
-    axes[0, 1].axhline(y=goal_pos[0], color="blue", linestyle="--", alpha=0.5)
-    axes[0, 1].axhline(y=goal_pos[1], color="orange", linestyle="--", alpha=0.5, label="Goal y")
-    axes[0, 1].set_xlabel("Time (s)")
-    axes[0, 1].set_ylabel("Position (m)")
-    axes[0, 1].set_title("Position Over Time")
-    axes[0, 1].legend(loc="best")
-    axes[0, 1].grid(True, alpha=0.3)
+    # Compute axis limits with padding
+    p_x_all, p_y_all = states[:, 0], states[:, 1]
+    x_min, x_max = p_x_all.min(), p_x_all.max()
+    y_min, y_max = p_y_all.min(), p_y_all.max()
 
-    # Bottom-left: Pitch angle over time
-    axes[1, 0].plot(time, np.degrees(phi), color="purple", linewidth=2)
-    axes[1, 0].axhline(y=0, color="red", linestyle="--", alpha=0.5, label="Level")
-    axes[1, 0].set_xlabel("Time (s)")
-    axes[1, 0].set_ylabel("Pitch Angle (deg)")
-    axes[1, 0].set_title("Pitch Angle Over Time")
-    axes[1, 0].legend(loc="best")
-    axes[1, 0].grid(True, alpha=0.3)
+    # Include goal in bounds
+    x_min = min(x_min, goal_pos[0])
+    x_max = max(x_max, goal_pos[0])
+    y_min = min(y_min, goal_pos[1])
+    y_max = max(y_max, goal_pos[1])
 
-    # Bottom-right: Velocities over time
-    axes[1, 1].plot(time, v_x, label="v_x", color="blue", linewidth=2)
-    axes[1, 1].plot(time, v_y, label="v_y", color="orange", linewidth=2)
-    axes[1, 1].set_xlabel("Time (s)")
-    axes[1, 1].set_ylabel("Velocity (m/s)")
-    axes[1, 1].set_title("Velocities Over Time")
-    axes[1, 1].legend(loc="best")
-    axes[1, 1].grid(True, alpha=0.3)
+    # Add padding and ensure equal aspect ratio
+    padding = 0.5
+    x_range = x_max - x_min + 2 * padding
+    y_range = y_max - y_min + 2 * padding
+    max_range = max(x_range, y_range)
 
-    plt.tight_layout()
-    return fig
+    x_center = (x_min + x_max) / 2
+    y_center = (y_min + y_max) / 2
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.set_xlim(x_center - max_range / 2, x_center + max_range / 2)
+    ax.set_ylim(y_center - max_range / 2, y_center + max_range / 2)
+    ax.set_aspect('equal', adjustable='box')
+    ax.set_xlabel("X Position (m)")
+    ax.set_ylabel("Y Position (m)")
+    ax.set_title("Drone Flight Animation")
+    ax.grid(True, alpha=0.3)
+
+    # Goal marker (static)
+    ax.scatter(
+        [goal_pos[0]], [goal_pos[1]], marker="*", s=300,
+        color="gold", edgecolors="black", linewidths=0.5,
+        label="Goal", zorder=10
+    )
+
+    # Trajectory line (will be updated)
+    traj_line, = ax.plot([], [], color="blue", linewidth=1.5, alpha=0.5)
+
+    # Drone body (line between rotors)
+    drone_body, = ax.plot([], [], color="black", linewidth=3, solid_capstyle="round")
+
+    # Rotors (circles)
+    rotor_left = Circle((0, 0), rotor_radius, fc="red", ec="darkred", lw=1)
+    rotor_right = Circle((0, 0), rotor_radius, fc="red", ec="darkred", lw=1)
+    ax.add_patch(rotor_left)
+    ax.add_patch(rotor_right)
+
+    # Time text
+    time_text = ax.text(
+        0.02, 0.95, "", transform=ax.transAxes,
+        fontsize=11, fontweight="bold",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.8)
+    )
+
+    ax.legend(loc="upper right")
+
+    def update(i):
+        s = frames[i]
+        p_x, p_y, phi = s[0], s[1], s[2]
+
+        # Update trajectory (show path up to current frame)
+        traj_line.set_data(frames[:i + 1, 0], frames[:i + 1, 1])
+
+        # Compute rotor positions based on drone angle
+        dx = arm_length * np.cos(phi)
+        dy = arm_length * np.sin(phi)
+
+        left_x, left_y = p_x - dx, p_y - dy
+        right_x, right_y = p_x + dx, p_y + dy
+
+        # Update drone body
+        drone_body.set_data([left_x, right_x], [left_y, right_y])
+
+        # Update rotors
+        rotor_left.set_center((left_x, left_y))
+        rotor_right.set_center((right_x, right_y))
+
+        # Update time
+        time_text.set_text(f"t = {i * skip * dt:.2f}s")
+
+        return [traj_line, drone_body, rotor_left, rotor_right, time_text]
+
+    anim = FuncAnimation(
+        fig, update, frames=len(frames),
+        interval=1000 // fps, blit=True
+    )
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".gif", delete=False)
+    anim.save(tmp.name, writer="pillow", fps=fps)
+    plt.close(fig)
+    return tmp.name
 
 
 def main(config, save_dir):
@@ -307,7 +387,7 @@ def main(config, save_dir):
             print(f"Parameter covariance saved to {cov_path}")
 
     # Plot and log trajectory
-    if buffer_idx > 0:
+    # if buffer_idx > 0:
         print("\nGenerating trajectory plot...")
         fig = plot_drone_trajectory(buffers, buffer_idx, config)
         wandb.log(
@@ -315,6 +395,15 @@ def main(config, save_dir):
         )
         plt.close(fig)
         print("Trajectory plot logged to wandb.")
+
+        # Animation
+        print("Generating drone animation...")
+        gif_path = make_drone_animation(buffers, buffer_idx, config)
+        wandb.log(
+            {"trajectory/animation": wandb.Video(gif_path, format="gif")},
+            step=config["total_steps"],
+        )
+        print("Animation logged to wandb.")
 
     wandb.finish()
     print("Run complete.")

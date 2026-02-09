@@ -1,7 +1,7 @@
 {
   "env_name": "planar_drone_wind",
   "num_agents": 1,
-  "total_steps": 500,
+  "total_steps": 300,
   "dim_state": 6,
   "dim_action": 2,
   "train_freq": 1,
