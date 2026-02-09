@@ -31,8 +31,8 @@
     "max_episode_steps": 500,
     "dt": 0.02,
     "max_thrust": 20.0,
-    "true_wind_amplitude": 0.0,
-    "true_wind_frequency": 1.0,
+    "true_wind_amplitude": 1.0,
+    "true_wind_frequency": 0.0,
     "mass": 1.0,
     "gravity": 9.81,
     "arm_length": 0.25,
@@ -43,9 +43,9 @@
   "trainer_params": {
     "learning_rate": 10.0,
     "weight_decay": 1.0,
-    "proc_noise_init": 0.001,
-    "proc_noise_decay": 0.999,
-    "proc_noise_floor": 0.0001,
+    "proc_noise_init": 0.0,
+    "proc_noise_decay": 1.0,
+    "proc_noise_floor": 0.0,
     "init_cov_scale": 0.5,
     "jitter": 0.0
   },
@@ -84,7 +84,7 @@
     "weight_jerk": 0.001,
     "weight_control": 0.01,
     "weight_info": 0.0,
-    "goal_state": [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+    "goal_state": [0.0, 10.0, 0.0, 0.0, 0.0, 0.0],
     "state_weights": [1.0, 1.0, 1.0, 0.5, 0.5, 1.0],
     "meas_noise_diag": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
   }
