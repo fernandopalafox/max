@@ -624,6 +624,114 @@ def create_damped_pendulum_dynamics(
     return model, params
 
 
+def create_planar_drone_dynamics(
+    key: jax.Array,
+    config: dict,
+    normalizer: Normalizer,
+    normalizer_params: Optional[jnp.ndarray] = None,
+) -> tuple[NamedTuple, dict]:
+    """
+    Creates dynamics for a planar drone with NN residual for wind compensation.
+
+    State: [p_x, p_y, phi, v_x, v_y, phi_dot] (6D)
+    Action: [T_1, T_2] (2D rotor thrusts, non-negative)
+
+    The robot model uses:
+    - Nominal drone dynamics (known physics)
+    - NN residual predicting linear acceleration corrections [delta_a_x, delta_a_y]
+
+    Trainable Params: NN weights for the residual network
+    Known Constants: mass, gravity, arm_length, inertia, dt (from config)
+    """
+    # Physical parameters from config
+    dyn_params = config["dynamics_params"]
+    m = dyn_params["mass"]
+    g = dyn_params["gravity"]
+    L = dyn_params["arm_length"]
+    I = dyn_params["inertia"]
+    dt = dyn_params["dt"]
+    nn_features = dyn_params["nn_features"]
+
+    # Create MLP for residual acceleration prediction
+    # Input: state (6) + action (2) = 8
+    # Output: linear acceleration residuals (2) for [delta_a_x, delta_a_y]
+    class ResidualMLP(nn.Module):
+        features: Sequence[int]
+
+        @nn.compact
+        def __call__(self, state, action):
+            x = jnp.concatenate([state, action], axis=-1)
+            for feat in self.features:
+                x = nn.Dense(feat)(x)
+                x = nn.tanh(x)
+            return nn.Dense(2)(x)  # 2 linear acceleration residuals
+
+    # Initialize the NN
+    residual_net = ResidualMLP(features=nn_features)
+    dummy_state = jnp.ones((6,))
+    dummy_action = jnp.ones((2,))
+    nn_params = residual_net.init(key, dummy_state, dummy_action)
+
+    @jax.jit
+    def pred_one_step(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts next state using nominal dynamics + NN residual (Semi-Implicit)."""
+        p_x, p_y, phi, v_x, v_y, phi_dot = state
+        T_1, T_2 = action[0], action[1]
+
+        # Total thrust
+        T_total = T_1 + T_2
+
+        # Nominal accelerations (known physics, no wind)
+        a_x_nom = (1 / m) * T_total * jnp.sin(phi)
+        a_y_nom = (1 / m) * T_total * jnp.cos(phi) - g
+        alpha_nom = (L / I) * (T_2 - T_1)
+
+        # NN residual for acceleration corrections
+        norm_state = normalizer.normalize(params["normalizer"]["state"], state)
+        norm_action = normalizer.normalize(params["normalizer"]["action"], action)
+
+        residual_normalized = residual_net.apply(params["model"], norm_state, norm_action)
+        residual = normalizer.unnormalize(params["normalizer"]["delta"], residual_normalized)
+        delta_a_x, delta_a_y = residual[0], residual[1]
+
+        # Total accelerations
+        a_x = a_x_nom + delta_a_x
+        a_y = a_y_nom + delta_a_y
+        alpha = alpha_nom
+
+        # --- SEMI-IMPLICIT EULER INTEGRATION ---
+
+        # 1. Update velocities and angular rate FIRST
+        v_x_next = v_x + a_x * dt
+        v_y_next = v_y + a_y * dt
+        phi_dot_next = phi_dot + alpha * dt
+
+        # 2. Update positions and angle using the NEW velocities
+        p_x_next = p_x + v_x_next * dt
+        p_y_next = p_y + v_y_next * dt
+        phi_next = phi + phi_dot_next * dt
+
+        return jnp.array([p_x_next, p_y_next, phi_next, v_x_next, v_y_next, phi_dot_next])
+
+    @jax.jit
+    def pred_norm_delta(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts the normalized change in state (for training)."""
+        next_state = pred_one_step(params, state, action)
+        delta = next_state - state
+        if params["normalizer"] is not None:
+            return normalizer.normalize(params["normalizer"]["delta"], delta)
+        return delta
+
+    params = {"model": nn_params, "normalizer": normalizer_params}
+    model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=pred_norm_delta)
+
+    return model, params
+
+
 def create_merging_idm_dynamics(
     config: dict,
     normalizer: Normalizer,
@@ -778,6 +886,11 @@ def init_dynamics(
     elif dynamics_type == "merging_idm":
         return create_merging_idm_dynamics(
             config, normalizer, normalizer_params
+        )
+
+    elif dynamics_type == "planar_drone":
+        return create_planar_drone_dynamics(
+            key, config, normalizer, normalizer_params
         )
 
     else:
