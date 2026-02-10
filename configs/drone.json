@@ -67,7 +67,7 @@
 
   "state_labels": ["p_x", "p_y", "phi", "v_x", "v_y", "phi_dot"],
 
-  "cost_type": "drone_state_tracking_info",
+  "cost_type": "drone_state_tracking_info_task_aware", 
   "planner_type": "icem",
   "planner_params": {
     "horizon": 25,
