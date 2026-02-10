@@ -56,6 +56,37 @@ def plot_drone_trajectory(buffers, buffer_idx, config):
     return fig
 
 
+def covariance_trace(cov):
+    """Compute trace of covariance when LOFI stores a structured approximation.
+    Mirrors the implementation used in run_pendulum.py so LOFI outputs
+    (dict with 'Upsilon' and 'W') are handled correctly.
+    """
+    if cov is None:
+        return 0.0
+    # LOFI stores an approximation of the *precision* matrix as
+    # Lambda ≈ diag(Upsilon) + W @ W.T. We want trace(Sigma) where
+    # Sigma ≈ Lambda^{-1}. Use Woodbury identity to compute
+    # trace(Lambda^{-1}) = trace(D^{-1}) - trace((I + W^T D^{-1} W)^{-1} W^T D^{-2} W)
+    if isinstance(cov, dict):
+        U = cov["Upsilon"]
+        W = cov["W"]
+        eps = 1e-12
+        Dinv = jnp.where(U != 0.0, 1.0 / U, 1.0 / (U + eps))
+
+        trace_Dinv = jnp.sum(Dinv)
+
+        A = W.T @ (Dinv[:, None] * W)
+        L_rank = A.shape[0]
+        inv_term = jnp.linalg.inv(jnp.eye(L_rank) + A)
+
+        B = W.T @ ((Dinv ** 2)[:, None] * W)
+
+        correction = jnp.trace(inv_term @ B)
+        return trace_Dinv - correction
+
+    return jnp.trace(cov)
+
+
 def make_drone_animation(buffers, buffer_idx, config, fps=50):
     """
     Create a GIF animation showing the drone flying with a wind vector arrow.
@@ -263,9 +294,35 @@ def main(config, save_dir):
     for step in range(1, config["total_steps"] + 1):
 
         # Compute actions
+        cov_struct = train_state.covariance
+        if cov_struct is None:
+            cov_matrix = None
+        elif isinstance(cov_struct, dict):
+            # LOFI stores a structured approximation over the *flattened full params*
+            # (model + normalizer). The cost/info-term flattens only the `model`
+            # parameters, so we must extract the corresponding slice of Upsilon/W
+            # before reconstructing the dense covariance for the model params.
+            flat_model_params, _ = jax.flatten_util.ravel_pytree(
+                train_state.params["model"]
+            )
+            p_model = int(flat_model_params.shape[0])
+
+            U_full = cov_struct["Upsilon"]
+            W_full = cov_struct["W"]
+
+            U = U_full[:p_model]
+            W = W_full[:p_model, :]
+
+            # D_inv is diagonal of 1/U (with small epsilon)
+            D_inv = jnp.diag(1.0 / (U + 1e-8))
+
+            # Reconstruct dense covariance for model parameters only
+            cov_matrix = D_inv - D_inv @ W @ jnp.linalg.inv(jnp.eye(W.shape[1]) + W.T @ D_inv @ W) @ W.T @ D_inv
+        else:
+            cov_matrix = cov_struct
         cost_params = {
             "dyn_params": train_state.params,
-            "params_cov_model": train_state.covariance,
+            "params_cov_model": cov_matrix,
         }
         key, planner_key = jax.random.split(key)
         planner_state = planner_state.replace(key=planner_key)
@@ -339,11 +396,21 @@ def main(config, save_dir):
                 )
 
                 # Track covariance trace if available
-                cov_trace = (
-                    jnp.trace(train_state.covariance)
-                    if train_state.covariance is not None
-                    else 0.0
-                )
+                cov_trace = covariance_trace(train_state.covariance)
+
+                # Optional parameter difference vs ground-truth if provided
+                # param_diff = 0.0
+                # if config.get("true_params") is not None:
+                #     try:
+                #         diff_tree = jax.tree_map(
+                #             lambda x, y: x - y, train_state.params, config["true_params"]
+                #         )
+                #         param_diff = sum(
+                #             jnp.linalg.norm(leaf)
+                #             for leaf in jax.tree_util.tree_leaves(diff_tree)
+                #         )
+                #     except Exception:
+                #         param_diff = 0.0
 
                 wandb.log(
                     {

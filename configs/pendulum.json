@@ -34,12 +34,12 @@
 
   "trainer": "lofi",
   "trainer_params": {
-    "learning_rate": 0.1,
+    "learning_rate": 10.0,
     "weight_decay": 1.0,
     "gamma": 1.0,
-    "q_init": 0.0001,
-    "init_cov_scale": 1.0,
-    "jitter": 1e-4,
+    "q_init": 1e-4,
+    "init_cov_scale": 0.5,
+    "jitter": 1e-6,
     "L_rank": 12
   },
 
