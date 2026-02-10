@@ -424,16 +424,17 @@ if __name__ == "__main__":
         help="Custom name for the W&B run.",
     )
     parser.add_argument(
-        "--num-seeds",
-        type=int,
-        default=1,
-        help="Number of random seeds to run.",
+        "--lambdas",
+        type=float,
+        nargs="+",
+        default=None,
+        help="List of weight_info values to sweep.",
     )
     parser.add_argument(
-        "--meta-seed",
+        "--seed",
         type=int,
         default=42,
-        help="A seed to generate the run seeds.",
+        help="Random seed.",
     )
     parser.add_argument(
         "--save-dir",
@@ -450,25 +451,24 @@ if __name__ == "__main__":
     with open(config_path, "r") as f:
         CONFIG = json.load(f)
 
-    if args.meta_seed is not None:
-        rng = np.random.default_rng(args.meta_seed)
-        seeds = rng.integers(low=0, high=2**32 - 1, size=args.num_seeds)
+    run_name_base = args.run_name or "drone"
+
+    if args.lambdas is None:
+        lambdas = [
+            CONFIG["cost_fn_params"]["weight_info"]
+        ]
     else:
-        seeds = range(args.num_seeds)
+        lambdas = args.lambdas
 
-    for seed_idx, seed in enumerate(seeds):
-        print(f"--- Starting run for seed #{seed} ---")
+    for lam in lambdas:
+        print(f"--- Starting run for lambda={lam} ---")
         run_config = copy.deepcopy(CONFIG)
-        run_config["seed"] = int(seed)
+        run_config["seed"] = args.seed
         run_config["wandb_group"] = "planar_drone_wind"
+        run_config["cost_fn_params"]["weight_info"] = lam
 
-        if args.run_name:
-            run_name_base = args.run_name
-        else:
-            run_name_base = "drone"
-
-        if args.num_seeds > 1:
-            run_config["wandb_run_name"] = f"{run_name_base}_seed_{seed_idx}"
+        if len(lambdas) > 1:
+            run_config["wandb_run_name"] = f"{run_name_base}_lam_{lam}"
         else:
             run_config["wandb_run_name"] = run_name_base
 
