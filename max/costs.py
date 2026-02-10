@@ -755,7 +755,7 @@ def init_cost(config, dynamics_model):
             )
 
             # 2. Calculate stage costs (on states 0 to T-1)
-            stage_costs = stage_cost_vmap(states[:-1], controls) + weight_info * info_cost_vmap(states[:-1], controls, cost_params)
+            stage_costs = stage_cost_vmap(states[:-1], controls) - weight_info * info_cost_vmap(states[:-1], controls, cost_params)
 
             # 3. Calculate terminal cost (on state T)
             terminal = _terminal_cost_drone_state_tracking(states[-1], goal_state, state_weights)
