@@ -255,6 +255,12 @@ def main(config, save_dir):
         info_key: 0.0 for info_key in reward_component_keys_to_avg
     }
 
+    # TODO: remove - temporary tracking cost accumulator
+    _goal = np.array(config["cost_fn_params"]["goal_state"])
+    _weights = np.array(config["cost_fn_params"]["state_weights"])
+    _w_ctrl = config["cost_fn_params"]["weight_control"]
+    _accum_cost = 0.0
+
     # Main training loop
     key, reset_key = jax.random.split(key)
     state = reset_fn(reset_key)
@@ -281,6 +287,7 @@ def main(config, save_dir):
         episode_length += 1
         for info_key in reward_component_keys_to_avg:
             episode_reward_components[info_key] += info[info_key]
+        _accum_cost += float(np.sum(_weights * (np.array(state) - _goal) ** 2) + _w_ctrl * np.sum(np.array(action) ** 2))
 
         # Update buffer
         buffers = update_buffer_dynamic(
@@ -344,12 +351,15 @@ def main(config, save_dir):
                     if train_state.covariance is not None
                     else 0.0
                 )
+                # divide by number of model params (not normalizer params)
+                cov_trace_per_param = cov_trace / train_state.covariance.shape[0]
 
                 wandb.log(
                     {
                         "eval/multi_step_loss": multi_step_loss,
                         "eval/one_step_loss": one_step_loss,
-                        "eval/cov_trace": cov_trace,
+                        "eval/cov_trace": cov_trace_per_param,
+                        "eval/accumulated_cost": _accum_cost,
                     },
                     step=step,
                 )
