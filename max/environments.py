@@ -1009,7 +1009,7 @@ def make_planar_drone_wind_env(params: EnvParams):
     @jax.jit
     def reset_fn(key: jax.random.PRNGKey):
         """Reset to initial hovering state near origin."""
-        return jnp.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float32)
+        return jnp.array([0.0, 1.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float32)
 
     @jax.jit
     def get_obs_fn(state: jnp.ndarray):
