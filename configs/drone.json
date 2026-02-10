@@ -52,12 +52,12 @@
 
   "normalization_params": {
     "state": {
-      "min": [-5.0, -5.0, -3.14, -5.0, -5.0, -5.0],
-      "max": [5.0, 5.0, 3.14, 5.0, 5.0, 5.0]
+      "min": [-30.0, -5.0, -3.14, -30.0, -30.0, -6.28],
+      "max": [30.0, 15.0, 3.14, 30.0, 30.0, 6.28]
     },
     "action": {
       "min": [0.0, 0.0],
-      "max": [15.0, 15.0]
+      "max": [20.0, 20.0]
     },
     "delta": {
       "min": [-2.0, -2.0],
@@ -77,14 +77,14 @@
     "learning_rate": 0.9,
     "dim_control": 2,
     "action_low": [0.0, 0.0],
-    "action_high": [15.0, 15.0]
+    "action_high": [20.0, 20.0]
   },
 
   "cost_fn_params": {
     "weight_jerk": 0.001,
     "weight_control": 0.01,
     "weight_info": 0.0,
-    "weight_ground": 1e6,
+    "weight_ground": 1e8,
     "goal_state": [0.0, 10.0, 0.0, 0.0, 0.0, 0.0],
     "state_weights": [1.0, 1.0, 1.0, 0.5, 0.5, 1.0],
     "meas_noise_diag": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
