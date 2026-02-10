@@ -226,25 +226,38 @@ def main(config, save_dir):
     # Initialize dynamics evaluator
     evaluator = DynamicsEvaluator(dynamics_model.pred_one_step)
 
+    # Generate evaluation data - single-step transitions from random states within bounds
+    key, state_key = jax.random.split(key)
     key, action_key = jax.random.split(key)
+
+    n_eval = config["eval_traj_horizon"]
+    state_min = jnp.array(config["normalization_params"]["state"]["min"])
+    state_max = jnp.array(config["normalization_params"]["state"]["max"])
+    action_min = jnp.array(config["normalization_params"]["action"]["min"])
+    action_max = jnp.array(config["normalization_params"]["action"]["max"])
+
+    eval_states = jax.random.uniform(
+        state_key, shape=(n_eval, config["dim_state"]), minval=state_min, maxval=state_max
+    )
     eval_actions = jax.random.uniform(
-        action_key,
-        shape=(config["eval_traj_horizon"], config["dim_action"]),
-        minval=jnp.array(config["normalization_params"]["action"]["min"]),
-        maxval=jnp.array(config["normalization_params"]["action"]["max"]),
+        action_key, shape=(n_eval, config["dim_action"]), minval=action_min, maxval=action_max
     )
 
-    key, reset_key = jax.random.split(key)
-    eval_trajectory = [reset_fn(reset_key)]
-    current_state = eval_trajectory[0]
-    for action in eval_actions:
-        next_state, _, _, _, _, _ = step_fn(current_state, 0, action)
-        eval_trajectory.append(next_state)
-        current_state = next_state
+    # Generate single-step transitions
+    eval_next_states = []
+    for i in range(n_eval):
+        next_state, _, _, _, _, _ = step_fn(eval_states[i], 0, eval_actions[i])
+        eval_next_states.append(next_state)
+    eval_next_states = jnp.array(eval_next_states)
+
+    # Interleave: [s0, n0, s1, n1, ...] so valid transitions are at even indices
+    trajectory = jnp.stack([eval_states, eval_next_states], axis=1).reshape(-1, config["dim_state"])
+    actions = jnp.zeros((2 * n_eval - 1, config["dim_action"]))
+    actions = actions.at[::2].set(eval_actions)
 
     eval_trajectory_data = {
-        "trajectory": jnp.array(eval_trajectory),
-        "actions": eval_actions,
+        "trajectory": trajectory,
+        "actions": actions,
     }
 
     # Initialize cost function
