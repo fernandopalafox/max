@@ -16,14 +16,17 @@
     "method": "static"
   },
 
-  "dynamics": "planar_drone",
+  "dynamics": "planar_drone_tiny_lora",
   "dynamics_params": {
     "dt": 0.02,
     "nn_features": [32, 32],
     "mass": 1.0,
     "gravity": 9.81,
     "arm_length": 0.25,
-    "inertia": 0.1
+    "inertia": 0.1,
+    "svd_rank": 2,
+    "steering_dim": 16,
+    "projection_seed": 42
   },
 
   "env_params": {

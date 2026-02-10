@@ -855,6 +855,260 @@ def create_planar_drone_dynamics_last_layer(
 
     return model, params
 
+# --- TinyLoRA ---
+def _compute_svd_components(W: jnp.ndarray, svd_rank: int) -> dict:
+    """
+    Compute truncated SVD of weight matrix.
+
+    Args:
+        W: Weight matrix (in_features, out_features)
+        svd_rank: Rank of truncation (r)
+
+    Returns:
+        Dict with U (in_features, r), Sigma (r,), V (out_features, r)
+    """
+    U_full, S_full, Vh_full = jnp.linalg.svd(W, full_matrices=False)
+    U = U_full[:, :svd_rank]
+    Sigma = S_full[:svd_rank]
+    V = Vh_full[:svd_rank, :].T
+    return {"U": U, "Sigma": Sigma, "V": V}
+
+
+def _init_random_projections(
+    key: jax.Array, steering_dim: int, svd_rank: int
+) -> jnp.ndarray:
+    """
+    Initialize frozen random projection matrices P.
+
+    Args:
+        key: JAX random key
+        steering_dim: Dimension of steering vector (u)
+        svd_rank: SVD rank (r)
+
+    Returns:
+        P: Random projections (steering_dim, svd_rank, svd_rank)
+    """
+    scale = 1.0 / jnp.sqrt(steering_dim * svd_rank)
+    return jax.random.normal(key, (steering_dim, svd_rank, svd_rank)) * scale
+
+
+def _init_tiny_lora_layers(
+    key: jax.Array,
+    nn_features: Sequence[int],
+    input_dim: int,
+    output_dim: int,
+    svd_rank: int,
+    steering_dim: int,
+    projection_seed: int,
+) -> tuple[list, dict]:
+    """
+    Initialize TinyLoRA layers: compute SVD and random projections for each layer.
+
+    Args:
+        key: JAX random key for MLP initialization
+        nn_features: Hidden layer sizes
+        input_dim: Input dimension
+        output_dim: Output dimension
+        svd_rank: Rank of SVD truncation
+        steering_dim: Dimension of steering vector per layer
+        projection_seed: Seed for reproducible random projections
+
+    Returns:
+        frozen_layers: List of dicts with W, b, U, Sigma, V, P for each layer
+        trainable_v_init: Dict of steering vectors {"v_0": ..., "v_1": ..., ...}
+    """
+    # Create base MLP to get initial weights
+    class BaseMLP(nn.Module):
+        features: Sequence[int]
+
+        @nn.compact
+        def __call__(self, x):
+            for feat in self.features:
+                x = nn.Dense(feat)(x)
+                x = nn.tanh(x)
+            return nn.Dense(output_dim)(x)
+
+    base_mlp = BaseMLP(features=nn_features)
+    dummy_input = jnp.ones((input_dim,))
+    full_nn_params = base_mlp.init(key, dummy_input)
+
+    num_layers = len(nn_features) + 1
+    frozen_layers = []
+    trainable_v_init = {}
+
+    proj_key = jax.random.key(projection_seed)
+
+    for i in range(num_layers):
+        layer_name = f"Dense_{i}"
+        W = full_nn_params["params"][layer_name]["kernel"]
+        b = full_nn_params["params"][layer_name]["bias"]
+
+        svd_components = _compute_svd_components(W, svd_rank)
+
+        proj_key, layer_key = jax.random.split(proj_key)
+        P = _init_random_projections(layer_key, steering_dim, svd_rank)
+
+        frozen_layers.append({
+            "W": W,
+            "b": b,
+            "U": svd_components["U"],
+            "Sigma": svd_components["Sigma"],
+            "V": svd_components["V"],
+            "P": P,
+        })
+
+        trainable_v_init[f"v_{i}"] = jnp.zeros(steering_dim, dtype=jnp.float32)
+
+    return frozen_layers, trainable_v_init
+
+
+def _tiny_lora_forward(
+    x: jnp.ndarray,
+    params_model: dict,
+    frozen_layers: list,
+) -> jnp.ndarray:
+    """
+    Forward pass through TinyLoRA MLP.
+
+    Args:
+        x: Input tensor
+        params_model: Dict with steering vectors {"v_0": ..., "v_1": ..., ...}
+        frozen_layers: List of frozen layer dicts from _init_tiny_lora_layers
+
+    Returns:
+        Output of the TinyLoRA MLP
+    """
+    num_layers = len(frozen_layers)
+
+    for i in range(num_layers):
+        layer = frozen_layers[i]
+        v = params_model[f"v_{i}"]
+
+        # Compute Delta = sum_j v[j] * P[j] using einsum
+        Delta = jnp.einsum("u,urk->rk", v, layer["P"])
+
+        # Compute weight modification: U @ diag(Sigma) @ Delta @ V.T
+        SigmaDelta = layer["Sigma"][:, None] * Delta
+        W_delta = layer["U"] @ SigmaDelta @ layer["V"].T
+
+        # Effective weight
+        W_eff = layer["W"] + W_delta
+
+        # Apply layer
+        x = x @ W_eff + layer["b"]
+
+        # Apply activation (tanh) for all but last layer
+        if i < num_layers - 1:
+            x = jnp.tanh(x)
+
+    return x
+
+
+def create_planar_drone_tiny_lora_dynamics(
+    key: jax.Array,
+    config: dict,
+    normalizer: Normalizer,
+    normalizer_params: Optional[jnp.ndarray] = None,
+) -> tuple[NamedTuple, dict]:
+    """
+    Planar drone with TinyLoRA residual for efficient online adaptation.
+
+    Applies TinyLoRA to ALL layers of the residual MLP.
+    The effective weight for each layer is: W' = W + U @ diag(Sigma) @ (sum_i v[i] * P[i]) @ V.T
+
+    State: [p_x, p_y, phi, v_x, v_y, phi_dot] (6D)
+    Action: [T_1, T_2] (2D rotor thrusts)
+
+    Combines:
+    - Nominal drone physics (gravity, thrust, torque)
+    - TinyLoRA-modified MLP residual for acceleration corrections [delta_a_x, delta_a_y]
+
+    Trainable Params: Steering vectors v for each layer (num_layers * steering_dim total)
+    Frozen (in closure): For each layer: W, b, U, Sigma, V, P
+    Known Constants: mass, gravity, arm_length, inertia, dt (from config)
+    """
+    dyn_params = config["dynamics_params"]
+    m = dyn_params["mass"]
+    g = dyn_params["gravity"]
+    L = dyn_params["arm_length"]
+    I = dyn_params["inertia"]
+    dt = dyn_params["dt"]
+    nn_features = dyn_params["nn_features"]
+    svd_rank = dyn_params["svd_rank"]
+    steering_dim = dyn_params["steering_dim"]
+    projection_seed = dyn_params["projection_seed"]
+
+    # Initialize TinyLoRA layers for residual MLP
+    # Input: 6D state + 2D action = 8D, Output: 2D acceleration residuals
+    frozen_layers, trainable_v_init = _init_tiny_lora_layers(
+        key=key,
+        nn_features=nn_features,
+        input_dim=8,
+        output_dim=2,
+        svd_rank=svd_rank,
+        steering_dim=steering_dim,
+        projection_seed=projection_seed,
+    )
+
+    @jax.jit
+    def pred_one_step(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts next state using nominal dynamics + TinyLoRA residual."""
+        p_x, p_y, phi, v_x, v_y, phi_dot = state
+        T_1, T_2 = action[0], action[1]
+
+        # Total thrust
+        T_total = T_1 + T_2
+
+        # Nominal accelerations (known physics, no wind)
+        a_x_nom = (1 / m) * T_total * jnp.sin(phi)
+        a_y_nom = (1 / m) * T_total * jnp.cos(phi) - g
+        alpha_nom = (L / I) * (T_2 - T_1)
+
+        # NN residual for acceleration corrections
+        norm_state = normalizer.normalize(params["normalizer"]["state"], state)
+        norm_action = normalizer.normalize(params["normalizer"]["action"], action)
+
+        x = jnp.concatenate([norm_state, norm_action], axis=-1)
+        x = _tiny_lora_forward(x, params["model"], frozen_layers)
+
+        # Unnormalize residual
+        residual = normalizer.unnormalize(params["normalizer"]["delta"], x)
+        delta_a_x, delta_a_y = residual[0], residual[1]
+
+        # Total accelerations
+        a_x = a_x_nom + delta_a_x
+        a_y = a_y_nom + delta_a_y
+        alpha = alpha_nom
+
+        # Semi-implicit Euler integration
+        v_x_next = v_x + a_x * dt
+        v_y_next = v_y + a_y * dt
+        phi_dot_next = phi_dot + alpha * dt
+
+        p_x_next = p_x + v_x_next * dt
+        p_y_next = p_y + v_y_next * dt
+        phi_next = phi + phi_dot_next * dt
+
+        return jnp.array([p_x_next, p_y_next, phi_next, v_x_next, v_y_next, phi_dot_next])
+
+    @jax.jit
+    def pred_norm_delta(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts the normalized change in state (for training)."""
+        next_state = pred_one_step(params, state, action)
+        delta = next_state - state
+        if params["normalizer"] is not None:
+            return normalizer.normalize(params["normalizer"]["delta"], delta)
+        return delta
+
+    params = {"model": trainable_v_init, "normalizer": normalizer_params}
+    model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=pred_norm_delta)
+
+    return model, params
+
 
 def create_merging_idm_dynamics(
     config: dict,
@@ -1019,6 +1273,11 @@ def init_dynamics(
 
     elif dynamics_type == "planar_drone_last_layer":
         return create_planar_drone_dynamics_last_layer(
+            key, config, normalizer, normalizer_params
+        )
+
+    elif dynamics_type == "planar_drone_tiny_lora":
+        return create_planar_drone_tiny_lora_dynamics(
             key, config, normalizer, normalizer_params
         )
 
