@@ -121,7 +121,6 @@ def make_task_aware_info_term(
         )
 
         # 4. Compute gradient of stage cost w.r.t. next state
-        # TODO: A more accurate version would compute the gradient at the predicted next state
         grad_cost = jax.grad(stage_cost_fn, argnums=0)(
             state, control
         )
