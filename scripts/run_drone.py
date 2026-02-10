@@ -28,31 +28,23 @@ def plot_drone_trajectory(buffers, buffer_idx, config):
     pts = buffers["states"][0, :buffer_idx, :2]
     goal = config["cost_fn_params"]["goal_state"][:2]
 
+    # Get normalization bounds for positions
+    norm_params = config["normalization_params"]["state"]
+    x_min, x_max = norm_params["min"][0], norm_params["max"][0]
+    y_min, y_max = norm_params["min"][1], norm_params["max"][1]
+
     fig, ax = plt.subplots()
     ax.plot(pts[:, 0], pts[:, 1], label="Path")
     ax.scatter(*goal, color='red', marker='*', label="Goal", zorder=5)
-    
-    # Combine data to find overall bounds
-    all_x = np.concatenate([pts[:, 0], [goal[0]]])
-    all_y = np.concatenate([pts[:, 1], [goal[1]]])
-    
-    # Calculate the range and the midpoint
-    max_range = max(all_x.max() - all_x.min(), all_y.max() - all_y.min())
-    mid_x = (all_x.max() + all_x.min()) / 2
-    mid_y = (all_y.max() + all_y.min()) / 2
-    
-    # Add padding (e.g., 10% extra space)
-    padding = 1.1 
-    half_span = (max_range * padding) / 2
-    
-    # Set symmetric limits
-    ax.set_xlim(mid_x - half_span, mid_x + half_span)
-    ax.set_ylim(mid_y - half_span, mid_y + half_span)
-    
+
+    # Use normalization bounds for axes
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+
     ax.set_aspect('equal')
     ax.grid(True, linestyle='--', alpha=0.6)
     ax.legend()
-    
+
     return fig
 
 
@@ -80,20 +72,14 @@ def make_drone_animation(buffers, buffer_idx, config, fps=50):
     skip = max(1, len(states) // 400)
     frames = states[::skip]
 
-    # Compute axis limits
-    p_x_all, p_y_all = states[:, 0], states[:, 1]
-    x_min, x_max = min(p_x_all.min(), goal_pos[0]), max(p_x_all.max(), goal_pos[0])
-    y_min, y_max = min(p_y_all.min(), goal_pos[1]), max(p_y_all.max(), goal_pos[1])
-
-    # --- MODIFICATION 1: Increase padding ---
-    # Increased padding to give more breathing room around the trajectory
-    padding = 1.0
-    max_range = max(x_max - x_min, y_max - y_min) + 2 * padding
-    x_center, y_center = (x_min + x_max) / 2, (y_min + y_max) / 2
+    # Use normalization bounds for axis limits
+    norm_params = config["normalization_params"]["state"]
+    x_min, x_max = norm_params["min"][0], norm_params["max"][0]
+    y_min, y_max = norm_params["min"][1], norm_params["max"][1]
 
     fig, ax = plt.subplots(figsize=(8, 8))
-    ax.set_xlim(x_center - max_range / 2, x_center + max_range / 2)
-    ax.set_ylim(y_center - max_range / 2, y_center + max_range / 2)
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
     ax.set_aspect('equal', adjustable='box')
     ax.set_xlabel("X Position (m)")
     ax.set_ylabel("Y Position (m)")
@@ -161,6 +147,54 @@ def make_drone_animation(buffers, buffer_idx, config, fps=50):
     anim.save(tmp.name, writer="pillow", fps=fps)
     plt.close(fig)
     return tmp.name
+
+
+def plot_state_components(buffers, buffer_idx, config):
+    """Plot velocities, angle, and angular velocity with normalization bounds."""
+    states = np.array(buffers["states"][0, :buffer_idx, :])
+    dt = config["env_params"]["dt"]
+    time = np.arange(buffer_idx) * dt
+
+    norm_params = config["normalization_params"]["state"]
+    state_min = norm_params["min"]
+    state_max = norm_params["max"]
+
+    fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+
+    # Velocities subplot (v_x, v_y)
+    ax = axes[0]
+    ax.plot(time, states[:, 3], label="v_x")
+    ax.plot(time, states[:, 4], label="v_y")
+    ax.axhline(state_min[3], color='r', linestyle='--', alpha=0.5, label="bounds")
+    ax.axhline(state_max[3], color='r', linestyle='--', alpha=0.5)
+    ax.set_ylabel("Velocity (m/s)")
+    ax.set_ylim(state_min[3], state_max[3])
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    # Angle subplot (phi)
+    ax = axes[1]
+    ax.plot(time, states[:, 2], label="phi")
+    ax.axhline(state_min[2], color='r', linestyle='--', alpha=0.5, label="bounds")
+    ax.axhline(state_max[2], color='r', linestyle='--', alpha=0.5)
+    ax.set_ylabel("Angle (rad)")
+    ax.set_ylim(state_min[2], state_max[2])
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    # Angular velocity subplot (phi_dot)
+    ax = axes[2]
+    ax.plot(time, states[:, 5], label="phi_dot")
+    ax.axhline(state_min[5], color='r', linestyle='--', alpha=0.5, label="bounds")
+    ax.axhline(state_max[5], color='r', linestyle='--', alpha=0.5)
+    ax.set_ylabel("Angular Vel (rad/s)")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylim(state_min[5], state_max[5])
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    return fig
 
 
 def main(config, save_dir):
@@ -401,6 +435,14 @@ def main(config, save_dir):
         )
         plt.close(fig)
         print("Trajectory plot logged to wandb.")
+
+        print("Generating state components plot...")
+        fig = plot_state_components(buffers, buffer_idx, config)
+        wandb.log(
+            {"trajectory/state_components": wandb.Image(fig)}, step=config["total_steps"]
+        )
+        plt.close(fig)
+        print("State components plot logged to wandb.")
 
         # Animation
         print("Generating drone animation...")
