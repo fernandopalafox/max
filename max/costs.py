@@ -266,10 +266,10 @@ def _terminal_cost_pendulum_swing_up(state):
 
 
 def _stage_cost_drone_state_tracking_w_info(
-    state, control, cost_params, goal_state, state_weights, weight_control, weight_info, info_term_fn
+    state, control, cost_params, goal_state, state_weights, weight_control, weight_info, weight_ground, info_term_fn
 ):
     """
-    Stage cost for drone state tracking: weighted state error + control penalty - info bonus.
+    Stage cost for drone state tracking: weighted state error + control penalty  + ground penalty - info bonus.
 
     Args:
         state: [p_x, p_y, phi, v_x, v_y, phi_dot] (6,)
@@ -279,6 +279,7 @@ def _stage_cost_drone_state_tracking_w_info(
         state_weights: Weights for each state dimension (6,)
         weight_control: Control penalty weight
         weight_info: Information gathering weight
+        weight_ground: Ground penalty weight
         info_term_fn: Information term function (can be None)
 
     Returns:
@@ -290,16 +291,21 @@ def _stage_cost_drone_state_tracking_w_info(
     # Control penalty (penalize large thrusts)
     control_cost = weight_control * jnp.sum(control ** 2)
 
-    # Information gathering bonus (optional)
-    exploration_term = 0.0
-    exploration_term = -weight_info * info_term_fn(
-        state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
-    )
+    # Ground penalty (y=0)
+    ground_penalty = weight_ground * jnp.exp(-5.0 * state[1])
 
-    return state_error + control_cost + exploration_term
+    # Information gathering bonus
+    if info_term_fn is not None:
+        exploration_term = -weight_info * info_term_fn(
+            state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
+        )
+    else:
+        exploration_term = 0.0
+
+    return state_error + control_cost + ground_penalty + exploration_term
 
 def _stage_cost_drone_state_tracking(
-    state, control, goal_state, state_weights, weight_control
+    state, control, goal_state, state_weights, weight_control, weight_ground
 ):
     """
     Stage cost for drone state tracking: weighted state error + control penalty.
@@ -320,7 +326,10 @@ def _stage_cost_drone_state_tracking(
     # Control penalty (penalize large thrusts)
     control_cost = weight_control * jnp.sum(control ** 2)
 
-    return state_error + control_cost
+    # Ground penalty (y=0)
+    ground_penalty = weight_ground * jnp.exp(-5.0 * state[1])
+
+    return state_error + control_cost + ground_penalty
 
 
 def _terminal_cost_drone_state_tracking(state, goal_state, state_weights):
@@ -662,6 +671,7 @@ def init_cost(config, dynamics_model):
         weight_jerk = params.get("weight_jerk", 0.0)
         weight_control = params["weight_control"]
         weight_info = params["weight_info"]
+        weight_ground = params.get("weight_ground", 0.0)
         goal_state = jnp.array(params["goal_state"])
         state_weights = jnp.array(params["state_weights"])
         meas_noise_diag = jnp.array(params["meas_noise_diag"])
@@ -676,7 +686,7 @@ def init_cost(config, dynamics_model):
         # Vectorize stage cost over the horizon
         stage_cost_vmap = jax.vmap(
             lambda s, u, cp: _stage_cost_drone_state_tracking_w_info(
-                s, u, cp, goal_state, state_weights, weight_control, weight_info, info_term_fn
+                s, u, cp, goal_state, state_weights, weight_control, weight_info, weight_ground, info_term_fn
             ),
             in_axes=(0, 0, None),
         )
@@ -713,13 +723,14 @@ def init_cost(config, dynamics_model):
         weight_jerk = params.get("weight_jerk", 0.0)
         weight_control = params["weight_control"]
         weight_info = params["weight_info"]
+        weight_ground = params.get("weight_ground", 0.0)
         goal_state = jnp.array(params["goal_state"])
         state_weights = jnp.array(params["state_weights"])
         meas_noise_diag = jnp.array(params["meas_noise_diag"])
 
         # Vectorize stage cost over the horizon
         stage_cost_fn = lambda s, u: _stage_cost_drone_state_tracking(
-            s, u, goal_state, state_weights, weight_control
+            s, u, goal_state, state_weights, weight_control, weight_ground
         )
         stage_cost_vmap = jax.vmap(
             stage_cost_fn,

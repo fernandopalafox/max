@@ -84,6 +84,7 @@
     "weight_jerk": 0.001,
     "weight_control": 0.01,
     "weight_info": 0.0,
+    "weight_ground": 1e6,
     "goal_state": [0.0, 10.0, 0.0, 0.0, 0.0, 0.0],
     "state_weights": [1.0, 1.0, 1.0, 0.5, 0.5, 1.0],
     "meas_noise_diag": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
