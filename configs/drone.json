@@ -26,7 +26,8 @@
     "inertia": 0.1,
     "svd_rank": 2,
     "steering_dim": 16,
-    "projection_seed": 42
+    "projection_seed": 42,
+    "ensemble_size": 1
   },
 
   "env_params": {

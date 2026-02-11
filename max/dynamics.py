@@ -900,6 +900,7 @@ def _init_tiny_lora_layers(
     svd_rank: int,
     steering_dim: int,
     projection_seed: int,
+    ensemble_size: int = 1,
 ) -> tuple[list, dict]:
     """
     Initialize TinyLoRA layers: compute SVD and random projections for each layer.
@@ -912,12 +913,22 @@ def _init_tiny_lora_layers(
         svd_rank: Rank of SVD truncation
         steering_dim: Dimension of steering vector per layer
         projection_seed: Seed for reproducible random projections
+        ensemble_size: Number of ensemble members (default 1 for single model)
 
     Returns:
-        frozen_layers: List of dicts with W, b, U, Sigma, V, P for each layer
-        trainable_v_init: Dict of steering vectors {"v_0": ..., "v_1": ..., ...}
+        frozen_layers: List of dicts with W, b, U, Sigma, V, P for each layer.
+            When ensemble_size>1, each value has shape (E, ...).
+        trainable_v_init: Dict of steering vectors {"v_0": ..., "v_1": ..., ...}.
+            When ensemble_size>1, each value has shape (E, steering_dim).
     """
-    # Create base MLP to get initial weights
+    # Split keys for each ensemble member
+    keys = jax.random.split(key, ensemble_size)
+
+    # Generate independent projection seeds for each ensemble member
+    proj_base_key = jax.random.key(projection_seed)
+    proj_keys = jax.random.split(proj_base_key, ensemble_size)
+
+    # Create base MLP class
     class BaseMLP(nn.Module):
         features: Sequence[int]
 
@@ -930,45 +941,77 @@ def _init_tiny_lora_layers(
 
     base_mlp = BaseMLP(features=nn_features)
     dummy_input = jnp.ones((input_dim,))
-    full_nn_params = base_mlp.init(key, dummy_input)
-
     num_layers = len(nn_features) + 1
-    frozen_layers = []
-    trainable_v_init = {}
 
-    proj_key = jax.random.key(projection_seed)
+    # Initialize all ensemble members
+    all_frozen_layers = []  # List of (list of dicts), one per ensemble member
+    all_v_inits = []  # List of dicts, one per ensemble member
 
-    for i in range(num_layers):
-        layer_name = f"Dense_{i}"
-        W = full_nn_params["params"][layer_name]["kernel"]
-        b = full_nn_params["params"][layer_name]["bias"]
+    for ens_idx in range(ensemble_size):
+        full_nn_params = base_mlp.init(keys[ens_idx], dummy_input)
 
-        svd_components = _compute_svd_components(W, svd_rank)
+        frozen_layers_single = []
+        v_init_single = {}
 
-        proj_key, layer_key = jax.random.split(proj_key)
-        P = _init_random_projections(layer_key, steering_dim, svd_rank)
+        proj_key = proj_keys[ens_idx]
 
-        frozen_layers.append({
-            "W": W,
-            "b": b,
-            "U": svd_components["U"],
-            "Sigma": svd_components["Sigma"],
-            "V": svd_components["V"],
-            "P": P,
-        })
+        for i in range(num_layers):
+            layer_name = f"Dense_{i}"
+            W = full_nn_params["params"][layer_name]["kernel"]
+            b = full_nn_params["params"][layer_name]["bias"]
 
-        trainable_v_init[f"v_{i}"] = jnp.zeros(steering_dim, dtype=jnp.float32)
+            svd_components = _compute_svd_components(W, svd_rank)
 
-    return frozen_layers, trainable_v_init
+            proj_key, layer_key = jax.random.split(proj_key)
+            P = _init_random_projections(layer_key, steering_dim, svd_rank)
+
+            frozen_layers_single.append({
+                "W": W,
+                "b": b,
+                "U": svd_components["U"],
+                "Sigma": svd_components["Sigma"],
+                "V": svd_components["V"],
+                "P": P,
+            })
+
+            v_init_single[f"v_{i}"] = jnp.zeros(steering_dim, dtype=jnp.float32)
+
+        all_frozen_layers.append(frozen_layers_single)
+        all_v_inits.append(v_init_single)
+
+    # Return structure based on ensemble size
+    if ensemble_size == 1:
+        # Return original structure for backward compatibility
+        return all_frozen_layers[0], all_v_inits[0]
+    else:
+        # Stack frozen layers: list of dicts with stacked arrays
+        frozen_layers_stacked = []
+        for layer_idx in range(num_layers):
+            stacked_layer = {
+                k: jnp.stack(
+                    [all_frozen_layers[e][layer_idx][k] for e in range(ensemble_size)],
+                    axis=0,
+                )
+                for k in all_frozen_layers[0][0].keys()
+            }
+            frozen_layers_stacked.append(stacked_layer)
+
+        # Stack trainable params
+        trainable_v_stacked = {
+            k: jnp.stack([all_v_inits[e][k] for e in range(ensemble_size)], axis=0)
+            for k in all_v_inits[0].keys()
+        }
+
+        return frozen_layers_stacked, trainable_v_stacked
 
 
-def _tiny_lora_forward(
+def _tiny_lora_forward_single(
     x: jnp.ndarray,
     params_model: dict,
     frozen_layers: list,
 ) -> jnp.ndarray:
     """
-    Forward pass through TinyLoRA MLP.
+    Forward pass through a single TinyLoRA MLP.
 
     Args:
         x: Input tensor
@@ -1004,6 +1047,42 @@ def _tiny_lora_forward(
     return x
 
 
+def _tiny_lora_forward(
+    x: jnp.ndarray,
+    params_model: dict,
+    frozen_layers: list,
+    ensemble_size: int = 1,
+) -> jnp.ndarray:
+    """
+    Forward pass through TinyLoRA MLP(s).
+
+    Args:
+        x: Input tensor
+        params_model: Dict with steering vectors {"v_0": ..., "v_1": ..., ...}.
+            When ensemble_size>1, each value has shape (E, steering_dim).
+        frozen_layers: List of frozen layer dicts from _init_tiny_lora_layers.
+            When ensemble_size>1, each value has shape (E, ...).
+        ensemble_size: Number of ensemble members (default 1 for single model)
+
+    Returns:
+        Output of the TinyLoRA MLP. When ensemble_size>1, returns the mean
+        across ensemble members.
+    """
+    if ensemble_size == 1:
+        return _tiny_lora_forward_single(x, params_model, frozen_layers)
+
+    # Ensemble forward pass using vmap
+    def forward_one_member(ens_idx):
+        member_params = {k: params_model[k][ens_idx] for k in params_model}
+        member_frozen = [
+            {k: layer[k][ens_idx] for k in layer} for layer in frozen_layers
+        ]
+        return _tiny_lora_forward_single(x, member_params, member_frozen)
+
+    outputs = jax.vmap(forward_one_member)(jnp.arange(ensemble_size))
+    return jnp.mean(outputs, axis=0)
+
+
 def create_planar_drone_tiny_lora_dynamics(
     key: jax.Array,
     config: dict,
@@ -1037,6 +1116,7 @@ def create_planar_drone_tiny_lora_dynamics(
     svd_rank = dyn_params["svd_rank"]
     steering_dim = dyn_params["steering_dim"]
     projection_seed = dyn_params["projection_seed"]
+    ensemble_size = dyn_params.get("ensemble_size", 1)
 
     # Initialize TinyLoRA layers for residual MLP
     # Input: 6D state + 2D action = 8D, Output: 2D acceleration residuals
@@ -1048,6 +1128,7 @@ def create_planar_drone_tiny_lora_dynamics(
         svd_rank=svd_rank,
         steering_dim=steering_dim,
         projection_seed=projection_seed,
+        ensemble_size=ensemble_size,
     )
 
     @jax.jit
@@ -1071,7 +1152,7 @@ def create_planar_drone_tiny_lora_dynamics(
         norm_action = normalizer.normalize(params["normalizer"]["action"], action)
 
         x = jnp.concatenate([norm_state, norm_action], axis=-1)
-        x = _tiny_lora_forward(x, params["model"], frozen_layers)
+        x = _tiny_lora_forward(x, params["model"], frozen_layers, ensemble_size)
 
         # Unnormalize residual
         residual = normalizer.unnormalize(params["normalizer"]["delta"], x)
