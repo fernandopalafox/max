@@ -69,7 +69,9 @@ def make_info_gathering_term(
         # 0.5 * (log(det(Σ_pred)) - log(det(R_meas)))
         info_gain = 0.5 * (jnp.log(jnp.linalg.det(pred_cov)) - log_det_meas_noise)
 
-        return info_gain
+        normalizing_param = params_cov.shape[0]
+
+        return info_gain / normalizing_param
 
     return info_term_fn
 
