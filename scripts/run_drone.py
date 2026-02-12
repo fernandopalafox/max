@@ -448,7 +448,13 @@ if __name__ == "__main__":
         "--seed",
         type=int,
         default=42,
-        help="Random seed.",
+        help="Starting random seed.",
+    )
+    parser.add_argument(
+        "--num-seeds",
+        type=int,
+        default=1,
+        help="Number of seeds to run for each lambda value.",
     )
     parser.add_argument(
         "--save-dir",
@@ -474,18 +480,23 @@ if __name__ == "__main__":
     else:
         lambdas = args.lambdas
 
-    for lam in lambdas:
-        print(f"--- Starting run for lambda={lam} ---")
-        run_config = copy.deepcopy(CONFIG)
-        run_config["seed"] = args.seed
-        run_config["wandb_group"] = "planar_drone_wind"
-        run_config["cost_fn_params"]["weight_info"] = lam
+    for lam_idx, lam in enumerate(lambdas, start=1):
+        for seed_idx in range(1, args.num_seeds + 1):
+            seed = args.seed + seed_idx - 1
+            print(f"--- Starting run for lam{lam_idx} (lambda={lam}), run {seed_idx}/{args.num_seeds} ---")
+            run_config = copy.deepcopy(CONFIG)
+            run_config["seed"] = seed
+            run_config["wandb_group"] = "planar_drone_wind"
+            run_config["cost_fn_params"]["weight_info"] = lam
 
-        if len(lambdas) > 1:
-            run_config["wandb_run_name"] = f"{run_name_base}_lam_{lam}"
-        else:
-            run_config["wandb_run_name"] = run_name_base
+            # Build run name: base_lam{idx}_seed{idx}
+            run_name = run_name_base
+            if len(lambdas) > 1:
+                run_name = f"{run_name}_lam{lam}"
+            if args.num_seeds > 1:
+                run_name = f"{run_name}_{seed_idx}"
+            run_config["wandb_run_name"] = run_name
 
-        main(run_config, save_dir=args.save_dir)
+            main(run_config, save_dir=args.save_dir)
 
     print("All experiments complete.")
