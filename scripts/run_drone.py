@@ -224,40 +224,6 @@ def main(config, save_dir):
     # Initialize dynamics evaluator
     evaluator = DynamicsEvaluator(dynamics_model.pred_one_step)
 
-    # Generate evaluation data - single-step transitions from random states within bounds
-    key, state_key = jax.random.split(key)
-    key, action_key = jax.random.split(key)
-
-    n_eval = config["eval_traj_horizon"]
-    state_min = jnp.array(config["normalization_params"]["state"]["min"])
-    state_max = jnp.array(config["normalization_params"]["state"]["max"])
-    action_min = jnp.array(config["normalization_params"]["action"]["min"])
-    action_max = jnp.array(config["normalization_params"]["action"]["max"])
-
-    eval_states = jax.random.uniform(
-        state_key, shape=(n_eval, config["dim_state"]), minval=state_min, maxval=state_max
-    )
-    eval_actions = jax.random.uniform(
-        action_key, shape=(n_eval, config["dim_action"]), minval=action_min, maxval=action_max
-    )
-
-    # Generate single-step transitions
-    eval_next_states = []
-    for i in range(n_eval):
-        next_state, _, _, _, _, _ = step_fn(eval_states[i], 0, eval_actions[i])
-        eval_next_states.append(next_state)
-    eval_next_states = jnp.array(eval_next_states)
-
-    # Interleave: [s0, n0, s1, n1, ...] so valid transitions are at even indices
-    trajectory = jnp.stack([eval_states, eval_next_states], axis=1).reshape(-1, config["dim_state"])
-    actions = jnp.zeros((2 * n_eval - 1, config["dim_action"]))
-    actions = actions.at[::2].set(eval_actions)
-
-    eval_trajectory_data = {
-        "trajectory": trajectory,
-        "actions": actions,
-    }
-
     # Initialize cost function
     cost_fn = init_cost(config, dynamics_model)
 
@@ -276,20 +242,6 @@ def main(config, save_dir):
 
     print(
         f"Starting simulation for {config['total_steps']} steps "
-    )
-
-    initial_multi_step_loss = evaluator.compute_multi_step_loss(
-        train_state.params, eval_trajectory_data
-    )
-    initial_one_step_loss = evaluator.compute_one_step_loss(
-        train_state.params, eval_trajectory_data
-    )
-    wandb.log(
-        {
-            "eval/multi_step_loss": initial_multi_step_loss,
-            "eval/one_step_loss": initial_one_step_loss,
-        },
-        step=0,
     )
 
     episode_length = 0
@@ -371,6 +323,42 @@ def main(config, save_dir):
             # Unused for policies like iCEM
             pass
 
+        # Evaluate model
+        # buffer_idx >= 2 to ensure we have at least one full transition
+        if step % config["eval_freq"] == 0 and buffer_idx >= 2:
+            # Extract the transition that just happened
+            prev_obs = buffers["states"][0, buffer_idx - 2, :]
+            prev_action = buffers["actions"][0, buffer_idx - 2, :]
+            curr_obs = buffers["states"][0, buffer_idx - 1, :]
+
+            # Format for compute_one_step_loss: trajectory=[s_t, s_{t+1}], actions=[a_t]
+            current_transition_data = {
+                "trajectory": jnp.stack([prev_obs, curr_obs], axis=0),
+                "actions": prev_action[None, :],
+            }
+
+            # Evaluate: can the model predict this new transition?
+            one_step_loss = evaluator.compute_one_step_loss(
+                train_state.params, current_transition_data
+            )
+
+            # Track covariance trace if available
+            cov_trace = (
+                jnp.trace(train_state.covariance)
+                if train_state.covariance is not None
+                else 0.0
+            )
+            cov_trace_per_param = cov_trace / train_state.covariance.shape[0]
+
+            wandb.log(
+                {
+                    "eval/one_step_loss": float(one_step_loss),
+                    "eval/cov_trace": float(cov_trace_per_param),
+                    "eval/accumulated_cost": float(_accum_cost),
+                },
+                step=step,
+            )
+
         # Train model
         # buffer_idx >= 2 to ensure we have at least one full transition
         if step % config["train_model_freq"] == 0 and buffer_idx >= 2:
@@ -381,33 +369,6 @@ def main(config, save_dir):
             }
             train_state, loss = trainer.train(train_state, train_data, step=step)
             wandb.log({"train/model_loss": float(loss)}, step=step)
-
-            if step % config["eval_freq"] == 0:
-                multi_step_loss = evaluator.compute_multi_step_loss(
-                    train_state.params, eval_trajectory_data
-                )
-                one_step_loss = evaluator.compute_one_step_loss(
-                    train_state.params, eval_trajectory_data
-                )
-
-                # Track covariance trace if available
-                cov_trace = (
-                    jnp.trace(train_state.covariance)
-                    if train_state.covariance is not None
-                    else 0.0
-                )
-                # divide by number of model params (not normalizer params)
-                cov_trace_per_param = cov_trace / train_state.covariance.shape[0]
-
-                wandb.log(
-                    {
-                        "eval/multi_step_loss": multi_step_loss,
-                        "eval/one_step_loss": one_step_loss,
-                        "eval/cov_trace": cov_trace_per_param,
-                        "eval/accumulated_cost": _accum_cost,
-                    },
-                    step=step,
-                )
 
         # Handle Buffer Overflow
         if buffer_idx >= config["buffer_size"]:
