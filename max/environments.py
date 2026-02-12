@@ -51,8 +51,9 @@ class EnvParams:
     gravity: float = 9.81
     arm_length: float = 0.25
     inertia: float = 0.1
-    true_wind_amplitude: float = 0.0
-    true_wind_frequency: float = 1.0
+    wind_x: float = 0.0
+    wind_y: float = 0.0
+    wind_torque_coeff: float = 0.1
 
 
 
@@ -943,7 +944,7 @@ def make_damped_pendulum_env(params: EnvParams, true_b, true_J):
 
 def make_planar_drone_wind_env(params: EnvParams):
     """
-    Factory function that creates a planar drone environment with sinusoidal wind.
+    Factory function that creates a planar drone environment with constant wind.
 
     State: [p_x, p_y, phi, v_x, v_y, phi_dot] (6D)
         - p_x, p_y: 2D position
@@ -951,11 +952,12 @@ def make_planar_drone_wind_env(params: EnvParams):
         - v_x, v_y: linear velocities
         - phi_dot: angular velocity
     Action: [T_1, T_2] (left/right rotor thrust, non-negative)
-    Dynamics: Nominal drone physics + sinusoidal wind disturbance.
+    Dynamics: Nominal drone physics + constant wind disturbance affecting
+              both linear and angular accelerations.
 
     Args:
         params: EnvParams dataclass with environment parameters including
-            mass, gravity, arm_length, inertia, true_wind_amplitude, true_wind_frequency.
+            mass, gravity, arm_length, inertia, wind_x, wind_y, wind_torque_coeff.
 
     Returns:
         Tuple of (reset_fn, step_fn, get_obs_fn).
@@ -966,12 +968,13 @@ def make_planar_drone_wind_env(params: EnvParams):
     L = params.arm_length
     I = params.inertia
     dt = params.dt
-    A_w = params.true_wind_amplitude
-    omega = params.true_wind_frequency
+    wind_x = params.wind_x
+    wind_y = params.wind_y
+    wind_torque_coeff = params.wind_torque_coeff
 
     @jax.jit
-    def _step_dynamics(state: jnp.ndarray, action: jnp.ndarray, t: float) -> jnp.ndarray:
-        """Planar drone dynamics with sinusoidal wind disturbance (Semi-Implicit Euler)."""
+    def _step_dynamics(state: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
+        """Planar drone dynamics with constant wind disturbance (Semi-Implicit Euler)."""
         p_x, p_y, phi, v_x, v_y, phi_dot = state
         T_1, T_2 = action[0], action[1]
 
@@ -983,14 +986,18 @@ def make_planar_drone_wind_env(params: EnvParams):
         a_y_nom = (1 / m) * T_total * jnp.cos(phi) - g
         alpha_nom = (L / I) * (T_2 - T_1)
 
-        # Wind disturbance (sinusoidal, time-varying)
-        a_x_wind = (A_w / m) * jnp.cos(omega * t)
-        a_y_wind = (A_w / m) * jnp.sin(omega * t)
+        # Wind disturbance (constant)
+        a_x_wind = wind_x
+        a_y_wind = wind_y
+
+        # Wind-induced angular acceleration (perpendicular model)
+        # Torque depends on perpendicular wind component relative to drone orientation
+        alpha_wind = (wind_torque_coeff / I) * (wind_y * jnp.sin(phi) - wind_x * jnp.cos(phi))
 
         # Total accelerations
         a_x = a_x_nom + a_x_wind
         a_y = a_y_nom + a_y_wind
-        alpha = alpha_nom
+        alpha = alpha_nom + alpha_wind
 
         # --- SEMI-IMPLICIT EULER INTEGRATION ---
 
@@ -1019,14 +1026,11 @@ def make_planar_drone_wind_env(params: EnvParams):
     @jax.jit
     def step_fn(state: jnp.ndarray, step_count: int, action: jnp.ndarray):
         """Steps the environment forward."""
-        # Compute current time
-        t = step_count * dt
-
         # Clip action to thrust bounds (non-negative)
         clipped_action = jnp.clip(action.squeeze(), 0.0, params.max_thrust)
 
         # Step dynamics
-        next_state = _step_dynamics(state, clipped_action, t)
+        next_state = _step_dynamics(state, clipped_action)
 
         # Compute reward: negative tracking error to goal (0, 1)
         goal_position = jnp.array([0.0, 1.0])

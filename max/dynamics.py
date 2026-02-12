@@ -638,10 +638,13 @@ def create_planar_drone_dynamics(
 
     The model combines:
     - Nominal drone dynamics (known physics)
-    - Trainable MLP residual predicting acceleration corrections [delta_a_x, delta_a_y]
+    - Trainable MLP residual predicting acceleration corrections [delta_a_x, delta_a_y, delta_alpha]
+
+    Residual Input: [v_x, v_y, phi, wind_x, wind_y] (normalized)
+    Residual Output: [delta_a_x, delta_a_y, delta_alpha] (unnormalized)
 
     Trainable Params: All MLP weights (hidden + output layers)
-    Known Constants: mass, gravity, arm_length, inertia, dt (from config)
+    Known Constants: mass, gravity, arm_length, inertia, dt, wind_x, wind_y (from config)
     """
     # Physical parameters from config
     dyn_params = config["dynamics_params"]
@@ -651,26 +654,27 @@ def create_planar_drone_dynamics(
     I = dyn_params["inertia"]
     dt = dyn_params["dt"]
     nn_features = dyn_params["nn_features"]
+    wind_x_param = dyn_params.get("wind_x", 0.0)
+    wind_y_param = dyn_params.get("wind_y", 0.0)
 
     # Create MLP for residual acceleration prediction
-    # Input: state (6) + action (2) = 8
-    # Output: linear acceleration residuals (2) for [delta_a_x, delta_a_y]
+    # Input: [v_x, v_y, phi, wind_x, wind_y] (5D normalized)
+    # Output: acceleration residuals (3D) for [delta_a_x, delta_a_y, delta_alpha]
     class ResidualMLP(nn.Module):
         features: Sequence[int]
 
         @nn.compact
-        def __call__(self, state, action):
-            x = jnp.concatenate([state, action], axis=-1)
+        def __call__(self, residual_input):
+            x = residual_input
             for feat in self.features:
                 x = nn.Dense(feat)(x)
                 x = nn.tanh(x)
-            return nn.Dense(2)(x)  # 2 linear acceleration residuals
+            return nn.Dense(3)(x)  # 3 acceleration residuals
 
     # Initialize the NN
     residual_net = ResidualMLP(features=nn_features)
-    dummy_state = jnp.ones((6,))
-    dummy_action = jnp.ones((2,))
-    nn_params = residual_net.init(key, dummy_state, dummy_action)
+    dummy_residual_input = jnp.ones((5,))  # v_x, v_y, phi, wind_x, wind_y
+    nn_params = residual_net.init(key, dummy_residual_input)
 
     @jax.jit
     def pred_one_step(
@@ -688,18 +692,27 @@ def create_planar_drone_dynamics(
         a_y_nom = (1 / m) * T_total * jnp.cos(phi) - g
         alpha_nom = (L / I) * (T_2 - T_1)
 
-        # NN residual for acceleration corrections
+        # Normalize residual inputs: velocities, angle, wind
         norm_state = normalizer.normalize(params["normalizer"]["state"], state)
-        norm_action = normalizer.normalize(params["normalizer"]["action"], action)
+        norm_v_x = norm_state[3]
+        norm_v_y = norm_state[4]
+        norm_phi = norm_state[2]
 
-        residual_normalized = residual_net.apply(params["model"], norm_state, norm_action)
+        wind_arr = jnp.array([wind_x_param, wind_y_param])
+        norm_wind = normalizer.normalize(params["normalizer"]["wind"], wind_arr)
+
+        # Build 5D residual input
+        residual_input = jnp.array([norm_v_x, norm_v_y, norm_phi, norm_wind[0], norm_wind[1]])
+
+        # Apply NN and unnormalize
+        residual_normalized = residual_net.apply(params["model"], residual_input)
         residual = normalizer.unnormalize(params["normalizer"]["delta"], residual_normalized)
-        delta_a_x, delta_a_y = residual[0], residual[1]
+        delta_a_x, delta_a_y, delta_alpha = residual[0], residual[1], residual[2]
 
         # Total accelerations
         a_x = a_x_nom + delta_a_x
         a_y = a_y_nom + delta_a_y
-        alpha = alpha_nom
+        alpha = alpha_nom + delta_alpha
 
         # --- SEMI-IMPLICIT EULER INTEGRATION ---
 
@@ -748,9 +761,12 @@ def create_planar_drone_dynamics_last_layer(
     State: [p_x, p_y, phi, v_x, v_y, phi_dot] (6D)
     Action: [T_1, T_2] (2D rotor thrusts, non-negative)
 
+    Residual Input: [v_x, v_y, phi, wind_x, wind_y] (normalized)
+    Residual Output: [delta_a_x, delta_a_y, delta_alpha] (unnormalized)
+
     Trainable Params: Only output layer weights
     Frozen Params: Hidden layer weights (baked into closure)
-    Known Constants: mass, gravity, arm_length, inertia, dt (from config)
+    Known Constants: mass, gravity, arm_length, inertia, dt, wind_x, wind_y (from config)
     """
     # Physical parameters from config
     dyn_params = config["dynamics_params"]
@@ -760,24 +776,27 @@ def create_planar_drone_dynamics_last_layer(
     I = dyn_params["inertia"]
     dt = dyn_params["dt"]
     nn_features = dyn_params["nn_features"]
+    wind_x_param = dyn_params.get("wind_x", 0.0)
+    wind_y_param = dyn_params.get("wind_y", 0.0)
 
     # Create MLP for residual acceleration prediction
+    # Input: [v_x, v_y, phi, wind_x, wind_y] (5D normalized)
+    # Output: acceleration residuals (3D) for [delta_a_x, delta_a_y, delta_alpha]
     class ResidualMLP(nn.Module):
         features: Sequence[int]
 
         @nn.compact
-        def __call__(self, state, action):
-            x = jnp.concatenate([state, action], axis=-1)
+        def __call__(self, residual_input):
+            x = residual_input
             for feat in self.features:
                 x = nn.Dense(feat)(x)
                 x = nn.tanh(x)
-            return nn.Dense(2)(x)  # 2 linear acceleration residuals
+            return nn.Dense(3)(x)  # 3 acceleration residuals
 
     # Initialize the full NN
     residual_net = ResidualMLP(features=nn_features)
-    dummy_state = jnp.ones((6,))
-    dummy_action = jnp.ones((2,))
-    full_nn_params = residual_net.init(key, dummy_state, dummy_action)
+    dummy_residual_input = jnp.ones((5,))  # v_x, v_y, phi, wind_x, wind_y
+    full_nn_params = residual_net.init(key, dummy_residual_input)
 
     # Split params: hidden layers (frozen) vs output layer (trainable)
     # Flax names layers as Dense_0, Dense_1, ..., Dense_n where n is the output
@@ -809,20 +828,28 @@ def create_planar_drone_dynamics_last_layer(
         a_y_nom = (1 / m) * T_total * jnp.cos(phi) - g
         alpha_nom = (L / I) * (T_2 - T_1)
 
-        # NN residual for acceleration corrections
+        # Normalize residual inputs: velocities, angle, wind
         norm_state = normalizer.normalize(params["normalizer"]["state"], state)
-        norm_action = normalizer.normalize(params["normalizer"]["action"], action)
+        norm_v_x = norm_state[3]
+        norm_v_y = norm_state[4]
+        norm_phi = norm_state[2]
+
+        wind_arr = jnp.array([wind_x_param, wind_y_param])
+        norm_wind = normalizer.normalize(params["normalizer"]["wind"], wind_arr)
+
+        # Build 5D residual input
+        residual_input = jnp.array([norm_v_x, norm_v_y, norm_phi, norm_wind[0], norm_wind[1]])
 
         # Reconstruct full NN params: frozen (from closure) + trainable (from input)
         full_params = {"params": {**frozen_params["params"], **params["model"]["params"]}}
-        residual_normalized = residual_net.apply(full_params, norm_state, norm_action)
+        residual_normalized = residual_net.apply(full_params, residual_input)
         residual = normalizer.unnormalize(params["normalizer"]["delta"], residual_normalized)
-        delta_a_x, delta_a_y = residual[0], residual[1]
+        delta_a_x, delta_a_y, delta_alpha = residual[0], residual[1], residual[2]
 
         # Total accelerations
         a_x = a_x_nom + delta_a_x
         a_y = a_y_nom + delta_a_y
-        alpha = alpha_nom
+        alpha = alpha_nom + delta_alpha
 
         # --- SEMI-IMPLICIT EULER INTEGRATION ---
 
@@ -1098,13 +1125,16 @@ def create_planar_drone_tiny_lora_dynamics(
     State: [p_x, p_y, phi, v_x, v_y, phi_dot] (6D)
     Action: [T_1, T_2] (2D rotor thrusts)
 
+    Residual Input: [v_x, v_y, phi, wind_x, wind_y] (5D normalized)
+    Residual Output: [delta_a_x, delta_a_y, delta_alpha] (3D unnormalized)
+
     Combines:
     - Nominal drone physics (gravity, thrust, torque)
-    - TinyLoRA-modified MLP residual for acceleration corrections [delta_a_x, delta_a_y]
+    - TinyLoRA-modified MLP residual for acceleration corrections [delta_a_x, delta_a_y, delta_alpha]
 
     Trainable Params: Steering vectors v for each layer (num_layers * steering_dim total)
     Frozen (in closure): For each layer: W, b, U, Sigma, V, P
-    Known Constants: mass, gravity, arm_length, inertia, dt (from config)
+    Known Constants: mass, gravity, arm_length, inertia, dt, wind_x, wind_y (from config)
     """
     dyn_params = config["dynamics_params"]
     m = dyn_params["mass"]
@@ -1117,14 +1147,16 @@ def create_planar_drone_tiny_lora_dynamics(
     steering_dim = dyn_params["steering_dim"]
     projection_seed = dyn_params["projection_seed"]
     ensemble_size = dyn_params.get("ensemble_size", 1)
+    wind_x_param = dyn_params.get("wind_x", 0.0)
+    wind_y_param = dyn_params.get("wind_y", 0.0)
 
     # Initialize TinyLoRA layers for residual MLP
-    # Input: 6D state + 2D action = 8D, Output: 2D acceleration residuals
+    # Input: [v_x, v_y, phi, wind_x, wind_y] = 5D, Output: 3D acceleration residuals
     frozen_layers, trainable_v_init = _init_tiny_lora_layers(
         key=key,
         nn_features=nn_features,
-        input_dim=8,
-        output_dim=2,
+        input_dim=5,
+        output_dim=3,
         svd_rank=svd_rank,
         steering_dim=steering_dim,
         projection_seed=projection_seed,
@@ -1147,21 +1179,28 @@ def create_planar_drone_tiny_lora_dynamics(
         a_y_nom = (1 / m) * T_total * jnp.cos(phi) - g
         alpha_nom = (L / I) * (T_2 - T_1)
 
-        # NN residual for acceleration corrections
+        # Normalize residual inputs: velocities, angle, wind
         norm_state = normalizer.normalize(params["normalizer"]["state"], state)
-        norm_action = normalizer.normalize(params["normalizer"]["action"], action)
+        norm_v_x = norm_state[3]
+        norm_v_y = norm_state[4]
+        norm_phi = norm_state[2]
 
-        x = jnp.concatenate([norm_state, norm_action], axis=-1)
-        x = _tiny_lora_forward(x, params["model"], frozen_layers, ensemble_size)
+        wind_arr = jnp.array([wind_x_param, wind_y_param])
+        norm_wind = normalizer.normalize(params["normalizer"]["wind"], wind_arr)
+
+        # Build 5D residual input
+        residual_input = jnp.array([norm_v_x, norm_v_y, norm_phi, norm_wind[0], norm_wind[1]])
+
+        x = _tiny_lora_forward(residual_input, params["model"], frozen_layers, ensemble_size)
 
         # Unnormalize residual
         residual = normalizer.unnormalize(params["normalizer"]["delta"], x)
-        delta_a_x, delta_a_y = residual[0], residual[1]
+        delta_a_x, delta_a_y, delta_alpha = residual[0], residual[1], residual[2]
 
         # Total accelerations
         a_x = a_x_nom + delta_a_x
         a_y = a_y_nom + delta_a_y
-        alpha = alpha_nom
+        alpha = alpha_nom + delta_alpha
 
         # Semi-implicit Euler integration
         v_x_next = v_x + a_x * dt

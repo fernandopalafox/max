@@ -55,10 +55,10 @@ def make_drone_animation(buffers, buffer_idx, config, fps=50):
     """
     states = np.array(buffers["states"][0, :buffer_idx, :])
     dt = config["env_params"]["dt"]
-    
-    # Get wind parameters for visualization
-    A_w = config["env_params"]["true_wind_amplitude"]
-    omega = config["env_params"]["true_wind_frequency"]
+
+    # Get wind parameters for visualization (constant wind)
+    wind_x = config["env_params"]["wind_x"]
+    wind_y = config["env_params"]["wind_y"]
 
     # Get goal state
     goal_state = config["cost_fn_params"]["goal_state"]
@@ -83,7 +83,7 @@ def make_drone_animation(buffers, buffer_idx, config, fps=50):
     ax.set_aspect('equal', adjustable='box')
     ax.set_xlabel("X Position (m)")
     ax.set_ylabel("Y Position (m)")
-    ax.set_title("Drone Flight with Time-Varying Wind")
+    ax.set_title("Drone Flight with Constant Wind")
     ax.grid(True, alpha=0.3)
 
     # --- WIND ARROW SETUP ---
@@ -95,7 +95,7 @@ def make_drone_animation(buffers, buffer_idx, config, fps=50):
         0.12, 0.88, 0, 0,
         transform=ax.transAxes,
         color='teal',
-        scale=10,
+        scale=20,
         width=0.008,
         zorder=20 # Ensure it's on top
     )
@@ -124,10 +124,8 @@ def make_drone_animation(buffers, buffer_idx, config, fps=50):
         s = frames[i]
         p_x, p_y, phi = s[0], s[1], s[2]
 
-        # 1. Update Wind Arrow based on dynamics equation
-        w_x = A_w * np.cos(omega * t)
-        w_y = A_w * np.sin(omega * t)
-        wind_arrow.set_UVC(w_x, w_y)
+        # 1. Update Wind Arrow (constant wind)
+        wind_arrow.set_UVC(wind_x, wind_y)
 
         # 2. Update Drone
         traj_line.set_data(frames[:i + 1, 0], frames[:i + 1, 1])
