@@ -9,7 +9,6 @@
   "train_policy_freq": 1,
   "normalize_freq": 1000000,
   "eval_freq": 10,
-  "eval_traj_horizon": 50,
   "buffer_size": 1000,
 
   "normalization": {
