@@ -268,7 +268,7 @@ def _terminal_cost_pendulum_swing_up(state):
 
 
 def _stage_cost_drone_state_tracking_w_info(
-    state, control, cost_params, goal_state, state_weights, weight_control, weight_info, weight_ground, info_term_fn
+    state, control, cost_params, state_weights, weight_control, weight_info, weight_ground, info_term_fn
 ):
     """
     Stage cost for drone state tracking: weighted state error + control penalty  + ground penalty - info bonus.
@@ -276,8 +276,7 @@ def _stage_cost_drone_state_tracking_w_info(
     Args:
         state: [p_x, p_y, phi, v_x, v_y, phi_dot] (6,)
         control: [T_1, T_2] (2,)
-        cost_params: Dict with 'dyn_params' and 'params_cov_model'
-        goal_state: Target state [p_x, p_y, phi, v_x, v_y, phi_dot] (6,)
+        cost_params: Dict with 'dyn_params', 'params_cov_model', and 'goal_state'
         state_weights: Weights for each state dimension (6,)
         weight_control: Control penalty weight
         weight_info: Information gathering weight
@@ -287,6 +286,8 @@ def _stage_cost_drone_state_tracking_w_info(
     Returns:
         Stage cost scalar
     """
+    goal_state = cost_params["goal_state"]
+
     # Weighted state tracking error
     state_error = jnp.sum(state_weights * (state - goal_state) ** 2)
 
@@ -334,8 +335,9 @@ def _stage_cost_drone_state_tracking(
     return state_error + control_cost + ground_penalty
 
 
-def _terminal_cost_drone_state_tracking(state, goal_state, state_weights):
+def _terminal_cost_drone_state_tracking(state, cost_params, state_weights):
     """Terminal cost: weighted squared state error to goal."""
+    goal_state = cost_params["goal_state"]
     return jnp.sum(state_weights * (state - goal_state) ** 2)
 
 
@@ -714,7 +716,6 @@ def init_cost(config, dynamics_model):
         weight_control = params["weight_control"]
         weight_info = params["weight_info"]
         weight_ground = params.get("weight_ground", 0.0)
-        goal_state = jnp.array(params["goal_state"])
         state_weights = jnp.array(params["state_weights"])
         meas_noise_diag = jnp.array(params["meas_noise_diag"])
 
@@ -726,9 +727,10 @@ def init_cost(config, dynamics_model):
             )
 
         # Vectorize stage cost over the horizon
+        # Note: goal_state is now passed via cost_params at runtime
         stage_cost_vmap = jax.vmap(
             lambda s, u, cp: _stage_cost_drone_state_tracking_w_info(
-                s, u, cp, goal_state, state_weights, weight_control, weight_info, weight_ground, info_term_fn
+                s, u, cp, state_weights, weight_control, weight_info, weight_ground, info_term_fn
             ),
             in_axes=(0, 0, None),
         )
@@ -747,7 +749,7 @@ def init_cost(config, dynamics_model):
             stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
 
             # 3. Calculate terminal cost (on state T)
-            terminal = _terminal_cost_drone_state_tracking(states[-1], goal_state, state_weights)
+            terminal = _terminal_cost_drone_state_tracking(states[-1], cost_params, state_weights)
 
             # 4. Calculate Jerk Cost (on controls)
             jerk = 0.0

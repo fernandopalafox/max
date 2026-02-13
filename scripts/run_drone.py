@@ -265,6 +265,7 @@ def main(config, save_dir):
     key, reset_key = jax.random.split(key)
     state = reset_fn(reset_key)
     current_obs = get_obs_fn(state)
+    goal_state = np.array(config["cost_fn_params"]["goal_state"])
 
     for step in range(1, config["total_steps"] + 1):
 
@@ -272,6 +273,7 @@ def main(config, save_dir):
         cost_params = {
             "dyn_params": train_state.params,
             "params_cov_model": train_state.covariance,
+            "goal_state": goal_state,
         }
         key, planner_key = jax.random.split(key)
         planner_state = planner_state.replace(key=planner_key)
