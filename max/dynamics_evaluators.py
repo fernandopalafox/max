@@ -4,11 +4,14 @@ Evaluator infrastructure for dynamics-based task evaluation.
 
 Provides factory functions for creating evaluators that assess learned dynamics
 models by running full task rollouts and computing evaluation costs.
+
+Uses jax.lax.scan for efficient time loops and jax.vmap for parallel episodes,
+avoiding Python loop overhead and enabling GPU acceleration.
 """
 
 import jax
 import jax.numpy as jnp
-from typing import Any, Callable, Dict, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 from max.normalizers import init_normalizer
 from max.environments import init_env
@@ -96,18 +99,21 @@ def init_evaluator(config: dict) -> Evaluator:
         raise ValueError(f"Unknown evaluator type: '{evaluator_type}'")
 
 
-def create_rollout_evaluator(config: dict) -> tuple[Evaluator, None]:
+def create_rollout_evaluator(config: dict) -> Evaluator:
     """
     Creates a rollout evaluator that:
     1. Initializes environment, dynamics, planner, and evaluation costs
     2. Runs rollouts using the planner with learned dynamics
     3. Computes evaluation costs at each step
 
+    Uses jax.lax.scan for the time loop and jax.vmap for parallel episodes,
+    avoiding Python loop overhead. Always runs full max_steps (no early termination).
+
     Args:
         config: Configuration dictionary with evaluator_params section
 
     Returns:
-        Tuple of (Evaluator, None) - no persistent state needed
+        Evaluator instance
     """
     evaluator_params = config.get("evaluator_params", {})
 
@@ -134,6 +140,7 @@ def create_rollout_evaluator(config: dict) -> tuple[Evaluator, None]:
 
     # Get evaluation cost types list
     eval_cost_types = evaluator_params.get("eval_cost_types", ["goal_cost"])
+    num_cost_types = len(eval_cost_types)
 
     # Random key for initialization
     seed = evaluator_params.get("seed", config.get("seed", 42))
@@ -141,7 +148,7 @@ def create_rollout_evaluator(config: dict) -> tuple[Evaluator, None]:
 
     # --- Initialize components ---
     print("  📦 Initializing evaluation environment...")
-    reset_fn, step_fn, get_obs_fn = init_env(env_config)
+    reset_fn, step_fn, _ = init_env(env_config)
 
     print("  📦 Initializing evaluation dynamics model (structure only)...")
     normalizer, norm_params = init_normalizer(dynamics_config)
@@ -156,13 +163,13 @@ def create_rollout_evaluator(config: dict) -> tuple[Evaluator, None]:
     planner, init_planner_state = init_planner(planner_config, planning_cost_fn, planner_key)
 
     print("  📦 Initializing evaluation cost function(s)...")
-    eval_cost_fns = {}
+    # Store as a list to maintain order for stacking
+    eval_cost_fn_list = []
     for cost_type in eval_cost_types:
-        # Build config for this eval cost type
         eval_cost_config = {**config}
         eval_cost_config["cost_fn_params"] = _resolve_evaluator_config(config, "cost_fn_params")
         eval_cost_config["cost_type"] = cost_type
-        eval_cost_fns[cost_type] = init_cost(eval_cost_config, dynamics_model)
+        eval_cost_fn_list.append(init_cost(eval_cost_config, dynamics_model))
 
     # --- Get rollout parameters ---
     max_steps = evaluator_params.get(
@@ -179,59 +186,89 @@ def create_rollout_evaluator(config: dict) -> tuple[Evaluator, None]:
         )
     )
 
-    # --- Create the evaluate function ---
-    def _run_single_episode(
-        dyn_params: dict,
-        reset_key: jax.Array,
-        planner_key: jax.Array,
-    ) -> dict:
+    # --- Define the scan step function ---
+    def _scan_step(carry, step_idx):
         """
-        Runs a single evaluation episode.
+        Single step of the rollout, designed for jax.lax.scan.
+
+        Args:
+            carry: (env_state, planner_state, cost_params)
+            step_idx: Current step index (unused but required by scan)
 
         Returns:
-            Dict with accumulated costs for each eval_cost_type
+            (new_carry, step_costs) where step_costs is array of shape (num_cost_types,)
+        """
+        env_state, planner_state, cost_params = carry
+
+        # Plan with current dynamics
+        actions, new_planner_state = planner.solve(planner_state, env_state, cost_params)
+        action = actions[0]  # Take first action from horizon
+
+        # Compute evaluation costs for this step (stack into array)
+        step_costs = jnp.array([
+            cost_fn(env_state, action[None, :], cost_params)
+            for cost_fn in eval_cost_fn_list
+        ])
+
+        # Step environment (ignore termination/truncation - always run full episode)
+        new_env_state, _, _, _, _, _ = step_fn(env_state, step_idx, action[None, :])
+
+        return (new_env_state, new_planner_state, cost_params), step_costs
+
+    def _run_single_episode(dyn_params: dict, reset_key: jax.Array, planner_key: jax.Array) -> jax.Array:
+        """
+        Runs a single evaluation episode using jax.lax.scan.
+
+        Returns:
+            Array of accumulated costs, shape (num_cost_types,)
         """
         # Reset environment
         env_state = reset_fn(reset_key)
 
-        # Initialize planner state
+        # Initialize planner state with new key
         planner_state = init_planner_state.replace(key=planner_key)
 
-        # Initialize cost accumulators
-        accumulated_costs = {cost_type: 0.0 for cost_type in eval_cost_types}
-
-        # Build cost_params structure for planner and eval costs
+        # Build cost_params structure
         cost_params = {
             "dyn_params": dyn_params,
-            "params_cov_model": None,  # Not used in evaluation
+            "params_cov_model": None,
             "goal_state": goal_state,
         }
 
-        # Run rollout loop
-        for step_idx in range(max_steps):
-            # Plan with current dynamics
-            actions, planner_state = planner.solve(planner_state, env_state, cost_params)
-            action = actions[0]  # Take first action from horizon
+        # Run rollout with scan (always full max_steps)
+        init_carry = (env_state, planner_state, cost_params)
+        _, all_step_costs = jax.lax.scan(_scan_step, init_carry, jnp.arange(max_steps))
 
-            # Compute evaluation costs for this step
-            for cost_type, cost_fn in eval_cost_fns.items():
-                step_cost = cost_fn(env_state, action[None, :], cost_params)
-                accumulated_costs[cost_type] += float(step_cost)
+        # all_step_costs has shape (max_steps, num_cost_types)
+        # Sum over time to get accumulated costs per cost type
+        return jnp.sum(all_step_costs, axis=0)
 
-            # Step environment
-            env_state, _, _, terminated, truncated, _ = step_fn(
-                env_state, step_idx, action[None, :]
-            )
+    # Vectorize over episodes (vmap over reset_key and planner_key)
+    # dyn_params is shared across all episodes (in_axes=None)
+    _run_episodes_vmapped = jax.vmap(
+        _run_single_episode,
+        in_axes=(None, 0, 0)  # dyn_params shared, keys batched
+    )
 
-            # Check if episode is done
-            if terminated or truncated:
-                break
+    # JIT compile the entire evaluation
+    @jax.jit
+    def _evaluate_jitted(dyn_params: dict, reset_keys: jax.Array, planner_keys: jax.Array) -> jax.Array:
+        """
+        JIT-compiled evaluation over all episodes.
 
-        return accumulated_costs
+        Args:
+            dyn_params: Dynamics parameters
+            reset_keys: Keys of shape (num_episodes,) for environment resets
+            planner_keys: Keys of shape (num_episodes,) for planner initialization
+
+        Returns:
+            Array of shape (num_episodes, num_cost_types)
+        """
+        return _run_episodes_vmapped(dyn_params, reset_keys, planner_keys)
 
     def evaluate_fn(dyn_params: dict) -> dict:
         """
-        Main evaluation function that runs multiple episodes and aggregates results.
+        Main evaluation function that runs multiple episodes in parallel.
 
         Args:
             dyn_params: Dynamics parameters in train_state.params format
@@ -239,23 +276,24 @@ def create_rollout_evaluator(config: dict) -> tuple[Evaluator, None]:
         Returns:
             Dictionary with mean accumulated costs across episodes
         """
+        # Generate keys for all episodes
         key = jax.random.key(seed)
+        # Split into 2*num_episodes keys, then separate into reset and planner keys
+        all_keys = jax.random.split(key, num_episodes * 2)
+        reset_keys = all_keys[:num_episodes]
+        planner_keys = all_keys[num_episodes:]
 
-        all_costs = {cost_type: [] for cost_type in eval_cost_types}
-
-        for ep in range(num_episodes):
-            key, reset_key, planner_key = jax.random.split(key, 3)
-            episode_costs = _run_single_episode(dyn_params, reset_key, planner_key)
-
-            for cost_type in eval_cost_types:
-                all_costs[cost_type].append(episode_costs[cost_type])
+        # Run all episodes in parallel
+        all_costs = _evaluate_jitted(dyn_params, reset_keys, planner_keys)
+        # all_costs has shape (num_episodes, num_cost_types)
 
         # Aggregate results
         results = {}
-        for cost_type in eval_cost_types:
-            results[f"eval/{cost_type}"] = float(jnp.mean(jnp.array(all_costs[cost_type])))
+        mean_costs = jnp.mean(all_costs, axis=0)
+        for i, cost_type in enumerate(eval_cost_types):
+            results[f"eval/{cost_type}"] = float(mean_costs[i])
             if num_episodes > 1:
-                results[f"eval/{cost_type}_std"] = float(jnp.std(jnp.array(all_costs[cost_type])))
+                results[f"eval/{cost_type}_std"] = float(jnp.std(all_costs[:, i]))
 
         return results
 
