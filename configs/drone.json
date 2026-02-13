@@ -35,7 +35,7 @@
     "method": "static"
   },
 
-  "dynamics": "planar_drone_tiny_lora",
+  "dynamics": "planar_drone",
   "dynamics_params": {
     "dt": 0.02,
     "nn_features": [32, 32],
@@ -56,9 +56,9 @@
     "max_episode_steps": 500,
     "dt": 0.02,
     "max_thrust": 20.0,
-    "wind_x": 5.0,
+    "wind_x": 10.0,
     "wind_y": 0.0,
-    "wind_torque_coeff": 0.1,
+    "wind_torque_coeff": 0.2,
     "mass": 1.0,
     "gravity": 9.81,
     "arm_length": 0.25,
@@ -78,22 +78,26 @@
 
   "normalization_params": {
     "state": {
-      "min": [-30.0, -5.0, -3.14, -30.0, -30.0, -6.28],
-      "max": [30.0, 15.0, 3.14, 30.0, 30.0, 6.28]
+      "min": [-30.0, -5.0, -3.14, -30.0, -30.0, -10.0],
+      "max": [30.0, 15.0, 3.14, 30.0, 30.0, 10.0]
     },
     "action": {
       "min": [0.0, 0.0],
       "max": [20.0, 20.0]
     },
     "delta": {
-      "min": [-2.0, -2.0],
-      "max": [2.0, 2.0]
+      "min": [-2.0, -2.0, -1.0],
+      "max": [2.0, 2.0, 1.0]
+    },
+    "wind": {
+      "min": [-10.0, -10.0],
+      "max": [10.0, 10.0]
     }
   },
 
   "state_labels": ["p_x", "p_y", "phi", "v_x", "v_y", "phi_dot"],
 
-  "cost_type": "drone_state_tracking_info_task_aware", 
+  "cost_type": "drone_state_tracking_info", 
   "planner_type": "icem",
   "planner_params": {
     "horizon": 25,
@@ -109,7 +113,7 @@
   "cost_fn_params": {
     "weight_jerk": 0.001,
     "weight_control": 0.01,
-    "weight_info": 0.0,
+    "weight_info": 10.0,
     "weight_ground": 1e8,
     "goal_state": [0.0, 10.0, 0.0, 0.0, 0.0, 0.0],
     "state_weights": [1.0, 1.0, 1.0, 0.5, 0.5, 1.0],
