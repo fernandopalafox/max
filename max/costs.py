@@ -436,6 +436,46 @@ def _terminal_cost_merging_idm(
     return terminal_tracking + indicator_cost
 
 
+# --- Evaluation cost helpers ---
+
+
+def _eval_goal_cost(state, control, cost_params, state_weights, weight_control):
+    """
+    Single-step goal tracking cost (no rollout).
+
+    Args:
+        state: Current state
+        control: Current control action
+        cost_params: Dict containing 'goal_state'
+        state_weights: Weights for each state dimension
+        weight_control: Control penalty weight
+
+    Returns:
+        Scalar cost for this step
+    """
+    goal_state = cost_params["goal_state"]
+    state_error = jnp.sum(state_weights * (state - goal_state) ** 2)
+    control_cost = weight_control * jnp.sum(control ** 2)
+    return state_error + control_cost
+
+
+def _eval_terminal_goal_cost(state, cost_params):
+    """
+    Terminal distance from goal (position only).
+
+    Args:
+        state: Final state
+        cost_params: Dict containing 'goal_state'
+
+    Returns:
+        Euclidean distance from goal position
+    """
+    goal_state = cost_params["goal_state"]
+    position = state[:2]
+    goal_position = goal_state[:2]
+    return jnp.sqrt(jnp.sum((position - goal_position) ** 2))
+
+
 # --- Main factory function ---
 
 
@@ -779,6 +819,28 @@ def init_cost(config, dynamics_model):
                 jerk = weight_jerk * jnp.sum(control_diffs ** 2)
 
             return jnp.sum(stage_costs) + terminal + jerk
+
+        return cost_fn
+
+    elif cost_type == "goal_cost":
+        # Single-step evaluation cost (no rollout)
+        params = config.get("cost_fn_params", {})
+        state_weights = jnp.array(params.get("state_weights", [1.0] * config.get("dim_state", 6)))
+        weight_control = params.get("weight_control", 0.01)
+
+        @jax.jit
+        def cost_fn(init_state, controls, cost_params):
+            # For evaluation: just compute cost at current state with first control
+            control = controls[0] if controls.ndim > 1 else controls
+            return _eval_goal_cost(init_state, control, cost_params, state_weights, weight_control)
+
+        return cost_fn
+
+    elif cost_type == "terminal_goal_cost":
+        # Terminal distance cost (no rollout)
+        @jax.jit
+        def cost_fn(init_state, controls, cost_params):
+            return _eval_terminal_goal_cost(init_state, cost_params)
 
         return cost_fn
 

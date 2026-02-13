@@ -13,7 +13,7 @@ from max.buffers import init_jax_buffers, update_buffer_dynamic
 from max.environments import init_env
 from max.dynamics import init_dynamics
 from max.dynamics_trainers import init_trainer
-from max.dynamics_evaluators import DynamicsEvaluator
+from max.dynamics_evaluators import init_evaluator
 from max.planners import init_planner
 from max.costs import init_cost
 import argparse
@@ -221,8 +221,17 @@ def main(config, save_dir):
         config, dynamics_model, init_params, trainer_key
     )
 
-    # Initialize dynamics evaluator
-    evaluator = DynamicsEvaluator(dynamics_model.pred_one_step)
+    # Initialize evaluator
+    evaluator = init_evaluator(config)
+
+    # Initial evaluation before training
+    eval_results = evaluator.evaluate(train_state.params)
+    init_cov_trace = (
+        jnp.trace(train_state.covariance) / train_state.covariance.shape[0]
+        if train_state.covariance is not None
+        else 0.0
+    )
+    wandb.log({**eval_results, "eval/cov_trace": float(init_cov_trace)}, step=0)
 
     # Initialize cost function
     cost_fn = init_cost(config, dynamics_model)
@@ -252,12 +261,6 @@ def main(config, save_dir):
         info_key: 0.0 for info_key in reward_component_keys_to_avg
     }
 
-    # TODO: remove - temporary tracking cost accumulator
-    _goal = np.array(config["cost_fn_params"]["goal_state"])
-    _weights = np.array(config["cost_fn_params"]["state_weights"])
-    _w_ctrl = config["cost_fn_params"]["weight_control"]
-    _accum_cost = 0.0
-
     # Main training loop
     key, reset_key = jax.random.split(key)
     state = reset_fn(reset_key)
@@ -284,7 +287,6 @@ def main(config, save_dir):
         episode_length += 1
         for info_key in reward_component_keys_to_avg:
             episode_reward_components[info_key] += info[info_key]
-        _accum_cost += float(np.sum(_weights * (np.array(state) - _goal) ** 2) + _w_ctrl * np.sum(np.array(action) ** 2))
 
         # Update buffer
         buffers = update_buffer_dynamic(
@@ -324,23 +326,9 @@ def main(config, save_dir):
             pass
 
         # Evaluate model
-        # buffer_idx >= 2 to ensure we have at least one full transition
-        if step % config["eval_freq"] == 0 and buffer_idx >= 2:
-            # Extract the transition that just happened
-            prev_obs = buffers["states"][0, buffer_idx - 2, :]
-            prev_action = buffers["actions"][0, buffer_idx - 2, :]
-            curr_obs = buffers["states"][0, buffer_idx - 1, :]
-
-            # Format for compute_one_step_loss: trajectory=[s_t, s_{t+1}], actions=[a_t]
-            current_transition_data = {
-                "trajectory": jnp.stack([prev_obs, curr_obs], axis=0),
-                "actions": prev_action[None, :],
-            }
-
-            # Evaluate: can the model predict this new transition?
-            one_step_loss = evaluator.compute_one_step_loss(
-                train_state.params, current_transition_data
-            )
+        if step % config["eval_freq"] == 0:
+            # Run rollout evaluation
+            eval_results = evaluator.evaluate(train_state.params)
 
             # Track covariance trace if available
             cov_trace = (
@@ -348,13 +336,12 @@ def main(config, save_dir):
                 if train_state.covariance is not None
                 else 0.0
             )
-            cov_trace_per_param = cov_trace / train_state.covariance.shape[0]
+            cov_trace_per_param = cov_trace / train_state.covariance.shape[0] if train_state.covariance is not None else 0.0
 
             wandb.log(
                 {
-                    "eval/one_step_loss": float(one_step_loss),
+                    **eval_results,
                     "eval/cov_trace": float(cov_trace_per_param),
-                    "eval/accumulated_cost": float(_accum_cost),
                 },
                 step=step,
             )

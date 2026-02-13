@@ -1,240 +1,263 @@
-# evaluation.py
+# dynamics_evaluators.py
+"""
+Evaluator infrastructure for dynamics-based task evaluation.
+
+Provides factory functions for creating evaluators that assess learned dynamics
+models by running full task rollouts and computing evaluation costs.
+"""
 
 import jax
 import jax.numpy as jnp
-import matplotlib.pyplot as plt
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, NamedTuple
+
+from max.normalizers import init_normalizer
+from max.environments import init_env
+from max.dynamics import init_dynamics
+from max.planners import init_planner
+from max.costs import init_cost
 
 
-class DynamicsEvaluator:
-    """A class for evaluating dynamics models."""
+class Evaluator(NamedTuple):
+    """A generic container for an evaluation algorithm."""
+    evaluate_fn: Callable[[dict], dict]
 
-    def __init__(
-        self,
-        pred_one_step: Callable[[Any, jnp.ndarray, jnp.ndarray], jnp.ndarray],
-    ):
+    def evaluate(self, dyn_params: dict) -> dict:
         """
-        Initializes the Evaluator.
+        Evaluates the dynamics model.
 
         Args:
-            pred_one_step: A function that predicts the next state
-                                   given params, the current state, and action.
-                                   It should have the signature:
-                                   `predict(params, state, action) -> next_state`.
-        """
-        self.pred_one_step = pred_one_step
-
-    def compute_one_step_loss(
-        self, params: Any, trajectory_data: dict
-    ) -> jnp.ndarray:
-        """
-        Computes the mean squared error for single-step predictions.
-
-        This function compares the model's prediction for the next state (s_{t+1})
-        with the true next state, given the current state (s_t) and action (a_t),
-        averaged over an entire trajectory. It's fast and ideal for checking
-        local model accuracy.
-
-        Args:
-            params: The parameters of the dynamics model.
-            trajectory_data: A dictionary containing the ground truth 'trajectory'
-                             and 'actions'.
+            dyn_params: The learned dynamics parameters (train_state.params format)
 
         Returns:
-            A single scalar value for the one-step prediction loss.
+            Dictionary with evaluation metrics (accumulated costs per cost type)
         """
-        # Unpack data for one-step prediction
-        states = trajectory_data["trajectory"][
-            :-1
-        ]  # All states except the last
-        actions = trajectory_data["actions"]
-        true_next_states = trajectory_data["trajectory"][
-            1:
-        ]  # All states except the first
+        return self.evaluate_fn(dyn_params)
 
-        # Use jax.vmap to efficiently apply the prediction function across the batch
-        # of (state, action) pairs from the trajectory.
-        vmapped_predict = jax.vmap(self.pred_one_step, in_axes=(None, 0, 0))
-        predicted_next_states = vmapped_predict(params, states, actions)
 
-        # Calculate the mean squared error between predicted and true next states
-        loss = jnp.mean((predicted_next_states - true_next_states) ** 2)
-        return loss
+def _resolve_evaluator_config(config: dict, param_key: str) -> dict:
+    """
+    Resolves config for a component, checking evaluator_params first,
+    then falling back to upper-level config.
 
-    def compute_multi_step_loss(
-        self, params: Any, trajectory_data: dict
-    ) -> jnp.ndarray:
-        """
-        Computes the mean squared error over a multi-step rollout.
+    Args:
+        config: Full configuration dictionary
+        param_key: Key to look for (e.g., 'env_params', 'planner_params')
 
-        This function simulates an entire trajectory starting from the initial state
-        using the learned dynamics model and a sequence of actions. It then
-        compares this predicted trajectory to the ground truth. This is a more
-        challenging metric as errors can accumulate over time.
+    Returns:
+        Resolved parameter dictionary
+    """
+    evaluator_params = config.get("evaluator_params", {})
 
-        Args:
-            params: The parameters of the dynamics model.
-            trajectory_data: A dictionary containing the ground truth 'trajectory'
-                             and 'actions'.
+    # Check if evaluator_params has this key and it's not empty
+    if param_key in evaluator_params and evaluator_params[param_key]:
+        return evaluator_params[param_key]
 
-        Returns:
-            A single scalar value for the multi-step rollout loss.
-        """
-        # Unpack data for multi-step rollout
-        true_trajectory = trajectory_data["trajectory"]
-        actions = trajectory_data["actions"]
-        initial_state = true_trajectory[0]
+    # Fall back to upper-level config
+    return config.get(param_key, {})
 
-        # Define the function for a single step of the rollout.
-        # This function takes the state (carry) and action (input) and
-        # returns the next state as both the new carry and the output.
-        def rollout_step(state, action):
-            next_state = self.pred_one_step(params, state, action)
-            return next_state, next_state
 
-        # Use jax.lax.scan for an efficient, sequential rollout.
-        _, predicted_trajectory_tail = jax.lax.scan(
-            rollout_step, initial_state, actions
+def _resolve_evaluator_field(config: dict, field_key: str, default: Any = None) -> Any:
+    """
+    Resolves a single field from evaluator_params, falling back to upper-level config.
+
+    Args:
+        config: Full configuration dictionary
+        field_key: Field to look for (e.g., 'env_name', 'cost_type')
+        default: Default value if not found
+
+    Returns:
+        Resolved field value
+    """
+    evaluator_params = config.get("evaluator_params", {})
+
+    if field_key in evaluator_params and evaluator_params[field_key] is not None:
+        return evaluator_params[field_key]
+
+    return config.get(field_key, default)
+
+
+def init_evaluator(config: dict) -> Evaluator:
+    """
+    Initializes an evaluator based on configuration.
+
+    Args:
+        config: Full configuration dictionary. Will look for 'evaluator_params'
+                section; if empty/missing, falls back to upper-level params.
+
+    Returns:
+        Tuple of (Evaluator, state) where state may be None for stateless evaluators
+    """
+    evaluator_type = config.get("evaluator_type", "rollout")
+    print(f"🚀 Initializing evaluator: {evaluator_type.upper()}")
+
+    if evaluator_type == "rollout":
+        return create_rollout_evaluator(config)
+    else:
+        raise ValueError(f"Unknown evaluator type: '{evaluator_type}'")
+
+
+def create_rollout_evaluator(config: dict) -> tuple[Evaluator, None]:
+    """
+    Creates a rollout evaluator that:
+    1. Initializes environment, dynamics, planner, and evaluation costs
+    2. Runs rollouts using the planner with learned dynamics
+    3. Computes evaluation costs at each step
+
+    Args:
+        config: Configuration dictionary with evaluator_params section
+
+    Returns:
+        Tuple of (Evaluator, None) - no persistent state needed
+    """
+    evaluator_params = config.get("evaluator_params", {})
+
+    # --- Build resolved configs for each component ---
+    # Environment config
+    env_config = {**config}
+    env_config["env_params"] = _resolve_evaluator_config(config, "env_params")
+    env_config["env_name"] = _resolve_evaluator_field(config, "env_name")
+
+    # Dynamics config
+    dynamics_config = {**config}
+    dynamics_config["dynamics_params"] = _resolve_evaluator_config(config, "dynamics_params")
+    dynamics_config["dynamics"] = _resolve_evaluator_field(config, "dynamics")
+
+    # Planner config
+    planner_config = {**config}
+    planner_config["planner_params"] = _resolve_evaluator_config(config, "planner_params")
+    planner_config["planner_type"] = _resolve_evaluator_field(config, "planner_type")
+
+    # Planning cost config (for the planner's internal optimization)
+    planning_cost_config = {**config}
+    planning_cost_config["cost_fn_params"] = _resolve_evaluator_config(config, "cost_fn_params")
+    planning_cost_config["cost_type"] = _resolve_evaluator_field(config, "cost_type")
+
+    # Get evaluation cost types list
+    eval_cost_types = evaluator_params.get("eval_cost_types", ["goal_cost"])
+
+    # Random key for initialization
+    seed = evaluator_params.get("seed", config.get("seed", 42))
+    key = jax.random.key(seed)
+
+    # --- Initialize components ---
+    print("  📦 Initializing evaluation environment...")
+    reset_fn, step_fn, get_obs_fn = init_env(env_config)
+
+    print("  📦 Initializing evaluation dynamics model (structure only)...")
+    normalizer, norm_params = init_normalizer(dynamics_config)
+    key, model_key = jax.random.split(key)
+    dynamics_model, _ = init_dynamics(model_key, dynamics_config, normalizer, norm_params)
+
+    print("  📦 Initializing planning cost function...")
+    planning_cost_fn = init_cost(planning_cost_config, dynamics_model)
+
+    print("  📦 Initializing planner...")
+    key, planner_key = jax.random.split(key)
+    planner, init_planner_state = init_planner(planner_config, planning_cost_fn, planner_key)
+
+    print("  📦 Initializing evaluation cost function(s)...")
+    eval_cost_fns = {}
+    for cost_type in eval_cost_types:
+        # Build config for this eval cost type
+        eval_cost_config = {**config}
+        eval_cost_config["cost_fn_params"] = _resolve_evaluator_config(config, "cost_fn_params")
+        eval_cost_config["cost_type"] = cost_type
+        eval_cost_fns[cost_type] = init_cost(eval_cost_config, dynamics_model)
+
+    # --- Get rollout parameters ---
+    max_steps = evaluator_params.get(
+        "max_steps",
+        config.get("env_params", {}).get("max_episode_steps", 200)
+    )
+    num_episodes = evaluator_params.get("num_episodes", 1)
+
+    # Get goal state for cost_params
+    goal_state = jnp.array(
+        config.get("cost_fn_params", {}).get(
+            "goal_state",
+            jnp.zeros(config.get("dim_state", 6))
         )
+    )
 
-        # The full predicted trajectory is the initial state plus the rolled-out states.
-        predicted_trajectory = jnp.vstack(
-            [initial_state, predicted_trajectory_tail]
-        )
-
-        # Calculate the mean squared error over the entire trajectory
-        loss = jnp.mean((predicted_trajectory - true_trajectory) ** 2)
-        return loss
-
-    # --------------------------------------------------------------------------
-    # Visualization
-    # --------------------------------------------------------------------------
-
-    def plot_trajectories(
-        self,
-        param_sets: list,
-        labels: list,
-        trajectory_data: dict,
-        title: str,
-        state_labels: Optional[list] = None,
-    ) -> plt.Figure:
+    # --- Create the evaluate function ---
+    def _run_single_episode(
+        dyn_params: dict,
+        reset_key: jax.Array,
+        planner_key: jax.Array,
+    ) -> dict:
         """
-        Plots ground truth vs. predicted trajectories for each state dimension.
-
-        This function creates a separate subplot for each state dimension. Each
-        subplot shows the state's value over time for the ground truth
-        trajectory and for the predicted trajectories generated from each set
-        of model parameters.
-
-        Args:
-            param_sets: A list of model parameter sets to evaluate.
-            labels: A list of labels for the legend corresponding to each param_set.
-            trajectory_data: A dictionary with the ground truth trajectory data.
-            title: The main title for the entire figure.
-            state_labels: An optional list of strings to label each state dimension.
+        Runs a single evaluation episode.
 
         Returns:
-            A matplotlib Figure object containing the subplots.
+            Dict with accumulated costs for each eval_cost_type
         """
-        # 1. Unpack data and get dimensions
-        true_trajectory = trajectory_data["trajectory"]
-        initial_state = trajectory_data["trajectory"][0]
-        actions = trajectory_data["actions"]
-        num_dims = true_trajectory.shape[1]
-        time_steps = jnp.arange(true_trajectory.shape[0])
+        # Reset environment
+        env_state = reset_fn(reset_key)
 
-        # Use provided labels or fall back to a default
-        if state_labels is None or len(state_labels) != num_dims:
-            state_labels = [f"State Dim {i}" for i in range(num_dims)]
-            print(
-                "Warning: Missing or incorrect state labels. Using defaults."
+        # Initialize planner state
+        planner_state = init_planner_state.replace(key=planner_key)
+
+        # Initialize cost accumulators
+        accumulated_costs = {cost_type: 0.0 for cost_type in eval_cost_types}
+
+        # Build cost_params structure for planner and eval costs
+        cost_params = {
+            "dyn_params": dyn_params,
+            "params_cov_model": None,  # Not used in evaluation
+            "goal_state": goal_state,
+        }
+
+        # Run rollout loop
+        for step_idx in range(max_steps):
+            # Plan with current dynamics
+            actions, planner_state = planner.solve(planner_state, env_state, cost_params)
+            action = actions[0]  # Take first action from horizon
+
+            # Compute evaluation costs for this step
+            for cost_type, cost_fn in eval_cost_fns.items():
+                step_cost = cost_fn(env_state, action[None, :], cost_params)
+                accumulated_costs[cost_type] += float(step_cost)
+
+            # Step environment
+            env_state, _, _, terminated, truncated, _ = step_fn(
+                env_state, step_idx, action[None, :]
             )
 
-        # 2. Generate all predicted trajectories first
-        @jax.jit
-        def generate_trajectory(p, s0, acts):
-            def step(state, action):
-                next_state = self.pred_one_step(p, state, action)
-                return next_state, next_state
+            # Check if episode is done
+            if terminated or truncated:
+                break
 
-            _, tail = jax.lax.scan(step, s0, acts)
-            return jnp.vstack([s0, tail])
+        return accumulated_costs
 
-        predicted_trajectories = [
-            generate_trajectory(params, initial_state, actions)
-            for params in param_sets
-        ]
+    def evaluate_fn(dyn_params: dict) -> dict:
+        """
+        Main evaluation function that runs multiple episodes and aggregates results.
 
-        # 3. Create subplots
-        # Use squeeze=False to ensure `axes` is always a 2D array for easy indexing
-        fig, axes = plt.subplots(
-            nrows=num_dims,
-            ncols=1,
-            figsize=(12, 3 * num_dims),
-            sharex=True,
-            squeeze=False,
-        )
+        Args:
+            dyn_params: Dynamics parameters in train_state.params format
 
-        # 💥 New Change: Calculate y-axis limits based on ground truth
-        y_min = jnp.min(true_trajectory, axis=0)
-        y_max = jnp.max(true_trajectory, axis=0)
-        y_range = y_max - y_min
-        margin = 0.20  # 10% margin
-        y_min_clipped = y_min - y_range * margin
-        y_max_clipped = y_max + y_range * margin
+        Returns:
+            Dictionary with mean accumulated costs across episodes
+        """
+        key = jax.random.key(seed)
 
-        # 4. Plot data on each subplot
-        for i in range(num_dims):
-            ax = axes[i, 0]  # Access the subplot
+        all_costs = {cost_type: [] for cost_type in eval_cost_types}
 
-            # Plot Ground Truth
-            ax.plot(
-                time_steps,
-                true_trajectory[:, i],
-                label="Ground Truth",
-                color="black",
-                linewidth=2,
-                linestyle="--",
-            )
+        for ep in range(num_episodes):
+            key, reset_key, planner_key = jax.random.split(key, 3)
+            episode_costs = _run_single_episode(dyn_params, reset_key, planner_key)
 
-            # Plot Predictions
-            for pred_traj, label in zip(predicted_trajectories, labels):
-                ax.plot(
-                    time_steps,
-                    pred_traj[:, i],
-                    label=label,
-                    linewidth=1.5,
-                    alpha=0.9,
-                )
+            for cost_type in eval_cost_types:
+                all_costs[cost_type].append(episode_costs[cost_type])
 
-            # 💥 New Change: Apply the calculated y-axis limits
-            ax.set_ylim(y_min_clipped[i], y_max_clipped[i])
+        # Aggregate results
+        results = {}
+        for cost_type in eval_cost_types:
+            results[f"eval/{cost_type}"] = float(jnp.mean(jnp.array(all_costs[cost_type])))
+            if num_episodes > 1:
+                results[f"eval/{cost_type}_std"] = float(jnp.std(jnp.array(all_costs[cost_type])))
 
-            # Key Change: Use the new `state_labels` here
-            ax.set_ylabel(state_labels[i], fontsize=12)
-            ax.grid(True, linestyle=":", alpha=0.6)
+        return results
 
-        # 5. Finalize plot details
-        # Add a shared legend at the top of the figure
-        handles, legend_labels = axes[0, 0].get_legend_handles_labels()
-        fig.legend(
-            handles,
-            legend_labels,
-            loc="upper center",
-            bbox_to_anchor=(0.5, 1.0),  # Position legend above the subplots
-            ncol=len(labels) + 1,
-            fontsize=10,
-        )
-
-        # Set the x-axis label only for the bottom-most plot
-        axes[-1, 0].set_xlabel("Time Step", fontsize=12)
-
-        # Add a main title for the entire figure
-        fig.suptitle(title, fontsize=16, y=0.97)
-
-        # Adjust layout to prevent titles/labels from overlapping
-        fig.tight_layout(
-            rect=[0, 0, 1, 0.95]
-        )  # rect=[left, bottom, right, top]
-
-        return fig
+    print("  ✅ Rollout evaluator initialized.")
+    return Evaluator(evaluate_fn=evaluate_fn)
