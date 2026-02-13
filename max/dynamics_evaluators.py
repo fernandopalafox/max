@@ -140,7 +140,6 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
 
     # Get evaluation cost types list
     eval_cost_types = evaluator_params.get("eval_cost_types", ["goal_cost"])
-    num_cost_types = len(eval_cost_types)
 
     # Random key for initialization
     seed = evaluator_params.get("seed", config.get("seed", 42))
@@ -163,13 +162,29 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
     planner, init_planner_state = init_planner(planner_config, planning_cost_fn, planner_key)
 
     print("  📦 Initializing evaluation cost function(s)...")
-    # Store as a list to maintain order for stacking
-    eval_cost_fn_list = []
+    # Separate stage costs from terminal costs
+    # Terminal costs are only computed on the final state, not accumulated over time
+    stage_cost_fn_list = []
+    stage_cost_types = []
+    terminal_cost_fn_list = []
+    terminal_cost_types = []
+
     for cost_type in eval_cost_types:
         eval_cost_config = {**config}
         eval_cost_config["cost_fn_params"] = _resolve_evaluator_config(config, "cost_fn_params")
         eval_cost_config["cost_type"] = cost_type
-        eval_cost_fn_list.append(init_cost(eval_cost_config, dynamics_model))
+        cost_fn = init_cost(eval_cost_config, dynamics_model)
+
+        # Check if this is a terminal cost (by convention, terminal costs have "terminal" in the name)
+        if "terminal" in cost_type.lower():
+            terminal_cost_fn_list.append(cost_fn)
+            terminal_cost_types.append(cost_type)
+        else:
+            stage_cost_fn_list.append(cost_fn)
+            stage_cost_types.append(cost_type)
+
+    num_stage_costs = len(stage_cost_fn_list)
+    num_terminal_costs = len(terminal_cost_fn_list)
 
     # --- Get rollout parameters ---
     max_steps = evaluator_params.get(
@@ -196,7 +211,7 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
             step_idx: Current step index (unused but required by scan)
 
         Returns:
-            (new_carry, step_costs) where step_costs is array of shape (num_cost_types,)
+            (new_carry, step_costs) where step_costs is array of shape (num_stage_costs,)
         """
         env_state, planner_state, cost_params = carry
 
@@ -204,23 +219,27 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
         actions, new_planner_state = planner.solve(planner_state, env_state, cost_params)
         action = actions[0]  # Take first action from horizon
 
-        # Compute evaluation costs for this step (stack into array)
-        step_costs = jnp.array([
-            cost_fn(env_state, action[None, :], cost_params)
-            for cost_fn in eval_cost_fn_list
-        ])
+        # Compute stage costs for this step (terminal costs are computed separately)
+        if num_stage_costs > 0:
+            step_costs = jnp.array([
+                cost_fn(env_state, action[None, :], cost_params)
+                for cost_fn in stage_cost_fn_list
+            ])
+        else:
+            step_costs = jnp.array([])
 
         # Step environment (ignore termination/truncation - always run full episode)
         new_env_state, _, _, _, _, _ = step_fn(env_state, step_idx, action[None, :])
 
-        return (new_env_state, new_planner_state, cost_params), step_costs
+        return (new_env_state, new_planner_state, cost_params), (step_costs, new_env_state)
 
     def _run_single_episode(dyn_params: dict, reset_key: jax.Array, planner_key: jax.Array) -> jax.Array:
         """
         Runs a single evaluation episode using jax.lax.scan.
 
         Returns:
-            Array of accumulated costs, shape (num_cost_types,)
+            Array of costs, shape (num_stage_costs + num_terminal_costs,)
+            Stage costs are accumulated over time, terminal costs computed on final state only.
         """
         # Reset environment
         env_state = reset_fn(reset_key)
@@ -237,11 +256,27 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
 
         # Run rollout with scan (always full max_steps)
         init_carry = (env_state, planner_state, cost_params)
-        _, all_step_costs = jax.lax.scan(_scan_step, init_carry, jnp.arange(max_steps))
+        _, (all_step_costs, all_states) = jax.lax.scan(_scan_step, init_carry, jnp.arange(max_steps))
 
-        # all_step_costs has shape (max_steps, num_cost_types)
-        # Sum over time to get accumulated costs per cost type
-        return jnp.sum(all_step_costs, axis=0)
+        # all_step_costs has shape (max_steps, num_stage_costs)
+        # Sum stage costs over time
+        if num_stage_costs > 0:
+            accumulated_stage_costs = jnp.sum(all_step_costs, axis=0)
+        else:
+            accumulated_stage_costs = jnp.array([])
+
+        # Compute terminal costs on the final state only
+        if num_terminal_costs > 0:
+            final_state = all_states[-1]  # Last state from the rollout
+            terminal_costs = jnp.array([
+                cost_fn(final_state, jnp.zeros((1, config.get("dim_control", 2))), cost_params)
+                for cost_fn in terminal_cost_fn_list
+            ])
+        else:
+            terminal_costs = jnp.array([])
+
+        # Concatenate stage and terminal costs
+        return jnp.concatenate([accumulated_stage_costs, terminal_costs])
 
     # Vectorize over episodes (vmap over reset_key and planner_key)
     # dyn_params is shared across all episodes (in_axes=None)
@@ -266,6 +301,9 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
         """
         return _run_episodes_vmapped(dyn_params, reset_keys, planner_keys)
 
+    # Combined cost types list (stage costs first, then terminal costs)
+    all_cost_types = stage_cost_types + terminal_cost_types
+
     def evaluate_fn(dyn_params: dict) -> dict:
         """
         Main evaluation function that runs multiple episodes in parallel.
@@ -274,7 +312,8 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
             dyn_params: Dynamics parameters in train_state.params format
 
         Returns:
-            Dictionary with mean accumulated costs across episodes
+            Dictionary with mean accumulated costs across episodes.
+            Stage costs are accumulated over time, terminal costs computed on final state only.
         """
         # Generate keys for all episodes
         key = jax.random.key(seed)
@@ -285,12 +324,12 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
 
         # Run all episodes in parallel
         all_costs = _evaluate_jitted(dyn_params, reset_keys, planner_keys)
-        # all_costs has shape (num_episodes, num_cost_types)
+        # all_costs has shape (num_episodes, num_stage_costs + num_terminal_costs)
 
         # Aggregate results
         results = {}
         mean_costs = jnp.mean(all_costs, axis=0)
-        for i, cost_type in enumerate(eval_cost_types):
+        for i, cost_type in enumerate(all_cost_types):
             results[f"eval/{cost_type}"] = float(mean_costs[i])
             if num_episodes > 1:
                 results[f"eval/{cost_type}_std"] = float(jnp.std(all_costs[:, i]))
