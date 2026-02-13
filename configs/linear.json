@@ -8,9 +8,26 @@
   "train_model_freq": 1,
   "train_policy_freq": 1,
   "normalize_freq": 1000000,
-  "eval_freq": 10,
-  "eval_traj_horizon": 50,
-  "buffer_size": 1000,
+  "eval_freq": 500,
+  "buffer_size": 2000,
+
+  "evaluator_type": "rollout",
+  "evaluator_params": {
+    "seed": 123,
+    "max_steps": 200,
+    "num_episodes": 1,
+    "eval_cost_types": ["goal_cost", "terminal_goal_cost"],
+    "env_params": {},
+    "dynamics_params": {},
+    "planner_params": {},
+    "cost_fn_params": {
+      "weight_jerk": 0.01,
+      "weight_control": 25.0,
+      "weight_info": 0.0,
+      "goal_state": [-5.0, -5.0, 0.0, 0.0],
+      "meas_noise_diag": [0.01, 0.01, 0.01, 0.01]
+    }
+  },
 
   "normalization": {
     "method": "none"
@@ -23,7 +40,7 @@
       [0.0, 1.0, 0.0, 0.1],
       [0.0, 0.0, 0.9, 0.0],
       [0.0, 0.0, 0.0, 0.9]
-    ], 
+    ],
     "init_B": [
       [0.005, 0.0],
       [0.0, 0.005],
@@ -66,8 +83,8 @@
 
   "normalization_params": {
     "state": {
-      "min": [-10.0, -10.0, -5.0, -5.0],
-      "max": [10.0, 10.0, 5.0, 5.0]
+      "min": [-20.0, -20.0, -5.0, -5.0],
+      "max": [20.0, 20.0, 5.0, 5.0]
     },
     "action": {
       "min": [-2.0, -2.0],
@@ -94,7 +111,7 @@
     "weight_jerk": 0.01,
     "weight_control": 25.0,
     "weight_info": 500.0,
-    "target_point": [5.0, 5.0, 0.0, 0.0],
+    "goal_state": [5.0, 5.0, 0.0, 0.0],
     "meas_noise_diag": [0.01, 0.01, 0.01, 0.01]
   }
 }

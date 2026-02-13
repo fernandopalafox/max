@@ -10,7 +10,7 @@ from max.buffers import init_jax_buffers, update_buffer_dynamic
 from max.environments import init_env
 from max.dynamics import init_dynamics
 from max.dynamics_trainers import init_trainer
-from max.dynamics_evaluators import DynamicsEvaluator
+from max.dynamics_evaluators import init_evaluator
 from max.planners import init_planner
 from max.costs import init_cost
 import argparse
@@ -27,11 +27,16 @@ def plot_linear_trajectory(buffers, buffer_idx, config):
 
     # Extract positions
     pos_x, pos_y = states[:, 0], states[:, 1]
-    target = config["cost_fn_params"]["target_point"]
+    goal = config["cost_fn_params"]["goal_state"][:2]
+
+    # Get normalization bounds for positions
+    norm_params = config["normalization_params"]["state"]
+    x_min, x_max = norm_params["min"][0], norm_params["max"][0]
+    y_min, y_max = norm_params["min"][1], norm_params["max"][1]
 
     # Create plot
     fig, ax = plt.subplots(figsize=(8, 8))
-    ax.plot(pos_x, pos_y, label="Agent Path", color="blue", linewidth=2, alpha=0.8)
+    ax.plot(pos_x, pos_y, label="Path", color="blue", linewidth=2, alpha=0.8)
 
     # Mark start (circle) and end (x) points
     ax.scatter(pos_x[0], pos_y[0], marker="o", s=100, color="blue",
@@ -39,42 +44,74 @@ def plot_linear_trajectory(buffers, buffer_idx, config):
     ax.scatter(pos_x[-1], pos_y[-1], marker="x", s=100, color="blue",
                label="End", zorder=5)
 
-    # Mark target point
-    ax.scatter(target[0], target[1], marker="*", s=200, color="red",
-               label="Target", zorder=5)
+    # Mark goal point
+    ax.scatter(goal[0], goal[1], marker="*", s=200, color="red",
+               label="Goal", zorder=5)
+
+    # Use normalization bounds for axes
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
 
     # Formatting
     ax.set_xlabel("X Position")
     ax.set_ylabel("Y Position")
     ax.set_title("Linear Tracking Trajectory")
     ax.legend(loc="best")
-    ax.grid(True, alpha=0.3)
-    ax.axis("equal")
+    ax.grid(True, linestyle='--', alpha=0.6)
+    ax.set_aspect('equal')
     plt.tight_layout()
 
     return fig
 
 
+def plot_state_components(buffers, buffer_idx, config):
+    """Plot positions and velocities over time with normalization bounds."""
+    states = np.array(buffers["states"][0, :buffer_idx, :])
+    dt = config["env_params"]["dt"]
+    time = np.arange(buffer_idx) * dt
+
+    norm_params = config["normalization_params"]["state"]
+    state_min = norm_params["min"]
+    state_max = norm_params["max"]
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+
+    # Positions subplot (pos_x, pos_y)
+    ax = axes[0]
+    ax.plot(time, states[:, 0], label="pos_x")
+    ax.plot(time, states[:, 1], label="pos_y")
+    ax.axhline(state_min[0], color='r', linestyle='--', alpha=0.5, label="bounds")
+    ax.axhline(state_max[0], color='r', linestyle='--', alpha=0.5)
+    ax.set_ylabel("Position")
+    ax.set_ylim(state_min[0], state_max[0])
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    # Velocities subplot (vel_x, vel_y)
+    ax = axes[1]
+    ax.plot(time, states[:, 2], label="vel_x")
+    ax.plot(time, states[:, 3], label="vel_y")
+    ax.axhline(state_min[2], color='r', linestyle='--', alpha=0.5, label="bounds")
+    ax.axhline(state_max[2], color='r', linestyle='--', alpha=0.5)
+    ax.set_ylabel("Velocity")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylim(state_min[2], state_max[2])
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    return fig
+
+
 def main(config, save_dir):
     wandb.init(
-        project="linear",
+        project="linear_new",
         config=config,
         group=config.get("wandb_group"),
         name=config.get("wandb_run_name"),
         reinit=True,
     )
     key = jax.random.key(config["seed"])
-
-    # Ground truth parameters for evaluation (extract before init_env modifies config)
-    true_A = jnp.array(config["env_params"]["true_A"])
-    true_B = jnp.array(config["env_params"]["true_B"])
-    true_params = {
-        "model": {
-            "A": true_A,
-            "B": true_B,
-        },
-        "normalizer": None,
-    }
 
     # Initialize environment
     reset_fn, step_fn, get_obs_fn = init_env(config)
@@ -92,29 +129,17 @@ def main(config, save_dir):
         config, dynamics_model, init_params, trainer_key
     )
 
-    # Initialize dynamics evaluator
-    evaluator = DynamicsEvaluator(dynamics_model.pred_one_step)
+    # Initialize evaluator
+    evaluator = init_evaluator(config)
 
-    key, action_key = jax.random.split(key)
-    eval_actions = jax.random.uniform(
-        action_key,
-        shape=(config["eval_traj_horizon"], config["dim_action"]),
-        minval=jnp.array(config["planner_params"]["action_low"]),
-        maxval=jnp.array(config["planner_params"]["action_high"]),
+    # Initial evaluation before training
+    eval_results = evaluator.evaluate(train_state.params)
+    init_cov_trace = (
+        jnp.trace(train_state.covariance) / train_state.covariance.shape[0]
+        if train_state.covariance is not None
+        else 0.0
     )
-
-    key, reset_key = jax.random.split(key)
-    eval_trajectory = [reset_fn(reset_key)]
-    current_state = eval_trajectory[0]
-    for action in eval_actions:
-        next_state, _, _, _, _, _ = step_fn(current_state, 0, action)
-        eval_trajectory.append(next_state)
-        current_state = next_state
-
-    eval_trajectory_data = {
-        "trajectory": jnp.array(eval_trajectory),
-        "actions": eval_actions,
-    }
+    wandb.log({**eval_results, "eval/cov_trace": float(init_cov_trace)}, step=0)
 
     # Initialize cost function
     cost_fn = init_cost(config, dynamics_model)
@@ -136,20 +161,6 @@ def main(config, save_dir):
         f"Starting simulation for {config['total_steps']} steps "
     )
 
-    initial_multi_step_loss = evaluator.compute_multi_step_loss(
-        train_state.params, eval_trajectory_data
-    )
-    initial_one_step_loss = evaluator.compute_one_step_loss(
-        train_state.params, eval_trajectory_data
-    )
-    wandb.log(
-        {
-            "eval/multi_step_loss": initial_multi_step_loss,
-            "eval/one_step_loss": initial_one_step_loss,
-        },
-        step=0,
-    )
-
     episode_length = 0
 
     # Reward component accumulators
@@ -162,6 +173,7 @@ def main(config, save_dir):
     key, reset_key = jax.random.split(key)
     state = reset_fn(reset_key)
     current_obs = get_obs_fn(state)
+    goal_state = np.array(config["cost_fn_params"]["goal_state"])
 
     for step in range(1, config["total_steps"] + 1):
 
@@ -169,6 +181,7 @@ def main(config, save_dir):
         cost_params = {
             "dyn_params": train_state.params,
             "params_cov_model": train_state.covariance,
+            "goal_state": goal_state,
         }
         key, planner_key = jax.random.split(key)
         planner_state = planner_state.replace(key=planner_key)
@@ -222,6 +235,27 @@ def main(config, save_dir):
             # Unused for policies like iCEM
             pass
 
+        # Evaluate model
+        if step % config["eval_freq"] == 0:
+            # Run rollout evaluation
+            eval_results = evaluator.evaluate(train_state.params)
+
+            # Track covariance trace if available
+            cov_trace = (
+                jnp.trace(train_state.covariance)
+                if train_state.covariance is not None
+                else 0.0
+            )
+            cov_trace_per_param = cov_trace / train_state.covariance.shape[0] if train_state.covariance is not None else 0.0
+
+            wandb.log(
+                {
+                    **eval_results,
+                    "eval/cov_trace": float(cov_trace_per_param),
+                },
+                step=step,
+            )
+
         # Train model
         # buffer_idx >= 2 to ensure we have at least one full transition
         if step % config["train_model_freq"] == 0 and buffer_idx >= 2:
@@ -232,29 +266,6 @@ def main(config, save_dir):
             }
             train_state, loss = trainer.train(train_state, train_data, step=step)
             wandb.log({"train/model_loss": float(loss)}, step=step)
-
-            if step % config["eval_freq"] == 0:
-                multi_step_loss = evaluator.compute_multi_step_loss(
-                    train_state.params, eval_trajectory_data
-                )
-                one_step_loss = evaluator.compute_one_step_loss(
-                    train_state.params, eval_trajectory_data
-                )
-
-                # Compute parameter difference from true dynamics
-                diff_tree = jax.tree.map(lambda x, y: x - y, train_state.params, true_params)
-                param_diff = sum(jnp.linalg.norm(leaf) for leaf in jax.tree_util.tree_leaves(diff_tree))
-                cov_trace = jnp.trace(train_state.covariance) if train_state.covariance is not None else 0.0
-
-                wandb.log(
-                    {
-                        "eval/multi_step_loss": multi_step_loss,
-                        "eval/one_step_loss": one_step_loss,
-                        "eval/param_diff": param_diff,
-                        "eval/cov_trace": cov_trace,
-                    },
-                    step=step,
-                )
 
         # Handle Buffer Overflow
         if buffer_idx >= config["buffer_size"]:
@@ -285,12 +296,20 @@ def main(config, save_dir):
             print(f"Parameter covariance saved to {cov_path}")
 
     # Plot and log trajectory
-    if buffer_idx > 0:
+    if save_dir:
         print("\nGenerating trajectory plot...")
         fig = plot_linear_trajectory(buffers, buffer_idx, config)
-        wandb.log({"trajectory/xy_plot": wandb.Image(fig)}, step=config["total_steps"])
+        wandb.log({"trajectory/linear_plot": wandb.Image(fig)}, step=config["total_steps"])
         plt.close(fig)
         print("Trajectory plot logged to wandb.")
+
+        print("Generating state components plot...")
+        fig = plot_state_components(buffers, buffer_idx, config)
+        wandb.log(
+            {"trajectory/state_components": wandb.Image(fig)}, step=config["total_steps"]
+        )
+        plt.close(fig)
+        print("State components plot logged to wandb.")
 
     wandb.finish()
     print("Run complete.")
@@ -305,16 +324,23 @@ if __name__ == "__main__":
         help="Custom name for the W&B run.",
     )
     parser.add_argument(
+        "--lambdas",
+        type=float,
+        nargs="+",
+        default=None,
+        help="List of weight_info values to sweep.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Starting random seed.",
+    )
+    parser.add_argument(
         "--num-seeds",
         type=int,
         default=1,
-        help="Number of random seeds to run.",
-    )
-    parser.add_argument(
-        "--meta-seed",
-        type=int,
-        default=42,
-        help="A seed to generate the run seeds.",
+        help="Number of seeds to run for each lambda value.",
     )
     parser.add_argument(
         "--save-dir",
@@ -325,32 +351,38 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Load config from JSON file
-    config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "linear.json")
+    config_path = os.path.join(
+        os.path.dirname(__file__), "..", "configs", "linear.json"
+    )
     with open(config_path, "r") as f:
         CONFIG = json.load(f)
 
-    if args.meta_seed is not None:
-        rng = np.random.default_rng(args.meta_seed)
-        seeds = rng.integers(low=0, high=2**32 - 1, size=args.num_seeds)
+    run_name_base = args.run_name or "linear"
+
+    if args.lambdas is None:
+        lambdas = [
+            CONFIG["cost_fn_params"]["weight_info"]
+        ]
     else:
-        seeds = range(args.num_seeds)
+        lambdas = args.lambdas
 
-    for seed_idx, seed in enumerate(seeds):
-        print(f"--- Starting run for seed #{seed} ---")
-        run_config = copy.deepcopy(CONFIG)
-        run_config["seed"] = int(seed)
-        run_config["wandb_group"] = "linear_tracking"
+    for lam_idx, lam in enumerate(lambdas, start=1):
+        for seed_idx in range(1, args.num_seeds + 1):
+            seed = args.seed + seed_idx - 1
+            print(f"--- Starting run for lam{lam_idx} (lambda={lam}), run {seed_idx}/{args.num_seeds} ---")
+            run_config = copy.deepcopy(CONFIG)
+            run_config["seed"] = seed
+            run_config["wandb_group"] = "linear_tracking"
+            run_config["cost_fn_params"]["weight_info"] = lam
 
-        if args.run_name:
-            run_name_base = args.run_name
-        else:
-            run_name_base = "linear"
+            # Build run name: base_lam{idx}_seed{idx}
+            run_name = run_name_base
+            if len(lambdas) > 1:
+                run_name = f"{run_name}_lam{lam}"
+            if args.num_seeds > 1:
+                run_name = f"{run_name}_{seed_idx}"
+            run_config["wandb_run_name"] = run_name
 
-        if args.num_seeds > 1:
-            run_config["wandb_run_name"] = f"{run_name_base}_seed_{seed_idx}"
-        else:
-            run_config["wandb_run_name"] = run_name_base
-
-        main(run_config, save_dir=args.save_dir)
+            main(run_config, save_dir=args.save_dir)
 
     print("All experiments complete.")

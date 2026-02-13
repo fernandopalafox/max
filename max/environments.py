@@ -55,6 +55,11 @@ class EnvParams:
     wind_y: float = 0.0
     wind_torque_coeff: float = 0.1
 
+    # Specific to linear_tracking
+    true_A: Any = None
+    true_B: Any = None
+    target_point: Any = None
+
 
 
 
