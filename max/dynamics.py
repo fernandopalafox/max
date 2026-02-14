@@ -1325,7 +1325,7 @@ def init_dynamics(
     if normalizer is None:
         normalizer, normalizer_params = init_normalizer(config)
 
-    if dynamics_type == "mlp_residual":
+    if dynamics_type == "mlp_resnet":
         dim_state = config.dim_state
         dim_action = config.dim_action
         return create_mlp_resnet_dynamics(
