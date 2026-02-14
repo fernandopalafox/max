@@ -103,7 +103,36 @@ def plot_state_components(buffers, buffer_idx, config):
     return fig
 
 
-def main(config, save_dir):
+def plot_eval_trajectory(eval_results, config):
+    """Plot trajectory from rollout_with_trajectory evaluator results."""
+    trajectory = eval_results["trajectory"]
+    goal = eval_results["goal_state"][:2]
+
+    pos_x, pos_y = trajectory[:, 0], trajectory[:, 1]
+
+    norm_params = config["normalization_params"]["state"]
+    x_min, x_max = norm_params["min"][0], norm_params["max"][0]
+    y_min, y_max = norm_params["min"][1], norm_params["max"][1]
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.plot(pos_x, pos_y, label="Path", color="blue", linewidth=2, alpha=0.8)
+    ax.scatter(pos_x[0], pos_y[0], marker="o", s=100, color="blue", label="Start", zorder=5)
+    ax.scatter(pos_x[-1], pos_y[-1], marker="x", s=100, color="blue", label="End", zorder=5)
+    ax.scatter(goal[0], goal[1], marker="*", s=200, color="red", label="Goal", zorder=5)
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_xlabel("X Position")
+    ax.set_ylabel("Y Position")
+    ax.set_title(f"Eval Rollout Trajectory ({len(trajectory)} steps)")
+    ax.legend(loc="best")
+    ax.grid(True, linestyle='--', alpha=0.6)
+    ax.set_aspect('equal')
+    plt.tight_layout()
+
+    return fig
+
+
+def main(config, save_dir, plot_eval=False):
     wandb.init(
         project="linear_new",
         config=config,
@@ -311,6 +340,25 @@ def main(config, save_dir):
         plt.close(fig)
         print("State components plot logged to wandb.")
 
+    # Final evaluation with trajectory plot using rollout_with_plot evaluator
+    if plot_eval:
+        print("\nRunning final evaluation with trajectory plot...")
+        plot_eval_config = copy.deepcopy(config)
+        plot_eval_config["evaluator_type"] = "rollout_with_trajectory"
+        final_evaluator = init_evaluator(plot_eval_config)
+        final_eval_results = final_evaluator.evaluate(train_state.params)
+
+        # Log metrics (excluding trajectory/actions/goal_state which are arrays)
+        metrics_to_log = {k: v for k, v in final_eval_results.items()
+                         if not isinstance(v, np.ndarray)}
+        wandb.log(metrics_to_log, step=config["total_steps"])
+
+        # Plot and log trajectory
+        fig = plot_eval_trajectory(final_eval_results, config)
+        wandb.log({"final_eval_traj": wandb.Image(fig)}, step=config["total_steps"])
+        plt.close(fig)
+        print("Final eval trajectory logged to wandb as 'final_eval_traj'")
+
     wandb.finish()
     print("Run complete.")
 
@@ -348,6 +396,11 @@ if __name__ == "__main__":
         default="./trained_models",
         help="Directory to save the learned dynamics model parameters.",
     )
+    parser.add_argument(
+        "--plot-eval",
+        action="store_true",
+        help="Run final evaluation with trajectory plot logged to wandb.",
+    )
     args = parser.parse_args()
 
     # Load config from JSON file
@@ -383,6 +436,6 @@ if __name__ == "__main__":
                 run_name = f"{run_name}_{seed_idx}"
             run_config["wandb_run_name"] = run_name
 
-            main(run_config, save_dir=args.save_dir)
+            main(run_config, save_dir=args.save_dir, plot_eval=args.plot_eval)
 
     print("All experiments complete.")
