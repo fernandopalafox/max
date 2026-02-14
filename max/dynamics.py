@@ -7,19 +7,6 @@ from typing import Sequence, NamedTuple, Callable, Any, Optional
 from max.normalizers import Normalizer, init_normalizer
 
 
-# --- Base Model Definition (MLP) ---
-class MLP(nn.Module):
-    features: Sequence[int]
-
-    @nn.compact
-    def __call__(self, state, action):
-        x = jnp.concatenate([state, action], axis=-1)
-        for feat in self.features:
-            x = nn.Dense(feat)(x)
-            x = nn.tanh(x)
-        return nn.Dense(state.shape[-1])(x)
-
-
 # --- Container for the final dynamics model ---
 class DynamicsModel(NamedTuple):
     pred_one_step: Callable[[Any, jnp.ndarray, jnp.ndarray], jnp.ndarray]
@@ -27,22 +14,7 @@ class DynamicsModel(NamedTuple):
     pred_one_step_with_info: Callable[[Any, jnp.ndarray, jnp.ndarray], tuple] = None
 
 
-def _create_MLP_dynamics(
-    key: jax.Array,
-    dim_state: int,
-    dim_action: int,
-    nn_features: Sequence[int],
-):
-    """Creates the base MLP model and its initial parameters."""
-    model = MLP(features=nn_features)
-    dummy_state = jnp.ones((dim_state,))
-    dummy_action = jnp.ones((dim_action,))
-    params = model.init(key, dummy_state, dummy_action)
-    return model, params
-
-
-# --- The Higher-Order Wrapper Function ---
-def create_MLP_residual_dynamics(
+def create_mlp_resnet_dynamics(
     key: jax.Array,
     dim_state: int,
     dim_action: int,
@@ -51,15 +23,24 @@ def create_MLP_residual_dynamics(
     normalizer_params: Optional[jnp.ndarray] = None,
 ) -> DynamicsModel:
     """
-    Creates and wraps a dynamics model with full input and output normalization.
+    Creates an MLP ResNet dynamics model that predicts state deltas (residuals).
+    Includes full input and output normalization.
     """
-    model_key, key = jax.random.split(key)
-    base_model, model_params = _create_MLP_dynamics(
-        model_key,
-        dim_state,
-        dim_action,
-        config["dynamics_params"]["nn_features"],
-    )
+    nn_features = config["dynamics_params"]["nn_features"]
+
+    class MLP(nn.Module):
+        @nn.compact
+        def __call__(self, state, action):
+            x = jnp.concatenate([state, action], axis=-1)
+            for feat in nn_features:
+                x = nn.Dense(feat)(x)
+                x = nn.tanh(x)
+            return nn.Dense(dim_state)(x)
+
+    base_model = MLP()
+    dummy_state = jnp.ones((dim_state,))
+    dummy_action = jnp.ones((dim_action,))
+    model_params = base_model.init(key, dummy_state, dummy_action)
     params = {"model": model_params, "normalizer": normalizer_params}
 
     @jax.jit
@@ -1347,7 +1328,7 @@ def init_dynamics(
     if dynamics_type == "mlp_residual":
         dim_state = config.dim_state
         dim_action = config.dim_action
-        return create_MLP_residual_dynamics(
+        return create_mlp_resnet_dynamics(
             key, dim_state, dim_action, config, normalizer, normalizer_params
         )
 
