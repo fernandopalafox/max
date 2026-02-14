@@ -134,7 +134,7 @@ def plot_eval_trajectory(eval_results, config):
 
 def main(config, save_dir, plot_eval=False):
     wandb.init(
-        project="linear_new",
+        project=config.get("wandb_project", "linear"),
         config=config,
         group=config.get("wandb_group"),
         name=config.get("wandb_run_name"),
@@ -401,12 +401,21 @@ if __name__ == "__main__":
         action="store_true",
         help="Run final evaluation with trajectory plot logged to wandb.",
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to JSON config file. Defaults to configs/linear.json.",
+    )
     args = parser.parse_args()
 
     # Load config from JSON file
-    config_path = os.path.join(
-        os.path.dirname(__file__), "..", "configs", "linear.json"
-    )
+    if args.config is not None:
+        config_path = args.config
+    else:
+        config_path = os.path.join(
+            os.path.dirname(__file__), "..", "configs", "linear.json"
+        )
     with open(config_path, "r") as f:
         CONFIG = json.load(f)
 
