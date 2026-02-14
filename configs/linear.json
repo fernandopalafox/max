@@ -1,20 +1,20 @@
 {
   "env_name": "linear_tracking",
   "num_agents": 1,
-  "total_steps": 1000,
+  "total_steps": 90,
   "dim_state": 4,
   "dim_action": 2,
   "train_freq": 1,
   "train_model_freq": 1,
   "train_policy_freq": 1,
   "normalize_freq": 1000000,
-  "eval_freq": 500,
+  "eval_freq": 5,
   "buffer_size": 2000,
 
   "evaluator_type": "rollout",
   "evaluator_params": {
     "seed": 123,
-    "max_steps": 200,
+    "max_steps": 100,
     "num_episodes": 1,
     "eval_cost_types": ["goal_cost", "terminal_goal_cost"],
     "env_params": {},
@@ -22,7 +22,7 @@
     "planner_params": {},
     "cost_fn_params": {
       "weight_jerk": 0.01,
-      "weight_control": 25.0,
+      "weight_control": 1.0,
       "weight_info": 0.0,
       "goal_state": [-5.0, -5.0, 0.0, 0.0],
       "meas_noise_diag": [0.01, 0.01, 0.01, 0.01]
@@ -36,10 +36,10 @@
   "dynamics": "linear",
   "dynamics_params": {
     "init_A": [
-      [1.0, 0.0, 0.1, 0.0],
-      [0.0, 1.0, 0.0, 0.1],
-      [0.0, 0.0, 0.9, 0.0],
-      [0.0, 0.0, 0.0, 0.9]
+      [1.0, 0.0, -0.2, 0.0],
+      [0.0, 1.0, 0.0, -0.2],
+      [0.0, 0.0, 1.1, 0.5],
+      [0.0, 0.0, -0.5, 1.1]
     ],
     "init_B": [
       [0.005, 0.0],
@@ -109,9 +109,9 @@
 
   "cost_fn_params": {
     "weight_jerk": 0.01,
-    "weight_control": 25.0,
+    "weight_control": 1.0,
     "weight_info": 500.0,
-    "goal_state": [5.0, 5.0, 0.0, 0.0],
+    "goal_state": [0.0, 5.0, 0.0, 0.0],
     "meas_noise_diag": [0.01, 0.01, 0.01, 0.01]
   }
 }
