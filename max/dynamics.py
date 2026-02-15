@@ -103,6 +103,165 @@ def create_mlp_resnet_dynamics(
     )
 
 
+def create_mlp_resnet_dynamics_last_layer(
+    key: jax.Array,
+    config: dict,
+    normalizer: Normalizer,
+    normalizer_params: Optional[jnp.ndarray] = None,
+) -> DynamicsModel:
+    """
+    Creates an MLP ResNet dynamics model with only the last layer trainable.
+
+    Same architecture as create_mlp_resnet_dynamics, but only the output layer
+    is exposed for training. Hidden layers are randomly initialized and frozen
+    (baked into the model closure).
+
+    Supports ensembles: when ensemble_size > 1, initializes multiple independent
+    networks (each with its own frozen hidden layers) and returns the mean
+    prediction across ensemble members.
+
+    Trainable Params: Only output layer weights (kernel and bias)
+    Frozen Params: Hidden layer weights (baked into closure)
+    """
+    dim_state = config["dim_state"]
+    dim_action = config["dim_action"]
+    nn_features = config["dynamics_params"]["nn_features"]
+    ensemble_size = config["dynamics_params"].get("ensemble_size", 1)
+
+    class MLP(nn.Module):
+        @nn.compact
+        def __call__(self, state, action):
+            x = jnp.concatenate([state, action], axis=-1)
+            for feat in nn_features:
+                x = nn.Dense(feat)(x)
+                x = nn.tanh(x)
+            return nn.Dense(dim_state)(x)
+
+    base_model = MLP()
+    dummy_state = jnp.ones((dim_state,))
+    dummy_action = jnp.ones((dim_action,))
+
+    # Layer naming: Dense_0, Dense_1, ..., Dense_n where n is output layer
+    num_hidden = len(nn_features)
+    output_layer_name = f"Dense_{num_hidden}"
+
+    # Initialize and split parameters for each ensemble member
+    keys = jax.random.split(key, ensemble_size)
+
+    def init_and_split_params(k):
+        """Initialize full params, return (frozen_params, trainable_params)."""
+        full_params = base_model.init(k, dummy_state, dummy_action)
+
+        # Extract frozen hidden layer params
+        frozen = {"params": {}}
+        for i in range(num_hidden):
+            layer_name = f"Dense_{i}"
+            frozen["params"][layer_name] = full_params["params"][layer_name]
+
+        # Extract trainable output layer params
+        trainable = {"params": {output_layer_name: full_params["params"][output_layer_name]}}
+
+        return frozen, trainable
+
+    if ensemble_size == 1:
+        frozen_params, trainable_params = init_and_split_params(keys[0])
+        # frozen_params is a single dict, trainable_params is a single dict
+    else:
+        # Initialize each ensemble member separately
+        all_frozen = []
+        all_trainable = []
+        for i in range(ensemble_size):
+            frozen, trainable = init_and_split_params(keys[i])
+            all_frozen.append(frozen)
+            all_trainable.append(trainable)
+
+        # Stack frozen params: list of dicts -> dict with stacked arrays
+        frozen_params = {"params": {}}
+        for i in range(num_hidden):
+            layer_name = f"Dense_{i}"
+            frozen_params["params"][layer_name] = {
+                "kernel": jnp.stack([f["params"][layer_name]["kernel"] for f in all_frozen], axis=0),
+                "bias": jnp.stack([f["params"][layer_name]["bias"] for f in all_frozen], axis=0),
+            }
+
+        # Stack trainable params
+        trainable_params = {"params": {output_layer_name: {
+            "kernel": jnp.stack([t["params"][output_layer_name]["kernel"] for t in all_trainable], axis=0),
+            "bias": jnp.stack([t["params"][output_layer_name]["bias"] for t in all_trainable], axis=0),
+        }}}
+
+    params = {"model": trainable_params, "normalizer": normalizer_params}
+
+    def _pred_norm_delta_single(
+        trainable_model_params: Any,
+        frozen_model_params: Any,
+        norm_params: Any,
+        state: jnp.ndarray,
+        action: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Predicts normalized delta for a single model."""
+        normalized_state = normalizer.normalize(norm_params["state"], state)
+        normalized_action = normalizer.normalize(norm_params["action"], action)
+
+        # Reconstruct full params: frozen + trainable
+        full_params = {"params": {**frozen_model_params["params"], **trainable_model_params["params"]}}
+        return base_model.apply(full_params, normalized_state, normalized_action)
+
+    @jax.jit
+    def pred_norm_delta(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts the normalized change in state (for training).
+
+        For ensembles, returns the mean prediction across all members.
+        """
+        norm_params = params["normalizer"]
+        if ensemble_size == 1:
+            return _pred_norm_delta_single(
+                params["model"], frozen_params, norm_params, state, action
+            )
+        else:
+            # vmap over ensemble members
+            def forward_one_member(ens_idx):
+                # Extract this member's trainable params
+                member_trainable = {"params": {output_layer_name: {
+                    "kernel": params["model"]["params"][output_layer_name]["kernel"][ens_idx],
+                    "bias": params["model"]["params"][output_layer_name]["bias"][ens_idx],
+                }}}
+                # Extract this member's frozen params
+                member_frozen = {"params": {}}
+                for i in range(num_hidden):
+                    layer_name = f"Dense_{i}"
+                    member_frozen["params"][layer_name] = {
+                        "kernel": frozen_params["params"][layer_name]["kernel"][ens_idx],
+                        "bias": frozen_params["params"][layer_name]["bias"][ens_idx],
+                    }
+                return _pred_norm_delta_single(
+                    member_trainable, member_frozen, norm_params, state, action
+                )
+
+            ensemble_preds = jax.vmap(forward_one_member)(jnp.arange(ensemble_size))
+            return jnp.mean(ensemble_preds, axis=0)
+
+    @jax.jit
+    def pred_one_step(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts the absolute next state using a residual"""
+        normalized_delta = pred_norm_delta(params, state, action)
+        delta = normalizer.unnormalize(
+            params["normalizer"]["delta"], normalized_delta
+        )
+        return state + delta
+
+    return (
+        DynamicsModel(
+            pred_one_step=pred_one_step, pred_norm_delta=pred_norm_delta
+        ),
+        params,
+    )
+
+
 def create_analytical_pendulum_dynamics() -> DynamicsModel:
     """
     Creates a dynamics model that is an exact analytical match for the
@@ -1356,6 +1515,11 @@ def init_dynamics(
 
     if dynamics_type == "mlp_resnet":
         return create_mlp_resnet_dynamics(
+            key, config, normalizer, normalizer_params
+        )
+
+    elif dynamics_type == "mlp_resnet_last_layer":
+        return create_mlp_resnet_dynamics_last_layer(
             key, config, normalizer, normalizer_params
         )
 
