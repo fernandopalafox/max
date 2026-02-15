@@ -233,10 +233,11 @@ def main(config, save_dir):
     key, planner_key = jax.random.split(key)
     planner, planner_state = init_planner(config, cost_fn, planner_key)
 
-    # Initialize buffer
+    # Initialize buffer (size = num_episodes * max_episode_length)
+    buffer_size = config["num_episodes"] * config["max_episode_length"]
     buffers = init_jax_buffers(
         config["num_agents"],
-        config["buffer_size"],
+        buffer_size,
         config["dim_state"],
         config["dim_action"],
     )
@@ -271,7 +272,7 @@ def main(config, save_dir):
 
         # Add to buffer
         for t in range(ep_len):
-            if buffer_idx >= config["buffer_size"]:
+            if buffer_idx >= buffer_size:
                 print(f"Warning: Buffer full at episode {ep}, truncating.")
                 break
             buffers = update_buffer_dynamic(
@@ -287,7 +288,7 @@ def main(config, save_dir):
             buffer_idx += 1
 
         print(f"Episode {ep + 1}/{config['num_episodes']}: length={ep_len}, buffer_idx={buffer_idx}")
-        wandb.log({"episode/length": ep_len, "buffer/size": buffer_idx}, step=ep)
+        wandb.log({"episode/length": ep_len}, step=ep)
 
         # Plot episode trajectory at plot_freq
         if (ep + 1) % plot_freq == 0:
