@@ -34,10 +34,13 @@
       "method": "static"
     },
   
-    "dynamics": "mlp_resnet",
+    "dynamics": "mlp_resnet_tiny_lora",
     "dynamics_params": {
       "nn_features": [32, 32],
-      "ensemble_size": 3
+      "ensemble_size": 1,
+      "svd_rank": 4,
+      "steering_dim": 8,
+      "projection_seed": 42
     },
   
     "env_params": {

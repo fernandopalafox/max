@@ -262,6 +262,89 @@ def create_mlp_resnet_last_layer(
     )
 
 
+def create_mlp_resnet_tiny_lora(
+    key: jax.Array,
+    config: dict,
+    normalizer: Normalizer,
+    normalizer_params: Optional[jnp.ndarray] = None,
+) -> DynamicsModel:
+    """
+    Creates an MLP ResNet dynamics model with TinyLoRA for efficient adaptation.
+
+    Same architecture as create_mlp_resnet, but uses TinyLoRA to modify layer weights.
+    The effective weight for each layer is: W' = W + U @ diag(Sigma) @ (sum_i v[i] * P[i]) @ V.T
+
+    Supports ensembles: when ensemble_size > 1, initializes multiple independent
+    networks and returns the mean prediction across ensemble members.
+
+    Trainable Params: Steering vectors v for each layer (num_layers * steering_dim total)
+    Frozen (in closure): For each layer: W, b, U, Sigma, V, P
+
+    Required config["dynamics_params"]:
+        - nn_features: list of hidden layer sizes
+        - svd_rank: rank of SVD truncation
+        - steering_dim: dimension of steering vector per layer
+        - projection_seed: seed for reproducible random projections
+        - ensemble_size: (optional, default 1) number of ensemble members
+    """
+    dim_state = config["dim_state"]
+    dim_action = config["dim_action"]
+    dyn_params = config["dynamics_params"]
+    nn_features = dyn_params["nn_features"]
+    svd_rank = dyn_params["svd_rank"]
+    steering_dim = dyn_params["steering_dim"]
+    projection_seed = dyn_params["projection_seed"]
+    ensemble_size = dyn_params.get("ensemble_size", 1)
+
+    # Initialize TinyLoRA layers
+    # Input: state + action, Output: state delta
+    frozen_layers, trainable_v_init = _init_tiny_lora_layers(
+        key=key,
+        nn_features=nn_features,
+        input_dim=dim_state + dim_action,
+        output_dim=dim_state,
+        svd_rank=svd_rank,
+        steering_dim=steering_dim,
+        projection_seed=projection_seed,
+        ensemble_size=ensemble_size,
+    )
+
+    params = {"model": trainable_v_init, "normalizer": normalizer_params}
+
+    @jax.jit
+    def pred_norm_delta(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts the normalized change in state (for training).
+
+        For ensembles, returns the mean prediction across all members.
+        """
+        norm_params = params["normalizer"]
+        normalized_state = normalizer.normalize(norm_params["state"], state)
+        normalized_action = normalizer.normalize(norm_params["action"], action)
+        x = jnp.concatenate([normalized_state, normalized_action], axis=-1)
+
+        return _tiny_lora_forward(x, params["model"], frozen_layers, ensemble_size)
+
+    @jax.jit
+    def pred_one_step(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts the absolute next state using a residual"""
+        normalized_delta = pred_norm_delta(params, state, action)
+        delta = normalizer.unnormalize(
+            params["normalizer"]["delta"], normalized_delta
+        )
+        return state + delta
+
+    return (
+        DynamicsModel(
+            pred_one_step=pred_one_step, pred_norm_delta=pred_norm_delta
+        ),
+        params,
+    )
+
+
 def create_analytical_pendulum() -> DynamicsModel:
     """
     Creates a dynamics model that is an exact analytical match for the
@@ -1520,6 +1603,11 @@ def init_dynamics(
 
     elif dynamics_type == "mlp_resnet_last_layer":
         return create_mlp_resnet_last_layer(
+            key, config, normalizer, normalizer_params
+        )
+
+    elif dynamics_type == "mlp_resnet_tiny_lora":
+        return create_mlp_resnet_tiny_lora(
             key, config, normalizer, normalizer_params
         )
 
