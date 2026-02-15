@@ -16,8 +16,6 @@ class DynamicsModel(NamedTuple):
 
 def create_mlp_resnet_dynamics(
     key: jax.Array,
-    dim_state: int,
-    dim_action: int,
     config: dict,
     normalizer: Normalizer,
     normalizer_params: Optional[jnp.ndarray] = None,
@@ -25,8 +23,14 @@ def create_mlp_resnet_dynamics(
     """
     Creates an MLP ResNet dynamics model that predicts state deltas (residuals).
     Includes full input and output normalization.
+
+    Supports ensembles: when ensemble_size > 1, initializes multiple independent
+    networks and returns the mean prediction across ensemble members.
     """
+    dim_state = config["dim_state"]
+    dim_action = config["dim_action"]
     nn_features = config["dynamics_params"]["nn_features"]
+    ensemble_size = config["dynamics_params"].get("ensemble_size", 1)
 
     class MLP(nn.Module):
         @nn.compact
@@ -40,20 +44,45 @@ def create_mlp_resnet_dynamics(
     base_model = MLP()
     dummy_state = jnp.ones((dim_state,))
     dummy_action = jnp.ones((dim_action,))
-    model_params = base_model.init(key, dummy_state, dummy_action)
+
+    # Initialize ensemble parameters
+    keys = jax.random.split(key, ensemble_size)
+    if ensemble_size == 1:
+        model_params = base_model.init(keys[0], dummy_state, dummy_action)
+    else:
+        # Stack parameters across ensemble members using vmap
+        model_params = jax.vmap(base_model.init, in_axes=(0, None, None))(
+            keys, dummy_state, dummy_action
+        )
     params = {"model": model_params, "normalizer": normalizer_params}
+
+    def _pred_norm_delta_single(
+        model_params: Any, norm_params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts normalized delta for a single model."""
+        normalized_state = normalizer.normalize(norm_params["state"], state)
+        normalized_action = normalizer.normalize(norm_params["action"], action)
+        return base_model.apply(model_params, normalized_state, normalized_action)
 
     @jax.jit
     def pred_norm_delta(
         params: Any, state: jnp.ndarray, action: jnp.ndarray
     ) -> jnp.ndarray:
-        """Predicts the normalized change in state (for training)."""
+        """Predicts the normalized change in state (for training).
+
+        For ensembles, returns the mean prediction across all members.
+        """
         norm_params = params["normalizer"]
-        normalized_state = normalizer.normalize(norm_params["state"], state)
-        normalized_action = normalizer.normalize(norm_params["action"], action)
-        return base_model.apply(
-            params["model"], normalized_state, normalized_action
-        )
+        if ensemble_size == 1:
+            return _pred_norm_delta_single(
+                params["model"], norm_params, state, action
+            )
+        else:
+            # vmap over ensemble members and compute mean
+            ensemble_preds = jax.vmap(
+                lambda mp: _pred_norm_delta_single(mp, norm_params, state, action)
+            )(params["model"])
+            return jnp.mean(ensemble_preds, axis=0)
 
     @jax.jit
     def pred_one_step(
@@ -1326,10 +1355,8 @@ def init_dynamics(
         normalizer, normalizer_params = init_normalizer(config)
 
     if dynamics_type == "mlp_resnet":
-        dim_state = config.dim_state
-        dim_action = config.dim_action
         return create_mlp_resnet_dynamics(
-            key, dim_state, dim_action, config, normalizer, normalizer_params
+            key, config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "probabilistic_ensemble":
