@@ -110,6 +110,105 @@
       "weight_info": 0.0,
       "goal_state": [0.0, 5.0, 0.0, 0.0],
       "meas_noise_diag": [0.01, 0.01, 0.01, 0.01]
+    },
+
+    "data_collection": {
+      "num_episodes": 100,
+      "max_episode_length": 200,
+      "buffer_size": 25000,
+      "seed": 42,
+      "save_path": "./data/pretraining_data",
+      "wandb_project": "data_collection",
+      "plot_freq": 10,
+
+      "num_agents": 1,
+      "dim_state": 4,
+      "dim_action": 2,
+      "state_labels": ["pos_x", "pos_y", "vel_x", "vel_y"],
+
+      "env_name": "linear_tracking",
+      "env_params": {
+        "num_agents": 1,
+        "box_half_width": 100.0,
+        "max_episode_steps": 200,
+        "dt": 0.1,
+        "max_accel": 2.0,
+        "true_A": [
+          [1.0, 0.0, 0.1, 0.0],
+          [0.0, 1.0, 0.0, 0.1],
+          [0.0, 0.0, 0.95, 0.0],
+          [0.0, 0.0, 0.0, 0.95]
+        ],
+        "true_B": [
+          [0.005, 0.0],
+          [0.0, 0.005],
+          [0.1, 0.0],
+          [0.0, 0.1]
+        ],
+        "target_point": [5.0, 5.0, 0.0, 0.0]
+      },
+
+      "dynamics": "linear",
+      "dynamics_params": {
+        "init_A": [
+          [1.0, 0.0, 0.1, 0.0],
+          [0.0, 1.0, 0.0, 0.1],
+          [0.0, 0.0, 0.95, 0.0],
+          [0.0, 0.0, 0.0, 0.95]
+        ],
+        "init_B": [
+          [0.005, 0.0],
+          [0.0, 0.005],
+          [0.1, 0.0],
+          [0.0, 0.1]
+        ]
+      },
+
+      "trainer": "ekf",
+      "trainer_params": {
+        "learning_rate": 1.0,
+        "weight_decay": 0.0,
+        "proc_noise_init": 0.0,
+        "proc_noise_decay": 1.0,
+        "proc_noise_floor": 0.0,
+        "init_cov_scale": 0.1,
+        "jitter": 0.0
+      },
+
+      "planner_type": "icem",
+      "planner_params": {
+        "horizon": 15,
+        "batch_size": 300,
+        "max_iter": 5,
+        "elit_frac": 0.1,
+        "learning_rate": 0.9,
+        "dim_control": 2,
+        "action_low": [-2.0, -2.0],
+        "action_high": [2.0, 2.0]
+      },
+
+      "cost_type": "linear_tracking_info",
+      "cost_fn_params": {
+        "weight_jerk": 0.01,
+        "weight_control": 1.0,
+        "weight_info": 0.0,
+        "goal_state": [0.0, 5.0, 0.0, 0.0],
+        "meas_noise_diag": [0.01, 0.01, 0.01, 0.01]
+      },
+
+      "normalization": { "method": "static" },
+      "normalization_params": {
+        "state": { "min": [-20.0, -20.0, -5.0, -5.0], "max": [20.0, 20.0, 5.0, 5.0] },
+        "action": { "min": [-2.0, -2.0], "max": [2.0, 2.0] },
+        "delta": { "min": [-2.0, -2.0, -0.5, -0.5], "max": [2.0, 2.0, 0.5, 0.5] }
+      },
+
+      "domain_randomization": {
+        "goal_state": {
+          "min": [-15.0, -15.0, -2.0, -2.0],
+          "max": [15.0, 15.0, 2.0, 2.0]
+        }
+      }
     }
   }
   
