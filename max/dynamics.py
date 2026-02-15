@@ -3,6 +3,7 @@
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
+import pickle
 from typing import Sequence, NamedTuple, Callable, Any, Optional
 from max.normalizers import Normalizer, init_normalizer
 
@@ -1597,69 +1598,78 @@ def init_dynamics(
         normalizer, normalizer_params = init_normalizer(config)
 
     if dynamics_type == "mlp_resnet":
-        return create_mlp_resnet(
+        model, params = create_mlp_resnet(
             key, config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "mlp_resnet_last_layer":
-        return create_mlp_resnet_last_layer(
+        model, params = create_mlp_resnet_last_layer(
             key, config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "mlp_resnet_tiny_lora":
-        return create_mlp_resnet_tiny_lora(
+        model, params = create_mlp_resnet_tiny_lora(
             key, config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "probabilistic_ensemble":
         dim_state = config.dim_state
         dim_action = config.dim_action
-        return create_probabilistic_ensemble(
+        model, params = create_probabilistic_ensemble(
             key, dim_state, dim_action, config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "analytical_pendulum":
-        return create_analytical_pendulum()
+        model, params = create_analytical_pendulum()
 
     elif dynamics_type == "pursuit_evader":
-        return create_pursuit_evader(
+        model, params = create_pursuit_evader(
             config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "linear":
-        return create_linear(
+        model, params = create_linear(
             config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "damped_pendulum":
-        return create_damped_pendulum(
+        model, params = create_damped_pendulum(
             config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "unicycle":
-        return create_pursuit_evader_unicycle(
+        model, params = create_pursuit_evader_unicycle(
             config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "merging_idm":
-        return create_merging_idm(
+        model, params = create_merging_idm(
             config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "planar_drone":
-        return create_planar_drone(
+        model, params = create_planar_drone(
             key, config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "planar_drone_last_layer":
-        return create_planar_drone_last_layer(
+        model, params = create_planar_drone_last_layer(
             key, config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "planar_drone_tiny_lora":
-        return create_planar_drone_tiny_lora(
+        model, params = create_planar_drone_tiny_lora(
             key, config, normalizer, normalizer_params
         )
 
     else:
         raise ValueError(f"Unknown dynamics type: '{dynamics_type}'")
+
+    # Check for pretrained parameters
+    pretrained_path = config.get("dynamics_params", {}).get("pretrained_params_path")
+    if pretrained_path:
+        with open(pretrained_path, "rb") as f:
+            params = pickle.load(f)
+        print(f"📦 Loaded pretrained params from {pretrained_path}")
+
+    return model, params

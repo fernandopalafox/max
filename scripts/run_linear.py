@@ -414,7 +414,8 @@ if __name__ == "__main__":
         os.path.dirname(__file__), "..", "configs", args.config
     )
     with open(config_path, "r") as f:
-        CONFIG = json.load(f)
+        full_config = json.load(f)
+    CONFIG = full_config["finetuning"]
 
     run_name_base = args.run_name or "linear"
 
