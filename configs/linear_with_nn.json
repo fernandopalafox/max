@@ -2,7 +2,7 @@
     "wandb_project": "linear_with_nn",
     "env_name": "linear_tracking",
     "num_agents": 1,
-    "total_steps": 90,
+    "total_steps": 150,
     "dim_state": 4,
     "dim_action": 2,
     "train_freq": 1,
@@ -31,12 +31,13 @@
     },
   
     "normalization": {
-      "method": "none"
+      "method": "static"
     },
   
     "dynamics": "mlp_resnet",
     "dynamics_params": {
-      "nn_features": [32, 32]
+      "nn_features": [32, 32],
+      "ensemble_size": 3
     },
   
     "env_params": {
@@ -64,10 +65,10 @@
     "trainer_params": {
       "learning_rate": 10.0,
       "weight_decay": 1.0,
-      "proc_noise_init": 0.001,
-      "proc_noise_decay": 0.999,
-      "proc_noise_floor": 0.0001,
-      "init_cov_scale": 1.0,
+      "proc_noise_init": 0.0,
+      "proc_noise_decay": 1.0,
+      "proc_noise_floor": 0.0,
+      "init_cov_scale": 0.5,
       "jitter": 0.0
     },
   
@@ -79,6 +80,10 @@
       "action": {
         "min": [-2.0, -2.0],
         "max": [2.0, 2.0]
+      },
+      "delta": {
+        "min": [-2.0, -2.0, -0.5, -0.5],
+        "max": [2.0, 2.0, 0.5, 0.5]
       }
     },
   
@@ -100,7 +105,7 @@
     "cost_fn_params": {
       "weight_jerk": 0.01,
       "weight_control": 1.0,
-      "weight_info": 500.0,
+      "weight_info": 0.0,
       "goal_state": [0.0, 5.0, 0.0, 0.0],
       "meas_noise_diag": [0.01, 0.01, 0.01, 0.01]
     }
