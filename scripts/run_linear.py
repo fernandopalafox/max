@@ -404,18 +404,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default=None,
-        help="Path to JSON config file. Defaults to configs/linear.json.",
+        default="linear.json",
+        help="Config filename in configs folder. Defaults to linear.json.",
     )
     args = parser.parse_args()
 
     # Load config from JSON file
-    if args.config is not None:
-        config_path = args.config
-    else:
-        config_path = os.path.join(
-            os.path.dirname(__file__), "..", "configs", "linear.json"
-        )
+    config_path = os.path.join(
+        os.path.dirname(__file__), "..", "configs", args.config
+    )
     with open(config_path, "r") as f:
         CONFIG = json.load(f)
 
@@ -439,7 +436,7 @@ if __name__ == "__main__":
 
             # Build run name: base_lam{idx}_seed{idx}
             run_name = run_name_base
-            if len(lambdas) > 1:
+            if args.lambdas is not None:
                 run_name = f"{run_name}_lam{lam}"
             if args.num_seeds > 1:
                 run_name = f"{run_name}_{seed_idx}"
