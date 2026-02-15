@@ -114,8 +114,7 @@
 
     "data_collection": {
       "num_episodes": 100,
-      "max_episode_length": 200,
-      "buffer_size": 25000,
+      "max_episode_length": 100,
       "seed": 42,
       "save_path": "./data/pretraining_data",
       "wandb_project": "data_collection",
@@ -205,8 +204,8 @@
 
       "domain_randomization": {
         "goal_state": {
-          "min": [-15.0, -15.0, -2.0, -2.0],
-          "max": [15.0, 15.0, 2.0, 2.0]
+          "min": [-15.0, -15.0, 0.0, 0.0],
+          "max": [15.0, 15.0, 0.0, 0.0]
         }
       }
     }
