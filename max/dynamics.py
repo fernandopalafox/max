@@ -14,7 +14,7 @@ class DynamicsModel(NamedTuple):
     pred_one_step_with_info: Callable[[Any, jnp.ndarray, jnp.ndarray], tuple] = None
 
 
-def create_mlp_resnet_dynamics(
+def create_mlp_resnet(
     key: jax.Array,
     config: dict,
     normalizer: Normalizer,
@@ -103,7 +103,7 @@ def create_mlp_resnet_dynamics(
     )
 
 
-def create_mlp_resnet_dynamics_last_layer(
+def create_mlp_resnet_last_layer(
     key: jax.Array,
     config: dict,
     normalizer: Normalizer,
@@ -112,7 +112,7 @@ def create_mlp_resnet_dynamics_last_layer(
     """
     Creates an MLP ResNet dynamics model with only the last layer trainable.
 
-    Same architecture as create_mlp_resnet_dynamics, but only the output layer
+    Same architecture as create_mlp_resnet, but only the output layer
     is exposed for training. Hidden layers are randomly initialized and frozen
     (baked into the model closure).
 
@@ -262,7 +262,7 @@ def create_mlp_resnet_dynamics_last_layer(
     )
 
 
-def create_analytical_pendulum_dynamics() -> DynamicsModel:
+def create_analytical_pendulum() -> DynamicsModel:
     """
     Creates a dynamics model that is an exact analytical match for the
     dm_control pendulum environment.
@@ -355,7 +355,7 @@ class PETSDynamicsModel(NamedTuple):
 
 
 # --- The Higher-Order Wrapper Function for the Ensemble ---
-def create_probabilistic_ensemble_dynamics(
+def create_probabilistic_ensemble(
     key: jax.Array,
     dim_state: int,
     dim_action: int,
@@ -435,7 +435,7 @@ def create_probabilistic_ensemble_dynamics(
     )
 
 
-def create_pursuit_evader_dynamics(
+def create_pursuit_evader(
     config: dict,
     normalizer: Normalizer,
     normalizer_params: Optional[jnp.ndarray] = None,
@@ -534,7 +534,7 @@ def create_pursuit_evader_dynamics(
     return model, params
 
 
-def create_pursuit_evader_dynamics_unicycle(
+def create_pursuit_evader_unicycle(
     config: dict,
     normalizer: Normalizer,
     normalizer_params: Optional[jnp.ndarray] = None,
@@ -701,7 +701,7 @@ def create_pursuit_evader_dynamics_unicycle(
 
 
 
-def create_linear_dynamics(
+def create_linear(
     config: dict,
     normalizer: Normalizer,
     normalizer_params: Optional[jnp.ndarray] = None,
@@ -742,7 +742,7 @@ def create_linear_dynamics(
     return model, params
 
 
-def create_damped_pendulum_dynamics(
+def create_damped_pendulum(
     config: dict,
     normalizer: Normalizer,
     normalizer_params: Optional[jnp.ndarray] = None,
@@ -793,7 +793,7 @@ def create_damped_pendulum_dynamics(
     return model, params
 
 
-def create_planar_drone_dynamics(
+def create_planar_drone(
     key: jax.Array,
     config: dict,
     normalizer: Normalizer,
@@ -914,7 +914,7 @@ def create_planar_drone_dynamics(
     return model, params
 
 
-def create_planar_drone_dynamics_last_layer(
+def create_planar_drone_last_layer(
     key: jax.Array,
     config: dict,
     normalizer: Normalizer,
@@ -923,7 +923,7 @@ def create_planar_drone_dynamics_last_layer(
     """
     Planar drone model with only the last MLP layer trainable.
 
-    Same architecture as create_planar_drone_dynamics, but only the output layer
+    Same architecture as create_planar_drone, but only the output layer
     is exposed for training. Hidden layers are randomly initialized and frozen
     (baked into the model closure).
 
@@ -1279,7 +1279,7 @@ def _tiny_lora_forward(
     return jnp.mean(outputs, axis=0)
 
 
-def create_planar_drone_tiny_lora_dynamics(
+def create_planar_drone_tiny_lora(
     key: jax.Array,
     config: dict,
     normalizer: Normalizer,
@@ -1399,7 +1399,7 @@ def create_planar_drone_tiny_lora_dynamics(
     return model, params
 
 
-def create_merging_idm_dynamics(
+def create_merging_idm(
     config: dict,
     normalizer: Normalizer,
     normalizer_params: Optional[jnp.ndarray] = None,
@@ -1514,62 +1514,62 @@ def init_dynamics(
         normalizer, normalizer_params = init_normalizer(config)
 
     if dynamics_type == "mlp_resnet":
-        return create_mlp_resnet_dynamics(
+        return create_mlp_resnet(
             key, config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "mlp_resnet_last_layer":
-        return create_mlp_resnet_dynamics_last_layer(
+        return create_mlp_resnet_last_layer(
             key, config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "probabilistic_ensemble":
         dim_state = config.dim_state
         dim_action = config.dim_action
-        return create_probabilistic_ensemble_dynamics(
+        return create_probabilistic_ensemble(
             key, dim_state, dim_action, config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "analytical_pendulum":
-        return create_analytical_pendulum_dynamics()
+        return create_analytical_pendulum()
 
     elif dynamics_type == "pursuit_evader":
-        return create_pursuit_evader_dynamics(
+        return create_pursuit_evader(
             config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "linear":
-        return create_linear_dynamics(
+        return create_linear(
             config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "damped_pendulum":
-        return create_damped_pendulum_dynamics(
+        return create_damped_pendulum(
             config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "unicycle":
-        return create_pursuit_evader_dynamics_unicycle(
+        return create_pursuit_evader_unicycle(
             config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "merging_idm":
-        return create_merging_idm_dynamics(
+        return create_merging_idm(
             config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "planar_drone":
-        return create_planar_drone_dynamics(
+        return create_planar_drone(
             key, config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "planar_drone_last_layer":
-        return create_planar_drone_dynamics_last_layer(
+        return create_planar_drone_last_layer(
             key, config, normalizer, normalizer_params
         )
 
     elif dynamics_type == "planar_drone_tiny_lora":
-        return create_planar_drone_tiny_lora_dynamics(
+        return create_planar_drone_tiny_lora(
             key, config, normalizer, normalizer_params
         )
 
