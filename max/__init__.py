@@ -26,8 +26,8 @@ __version__ = "0.1.0"
 from max.environments import init_env, make_env, make_pursuit_evasion_env
 from max.dynamics import (
     DynamicsModel,
-    create_mlp_resnet_dynamics,
-    create_analytical_pendulum_dynamics,
+    create_mlp_resnet,
+    create_analytical_pendulum,
 )
 from max.policies import (
     Policy,
@@ -68,8 +68,8 @@ __all__ = [
     "make_pursuit_evasion_env",
     # Dynamics
     "DynamicsModel",
-    "create_mlp_resnet_dynamics",
-    "create_analytical_pendulum_dynamics",
+    "create_mlp_resnet",
+    "create_analytical_pendulum",
     # Policies
     "Policy",
     "PolicyState",

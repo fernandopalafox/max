@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 from typing import Dict, Any
 from dataclasses import dataclass
-from max.dynamics import create_pursuit_evader_dynamics, create_pursuit_evader_dynamics_unicycle
+from max.dynamics import create_pursuit_evader, create_pursuit_evader_unicycle
 
 
 @dataclass(frozen=True)
@@ -438,7 +438,7 @@ def make_pursuit_evasion_unicycle_double_integrator_env(params: EnvParams, true_
         }
     }
 
-    dynamics_model, _ = create_pursuit_evader_dynamics_unicycle(config_for_dynamics, None, None)
+    dynamics_model, _ = create_pursuit_evader_unicycle(config_for_dynamics, None, None)
 
     true_params = {
         "model": {
@@ -493,7 +493,7 @@ def make_pursuit_evasion_lqr_env(params: EnvParams, true_q_diag, true_r_diag):
         }
     }
 
-    dynamics_model, _ = create_pursuit_evader_dynamics(config_for_dynamics, None, None)
+    dynamics_model, _ = create_pursuit_evader(config_for_dynamics, None, None)
 
     true_q_cholesky = jnp.diag(jnp.sqrt(jnp.array(true_q_diag)))
     true_r_cholesky = jnp.diag(jnp.sqrt(jnp.array(true_r_diag)))
@@ -825,15 +825,16 @@ def make_linear_tracking_env(params: EnvParams, true_A, true_B, target_point):
     @jax.jit
     def reset_fn(key: jax.random.PRNGKey):
         """Reset to random position with zero velocity."""
-        pos = jax.random.uniform(
-            key,
-            shape=(2,),
-            minval=-0.1 * params.box_half_width,
-            maxval=0.1 * params.box_half_width,
-            dtype=jnp.float32,
-        )
-        vel = jnp.zeros(2, dtype=jnp.float32)
-        return jnp.concatenate([pos, vel])
+        # pos = jax.random.uniform(
+        #     key,
+        #     shape=(2,),
+        #     minval=-0.1 * params.box_half_width,
+        #     maxval=0.1 * params.box_half_width,
+        #     dtype=jnp.float32,
+        # )
+        # vel = jnp.zeros(2, dtype=jnp.float32)
+        # return jnp.concatenate([pos, vel])
+        return jnp.zeros(4, dtype=jnp.float32)
 
     @jax.jit
     def get_obs_fn(state: jnp.ndarray):
