@@ -161,14 +161,14 @@
       }
     },
 
-    "dynamics": "mlp_resnet",
+    "dynamics": "mlp_resnet_last_layer",
     "dynamics_params": {
       "nn_features": [32, 32],
       "ensemble_size": 1,
       "svd_rank": 4,
       "steering_dim": 8,
       "projection_seed": 42,
-      "pretrained_params_path": null
+      "pretrained_params_path": "./data/pretrained_models/mlp_resnet_linear_tracking.pkl"
     },
 
     "env_params": {
