@@ -43,7 +43,7 @@ def init_trainer(
 
     # TODO: Figure out if passing the key this way is the best approach
     trainer_type = config["trainer"]
-    print(f"Initializing trainer: {trainer_type.upper()}")
+    print(f"🚀 Initializing trainer: {trainer_type.upper()}")
 
     if trainer_type == "gd":
         trainer, train_state = create_gradient_descent_trainer(

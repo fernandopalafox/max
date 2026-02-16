@@ -13,7 +13,7 @@ from max.buffers import init_jax_buffers, update_buffer_dynamic
 from max.environments import init_env
 from max.dynamics import init_dynamics
 from max.dynamics_trainers import init_trainer
-from max.dynamics_evaluators import DynamicsEvaluator
+from max.dynamics_evaluators import init_evaluator
 from max.planners import init_planner
 from max.costs import init_cost
 import argparse
@@ -28,31 +28,23 @@ def plot_drone_trajectory(buffers, buffer_idx, config):
     pts = buffers["states"][0, :buffer_idx, :2]
     goal = config["cost_fn_params"]["goal_state"][:2]
 
+    # Get normalization bounds for positions
+    norm_params = config["normalization_params"]["state"]
+    x_min, x_max = norm_params["min"][0], norm_params["max"][0]
+    y_min, y_max = norm_params["min"][1], norm_params["max"][1]
+
     fig, ax = plt.subplots()
     ax.plot(pts[:, 0], pts[:, 1], label="Path")
     ax.scatter(*goal, color='red', marker='*', label="Goal", zorder=5)
-    
-    # Combine data to find overall bounds
-    all_x = np.concatenate([pts[:, 0], [goal[0]]])
-    all_y = np.concatenate([pts[:, 1], [goal[1]]])
-    
-    # Calculate the range and the midpoint
-    max_range = max(all_x.max() - all_x.min(), all_y.max() - all_y.min())
-    mid_x = (all_x.max() + all_x.min()) / 2
-    mid_y = (all_y.max() + all_y.min()) / 2
-    
-    # Add padding (e.g., 10% extra space)
-    padding = 1.1 
-    half_span = (max_range * padding) / 2
-    
-    # Set symmetric limits
-    ax.set_xlim(mid_x - half_span, mid_x + half_span)
-    ax.set_ylim(mid_y - half_span, mid_y + half_span)
-    
+
+    # Use normalization bounds for axes
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+
     ax.set_aspect('equal')
     ax.grid(True, linestyle='--', alpha=0.6)
     ax.legend()
-    
+
     return fig
 
 
@@ -94,10 +86,10 @@ def make_drone_animation(buffers, buffer_idx, config, fps=50):
     """
     states = np.array(buffers["states"][0, :buffer_idx, :])
     dt = config["env_params"]["dt"]
-    
-    # Get wind parameters for visualization
-    A_w = config["env_params"]["true_wind_amplitude"]
-    omega = config["env_params"]["true_wind_frequency"]
+
+    # Get wind parameters for visualization (constant wind)
+    wind_x = config["env_params"]["wind_x"]
+    wind_y = config["env_params"]["wind_y"]
 
     # Get goal state
     goal_state = config["cost_fn_params"]["goal_state"]
@@ -111,24 +103,18 @@ def make_drone_animation(buffers, buffer_idx, config, fps=50):
     skip = max(1, len(states) // 400)
     frames = states[::skip]
 
-    # Compute axis limits
-    p_x_all, p_y_all = states[:, 0], states[:, 1]
-    x_min, x_max = min(p_x_all.min(), goal_pos[0]), max(p_x_all.max(), goal_pos[0])
-    y_min, y_max = min(p_y_all.min(), goal_pos[1]), max(p_y_all.max(), goal_pos[1])
-
-    # --- MODIFICATION 1: Increase padding ---
-    # Increased padding to give more breathing room around the trajectory
-    padding = 1.0
-    max_range = max(x_max - x_min, y_max - y_min) + 2 * padding
-    x_center, y_center = (x_min + x_max) / 2, (y_min + y_max) / 2
+    # Use normalization bounds for axis limits
+    norm_params = config["normalization_params"]["state"]
+    x_min, x_max = norm_params["min"][0], norm_params["max"][0]
+    y_min, y_max = norm_params["min"][1], norm_params["max"][1]
 
     fig, ax = plt.subplots(figsize=(8, 8))
-    ax.set_xlim(x_center - max_range / 2, x_center + max_range / 2)
-    ax.set_ylim(y_center - max_range / 2, y_center + max_range / 2)
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
     ax.set_aspect('equal', adjustable='box')
     ax.set_xlabel("X Position (m)")
     ax.set_ylabel("Y Position (m)")
-    ax.set_title("Drone Flight with Time-Varying Wind")
+    ax.set_title("Drone Flight with Constant Wind")
     ax.grid(True, alpha=0.3)
 
     # --- WIND ARROW SETUP ---
@@ -140,7 +126,7 @@ def make_drone_animation(buffers, buffer_idx, config, fps=50):
         0.12, 0.88, 0, 0,
         transform=ax.transAxes,
         color='teal',
-        scale=10,
+        scale=20,
         width=0.008,
         zorder=20 # Ensure it's on top
     )
@@ -169,10 +155,8 @@ def make_drone_animation(buffers, buffer_idx, config, fps=50):
         s = frames[i]
         p_x, p_y, phi = s[0], s[1], s[2]
 
-        # 1. Update Wind Arrow based on dynamics equation
-        w_x = A_w * np.cos(omega * t)
-        w_y = A_w * np.sin(omega * t)
-        wind_arrow.set_UVC(w_x, w_y)
+        # 1. Update Wind Arrow (constant wind)
+        wind_arrow.set_UVC(wind_x, wind_y)
 
         # 2. Update Drone
         traj_line.set_data(frames[:i + 1, 0], frames[:i + 1, 1])
@@ -192,6 +176,54 @@ def make_drone_animation(buffers, buffer_idx, config, fps=50):
     anim.save(tmp.name, writer="pillow", fps=fps)
     plt.close(fig)
     return tmp.name
+
+
+def plot_state_components(buffers, buffer_idx, config):
+    """Plot velocities, angle, and angular velocity with normalization bounds."""
+    states = np.array(buffers["states"][0, :buffer_idx, :])
+    dt = config["env_params"]["dt"]
+    time = np.arange(buffer_idx) * dt
+
+    norm_params = config["normalization_params"]["state"]
+    state_min = norm_params["min"]
+    state_max = norm_params["max"]
+
+    fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+
+    # Velocities subplot (v_x, v_y)
+    ax = axes[0]
+    ax.plot(time, states[:, 3], label="v_x")
+    ax.plot(time, states[:, 4], label="v_y")
+    ax.axhline(state_min[3], color='r', linestyle='--', alpha=0.5, label="bounds")
+    ax.axhline(state_max[3], color='r', linestyle='--', alpha=0.5)
+    ax.set_ylabel("Velocity (m/s)")
+    ax.set_ylim(state_min[3], state_max[3])
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    # Angle subplot (phi)
+    ax = axes[1]
+    ax.plot(time, states[:, 2], label="phi")
+    ax.axhline(state_min[2], color='r', linestyle='--', alpha=0.5, label="bounds")
+    ax.axhline(state_max[2], color='r', linestyle='--', alpha=0.5)
+    ax.set_ylabel("Angle (rad)")
+    ax.set_ylim(state_min[2], state_max[2])
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    # Angular velocity subplot (phi_dot)
+    ax = axes[2]
+    ax.plot(time, states[:, 5], label="phi_dot")
+    ax.axhline(state_min[5], color='r', linestyle='--', alpha=0.5, label="bounds")
+    ax.axhline(state_max[5], color='r', linestyle='--', alpha=0.5)
+    ax.set_ylabel("Angular Vel (rad/s)")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylim(state_min[5], state_max[5])
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    return fig
 
 
 def main(config, save_dir):
@@ -220,29 +252,17 @@ def main(config, save_dir):
         config, dynamics_model, init_params, trainer_key
     )
 
-    # Initialize dynamics evaluator
-    evaluator = DynamicsEvaluator(dynamics_model.pred_one_step)
+    # Initialize evaluator
+    evaluator = init_evaluator(config)
 
-    key, action_key = jax.random.split(key)
-    eval_actions = jax.random.uniform(
-        action_key,
-        shape=(config["eval_traj_horizon"], config["dim_action"]),
-        minval=jnp.array(config["normalization_params"]["action"]["min"]),
-        maxval=jnp.array(config["normalization_params"]["action"]["max"]),
+    # Initial evaluation before training
+    eval_results = evaluator.evaluate(train_state.params)
+    init_cov_trace = (
+        jnp.trace(train_state.covariance) / train_state.covariance.shape[0]
+        if train_state.covariance is not None
+        else 0.0
     )
-
-    key, reset_key = jax.random.split(key)
-    eval_trajectory = [reset_fn(reset_key)]
-    current_state = eval_trajectory[0]
-    for action in eval_actions:
-        next_state, _, _, _, _, _ = step_fn(current_state, 0, action)
-        eval_trajectory.append(next_state)
-        current_state = next_state
-
-    eval_trajectory_data = {
-        "trajectory": jnp.array(eval_trajectory),
-        "actions": eval_actions,
-    }
+    wandb.log({**eval_results, "eval/cov_trace": float(init_cov_trace)}, step=0)
 
     # Initialize cost function
     cost_fn = init_cost(config, dynamics_model)
@@ -264,20 +284,6 @@ def main(config, save_dir):
         f"Starting simulation for {config['total_steps']} steps "
     )
 
-    initial_multi_step_loss = evaluator.compute_multi_step_loss(
-        train_state.params, eval_trajectory_data
-    )
-    initial_one_step_loss = evaluator.compute_one_step_loss(
-        train_state.params, eval_trajectory_data
-    )
-    wandb.log(
-        {
-            "eval/multi_step_loss": initial_multi_step_loss,
-            "eval/one_step_loss": initial_one_step_loss,
-        },
-        step=0,
-    )
-
     episode_length = 0
 
     # Reward component accumulators
@@ -290,6 +296,7 @@ def main(config, save_dir):
     key, reset_key = jax.random.split(key)
     state = reset_fn(reset_key)
     current_obs = get_obs_fn(state)
+    goal_state = np.array(config["cost_fn_params"]["goal_state"])
 
     for step in range(1, config["total_steps"] + 1):
 
@@ -323,6 +330,7 @@ def main(config, save_dir):
         cost_params = {
             "dyn_params": train_state.params,
             "params_cov_model": cov_matrix,
+            "goal_state": goal_state,
         }
         key, planner_key = jax.random.split(key)
         planner_state = planner_state.replace(key=planner_key)
@@ -375,6 +383,27 @@ def main(config, save_dir):
         if step % config["train_policy_freq"] == 0:
             # Unused for policies like iCEM
             pass
+
+        # Evaluate model
+        if step % config["eval_freq"] == 0:
+            # Run rollout evaluation
+            eval_results = evaluator.evaluate(train_state.params)
+
+            # Track covariance trace if available
+            cov_trace = (
+                jnp.trace(train_state.covariance)
+                if train_state.covariance is not None
+                else 0.0
+            )
+            cov_trace_per_param = cov_trace / train_state.covariance.shape[0] if train_state.covariance is not None else 0.0
+
+            wandb.log(
+                {
+                    **eval_results,
+                    "eval/cov_trace": float(cov_trace_per_param),
+                },
+                step=step,
+            )
 
         # Train model
         # buffer_idx >= 2 to ensure we have at least one full transition
@@ -459,6 +488,14 @@ def main(config, save_dir):
         plt.close(fig)
         print("Trajectory plot logged to wandb.")
 
+        print("Generating state components plot...")
+        fig = plot_state_components(buffers, buffer_idx, config)
+        wandb.log(
+            {"trajectory/state_components": wandb.Image(fig)}, step=config["total_steps"]
+        )
+        plt.close(fig)
+        print("State components plot logged to wandb.")
+
         # Animation
         print("Generating drone animation...")
         gif_path = make_drone_animation(buffers, buffer_idx, config)
@@ -481,16 +518,23 @@ if __name__ == "__main__":
         help="Custom name for the W&B run.",
     )
     parser.add_argument(
+        "--lambdas",
+        type=float,
+        nargs="+",
+        default=None,
+        help="List of weight_info values to sweep.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Starting random seed.",
+    )
+    parser.add_argument(
         "--num-seeds",
         type=int,
         default=1,
-        help="Number of random seeds to run.",
-    )
-    parser.add_argument(
-        "--meta-seed",
-        type=int,
-        default=42,
-        help="A seed to generate the run seeds.",
+        help="Number of seeds to run for each lambda value.",
     )
     parser.add_argument(
         "--save-dir",
@@ -507,28 +551,32 @@ if __name__ == "__main__":
     with open(config_path, "r") as f:
         CONFIG = json.load(f)
 
-    if args.meta_seed is not None:
-        rng = np.random.default_rng(args.meta_seed)
-        seeds = rng.integers(low=0, high=2**32 - 1, size=args.num_seeds)
+    run_name_base = args.run_name or "drone"
+
+    if args.lambdas is None:
+        lambdas = [
+            CONFIG["cost_fn_params"]["weight_info"]
+        ]
     else:
-        seeds = range(args.num_seeds)
+        lambdas = args.lambdas
 
-    for seed_idx, seed in enumerate(seeds):
-        print(f"--- Starting run for seed #{seed} ---")
-        run_config = copy.deepcopy(CONFIG)
-        run_config["seed"] = int(seed)
-        run_config["wandb_group"] = "planar_drone_wind"
+    for lam_idx, lam in enumerate(lambdas, start=1):
+        for seed_idx in range(1, args.num_seeds + 1):
+            seed = args.seed + seed_idx - 1
+            print(f"--- Starting run for lam{lam_idx} (lambda={lam}), run {seed_idx}/{args.num_seeds} ---")
+            run_config = copy.deepcopy(CONFIG)
+            run_config["seed"] = seed
+            run_config["wandb_group"] = "planar_drone_wind"
+            run_config["cost_fn_params"]["weight_info"] = lam
 
-        if args.run_name:
-            run_name_base = args.run_name
-        else:
-            run_name_base = "drone"
+            # Build run name: base_lam{idx}_seed{idx}
+            run_name = run_name_base
+            if len(lambdas) > 1:
+                run_name = f"{run_name}_lam{lam}"
+            if args.num_seeds > 1:
+                run_name = f"{run_name}_{seed_idx}"
+            run_config["wandb_run_name"] = run_name
 
-        if args.num_seeds > 1:
-            run_config["wandb_run_name"] = f"{run_name_base}_seed_{seed_idx}"
-        else:
-            run_config["wandb_run_name"] = run_name_base
-
-        main(run_config, save_dir=args.save_dir)
+            main(run_config, save_dir=args.save_dir)
 
     print("All experiments complete.")

@@ -8,9 +8,28 @@
   "train_model_freq": 1,
   "train_policy_freq": 1,
   "normalize_freq": 1000000,
-  "eval_freq": 10,
-  "eval_traj_horizon": 50,
+  "eval_freq": 50,
   "buffer_size": 1000,
+
+  "evaluator_type": "rollout",
+  "evaluator_params": {
+    "seed": 123,
+    "max_steps": 200,
+    "num_episodes": 1,
+    "eval_cost_types": ["goal_cost", "terminal_goal_cost"],
+    "env_params": {},
+    "dynamics_params": {},
+    "planner_params": {},
+    "cost_fn_params": {
+      "weight_jerk": 0.001,
+      "weight_control": 0.01,
+      "weight_info": 0.0,
+      "weight_ground": 1e8,
+      "goal_state": [0.0, 10.0, 0.0, 0.0, 0.0, 0.0],
+      "state_weights": [1.0, 1.0, 1.0, 0.5, 0.5, 1.0],
+      "meas_noise_diag": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+    }
+  },
 
   "normalization": {
     "method": "static"
@@ -23,7 +42,13 @@
     "mass": 1.0,
     "gravity": 9.81,
     "arm_length": 0.25,
-    "inertia": 0.1
+    "inertia": 0.1,
+    "wind_x": 5.0,
+    "wind_y": 0.0,
+    "svd_rank": 2,
+    "steering_dim": 16,
+    "projection_seed": 42,
+    "ensemble_size": 1
   },
 
   "env_params": {
@@ -31,8 +56,9 @@
     "max_episode_steps": 500,
     "dt": 0.02,
     "max_thrust": 20.0,
-    "true_wind_amplitude": 1.0,
-    "true_wind_frequency": 0.0,
+    "wind_x": 10.0,
+    "wind_y": 0.0,
+    "wind_torque_coeff": 0.2,
     "mass": 1.0,
     "gravity": 9.81,
     "arm_length": 0.25,
@@ -52,22 +78,26 @@
 
   "normalization_params": {
     "state": {
-      "min": [-5.0, -5.0, -3.14, -5.0, -5.0, -5.0],
-      "max": [5.0, 5.0, 3.14, 5.0, 5.0, 5.0]
+      "min": [-30.0, -5.0, -3.14, -30.0, -30.0, -10.0],
+      "max": [30.0, 15.0, 3.14, 30.0, 30.0, 10.0]
     },
     "action": {
       "min": [0.0, 0.0],
-      "max": [15.0, 15.0]
+      "max": [20.0, 20.0]
     },
     "delta": {
-      "min": [-2.0, -2.0],
-      "max": [2.0, 2.0]
+      "min": [-2.0, -2.0, -1.0],
+      "max": [2.0, 2.0, 1.0]
+    },
+    "wind": {
+      "min": [-10.0, -10.0],
+      "max": [10.0, 10.0]
     }
   },
 
   "state_labels": ["p_x", "p_y", "phi", "v_x", "v_y", "phi_dot"],
 
-  "cost_type": "drone_state_tracking_info",
+  "cost_type": "drone_state_tracking_info", 
   "planner_type": "icem",
   "planner_params": {
     "horizon": 25,
@@ -77,13 +107,14 @@
     "learning_rate": 0.9,
     "dim_control": 2,
     "action_low": [0.0, 0.0],
-    "action_high": [15.0, 15.0]
+    "action_high": [20.0, 20.0]
   },
 
   "cost_fn_params": {
     "weight_jerk": 0.001,
     "weight_control": 0.01,
-    "weight_info": 7.5,
+    "weight_info": 10.0,
+    "weight_ground": 1e8,
     "goal_state": [0.0, 10.0, 0.0, 0.0, 0.0, 0.0],
     "state_weights": [1.0, 1.0, 1.0, 0.5, 0.5, 1.0],
     "meas_noise_diag": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
