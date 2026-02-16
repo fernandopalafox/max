@@ -26,8 +26,8 @@ __version__ = "0.1.0"
 from max.environments import init_env, make_env, make_pursuit_evasion_env
 from max.dynamics import (
     DynamicsModel,
-    create_MLP_residual_dynamics,
-    create_analytical_pendulum_dynamics,
+    create_mlp_resnet,
+    create_analytical_pendulum,
 )
 from max.policies import (
     Policy,
@@ -57,7 +57,7 @@ from max.normalizers import (
 from max.buffers import init_jax_buffers, update_buffer_dynamic
 from max.planners import Planner, PlannerState, init_planner
 from max.policy_evaluators import evaluate_policy
-from max.dynamics_evaluators import DynamicsEvaluator
+from max.dynamics_evaluators import init_evaluator
 
 __all__ = [
     # Version
@@ -68,8 +68,8 @@ __all__ = [
     "make_pursuit_evasion_env",
     # Dynamics
     "DynamicsModel",
-    "create_MLP_residual_dynamics",
-    "create_analytical_pendulum_dynamics",
+    "create_mlp_resnet",
+    "create_analytical_pendulum",
     # Policies
     "Policy",
     "PolicyState",

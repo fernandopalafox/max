@@ -70,6 +70,12 @@ def _initialize_normalization_params(config: Dict) -> Dict:
             norm_params["delta"] = compute_static_stats(delta_min, delta_max)
         else:
             norm_params["delta"] = norm_params["state"]
+        if "wind" in static_params:
+            wind_min = jnp.array(static_params["wind"]["min"])
+            wind_max = jnp.array(static_params["wind"]["max"])
+            norm_params["wind"] = compute_static_stats(wind_min, wind_max)
+        else:
+            norm_params["wind"] = {"mean": jnp.zeros(2), "std": jnp.ones(2)}
         return norm_params
 
     elif method == "none":
