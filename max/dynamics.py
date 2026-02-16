@@ -283,7 +283,9 @@ def create_mlp_resnet_tiny_lora(
 
     Required config["dynamics_params"]:
         - nn_features: list of hidden layer sizes
-        - svd_rank: rank of SVD truncation
+        - svd_rank_input: rank of SVD truncation for the input layer
+        - svd_rank_hidden: rank of SVD truncation for hidden layers
+        - svd_rank_output: rank of SVD truncation for the output layer
         - steering_dim: dimension of steering vector per layer
         - ensemble_size: (optional, default 1) number of ensemble members
     """
@@ -291,7 +293,9 @@ def create_mlp_resnet_tiny_lora(
     dim_action = config["dim_action"]
     dyn_params = config["dynamics_params"]
     nn_features = dyn_params["nn_features"]
-    svd_rank = dyn_params["svd_rank"]
+    svd_rank_input = dyn_params["svd_rank_input"]
+    svd_rank_hidden = dyn_params["svd_rank_hidden"]
+    svd_rank_output = dyn_params["svd_rank_output"]
     steering_dim = dyn_params["steering_dim"]
     ensemble_size = dyn_params.get("ensemble_size", 1)
 
@@ -310,7 +314,9 @@ def create_mlp_resnet_tiny_lora(
         nn_features=nn_features,
         input_dim=dim_state + dim_action,
         output_dim=dim_state,
-        svd_rank=svd_rank,
+        svd_rank_input=svd_rank_input,
+        svd_rank_hidden=svd_rank_hidden,
+        svd_rank_output=svd_rank_output,
         steering_dim=steering_dim,
         ensemble_size=ensemble_size,
         pretrained_nn_params=pretrained_nn_params,
@@ -1183,7 +1189,9 @@ def _init_tiny_lora_layers(
     nn_features: Sequence[int],
     input_dim: int,
     output_dim: int,
-    svd_rank: int,
+    svd_rank_input: int,
+    svd_rank_hidden: int,
+    svd_rank_output: int,
     steering_dim: int,
     ensemble_size: int = 1,
     pretrained_nn_params: Optional[dict] = None,
@@ -1196,7 +1204,9 @@ def _init_tiny_lora_layers(
         nn_features: Hidden layer sizes
         input_dim: Input dimension
         output_dim: Output dimension
-        svd_rank: Rank of SVD truncation
+        svd_rank_input: Rank of SVD truncation for the input layer (layer 0)
+        svd_rank_hidden: Rank of SVD truncation for hidden layers
+        svd_rank_output: Rank of SVD truncation for the output layer (last layer)
         steering_dim: Dimension of steering vector per layer
         ensemble_size: Number of ensemble members (default 1 for single model)
         pretrained_nn_params: Optional pretrained MLP params ({"model": {"params": ...}}).
@@ -1245,6 +1255,14 @@ def _init_tiny_lora_layers(
         proj_key = proj_keys[ens_idx]
 
         for i in range(num_layers):
+            # Select appropriate SVD rank for this layer
+            if i == 0:
+                svd_rank = svd_rank_input
+            elif i == num_layers - 1:
+                svd_rank = svd_rank_output
+            else:
+                svd_rank = svd_rank_hidden
+
             layer_name = f"Dense_{i}"
             W = full_nn_params["params"][layer_name]["kernel"]
             b = full_nn_params["params"][layer_name]["bias"]

@@ -165,7 +165,9 @@
     "dynamics_params": {
       "nn_features": [32, 32],
       "ensemble_size": 1,
-      "svd_rank": 4,
+      "svd_rank_input": 6,
+      "svd_rank_hidden": 6,
+      "svd_rank_output": 6,
       "steering_dim": 8,
       "projection_seed": 42,
       "pretrained_params_path": "./data/pretrained_models/mlp_resnet_linear_tracking.pkl"
