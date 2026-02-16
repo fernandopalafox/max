@@ -285,7 +285,6 @@ def create_mlp_resnet_tiny_lora(
         - nn_features: list of hidden layer sizes
         - svd_rank: rank of SVD truncation
         - steering_dim: dimension of steering vector per layer
-        - projection_seed: seed for reproducible random projections
         - ensemble_size: (optional, default 1) number of ensemble members
     """
     dim_state = config["dim_state"]
@@ -294,8 +293,15 @@ def create_mlp_resnet_tiny_lora(
     nn_features = dyn_params["nn_features"]
     svd_rank = dyn_params["svd_rank"]
     steering_dim = dyn_params["steering_dim"]
-    projection_seed = dyn_params["projection_seed"]
     ensemble_size = dyn_params.get("ensemble_size", 1)
+
+    # Load pretrained MLP params if specified
+    pretrained_path = dyn_params.get("pretrained_params_path")
+    pretrained_nn_params = None
+    if pretrained_path:
+        with open(pretrained_path, "rb") as f:
+            pretrained_nn_params = pickle.load(f)
+        print(f"📦 Loaded pretrained MLP weights from {pretrained_path}")
 
     # Initialize TinyLoRA layers
     # Input: state + action, Output: state delta
@@ -306,8 +312,8 @@ def create_mlp_resnet_tiny_lora(
         output_dim=dim_state,
         svd_rank=svd_rank,
         steering_dim=steering_dim,
-        projection_seed=projection_seed,
         ensemble_size=ensemble_size,
+        pretrained_nn_params=pretrained_nn_params,
     )
 
     params = {"model": trainable_v_init, "normalizer": normalizer_params}
@@ -1179,21 +1185,22 @@ def _init_tiny_lora_layers(
     output_dim: int,
     svd_rank: int,
     steering_dim: int,
-    projection_seed: int,
     ensemble_size: int = 1,
+    pretrained_nn_params: Optional[dict] = None,
 ) -> tuple[list, dict]:
     """
     Initialize TinyLoRA layers: compute SVD and random projections for each layer.
 
     Args:
-        key: JAX random key for MLP initialization
+        key: JAX random key for MLP initialization and random projections
         nn_features: Hidden layer sizes
         input_dim: Input dimension
         output_dim: Output dimension
         svd_rank: Rank of SVD truncation
         steering_dim: Dimension of steering vector per layer
-        projection_seed: Seed for reproducible random projections
         ensemble_size: Number of ensemble members (default 1 for single model)
+        pretrained_nn_params: Optional pretrained MLP params ({"model": {"params": ...}}).
+            If provided, uses these weights instead of random initialization.
 
     Returns:
         frozen_layers: List of dicts with W, b, U, Sigma, V, P for each layer.
@@ -1201,11 +1208,9 @@ def _init_tiny_lora_layers(
         trainable_v_init: Dict of steering vectors {"v_0": ..., "v_1": ..., ...}.
             When ensemble_size>1, each value has shape (E, steering_dim).
     """
-    # Split keys for each ensemble member
+    # Split keys for MLP initialization and projections
+    key, proj_base_key = jax.random.split(key)
     keys = jax.random.split(key, ensemble_size)
-
-    # Generate independent projection seeds for each ensemble member
-    proj_base_key = jax.random.key(projection_seed)
     proj_keys = jax.random.split(proj_base_key, ensemble_size)
 
     # Create base MLP class
@@ -1228,7 +1233,11 @@ def _init_tiny_lora_layers(
     all_v_inits = []  # List of dicts, one per ensemble member
 
     for ens_idx in range(ensemble_size):
-        full_nn_params = base_mlp.init(keys[ens_idx], dummy_input)
+        # Use pretrained params if provided, otherwise random init
+        if pretrained_nn_params is not None:
+            full_nn_params = {"params": pretrained_nn_params["model"]["params"]}
+        else:
+            full_nn_params = base_mlp.init(keys[ens_idx], dummy_input)
 
         frozen_layers_single = []
         v_init_single = {}
@@ -1398,10 +1407,17 @@ def create_planar_drone_tiny_lora(
     nn_features = dyn_params["nn_features"]
     svd_rank = dyn_params["svd_rank"]
     steering_dim = dyn_params["steering_dim"]
-    projection_seed = dyn_params["projection_seed"]
     ensemble_size = dyn_params.get("ensemble_size", 1)
     wind_x_param = dyn_params.get("wind_x", 0.0)
     wind_y_param = dyn_params.get("wind_y", 0.0)
+
+    # Load pretrained MLP params if specified
+    pretrained_path = dyn_params.get("pretrained_params_path")
+    pretrained_nn_params = None
+    if pretrained_path:
+        with open(pretrained_path, "rb") as f:
+            pretrained_nn_params = pickle.load(f)
+        print(f"📦 Loaded pretrained MLP weights from {pretrained_path}")
 
     # Initialize TinyLoRA layers for residual MLP
     # Input: [v_x, v_y, phi, wind_x, wind_y] = 5D, Output: 3D acceleration residuals
@@ -1412,8 +1428,8 @@ def create_planar_drone_tiny_lora(
         output_dim=3,
         svd_rank=svd_rank,
         steering_dim=steering_dim,
-        projection_seed=projection_seed,
         ensemble_size=ensemble_size,
+        pretrained_nn_params=pretrained_nn_params,
     )
 
     @jax.jit
@@ -1665,9 +1681,9 @@ def init_dynamics(
     else:
         raise ValueError(f"Unknown dynamics type: '{dynamics_type}'")
 
-    # Check for pretrained parameters
+    # Check for pretrained parameters (skip for tiny_lora which handles it internally)
     pretrained_path = config.get("dynamics_params", {}).get("pretrained_params_path")
-    if pretrained_path:
+    if pretrained_path and dynamics_type not in ["mlp_resnet_tiny_lora", "planar_drone_tiny_lora"]:
         with open(pretrained_path, "rb") as f:
             params = pickle.load(f)
         print(f"📦 Loaded pretrained params from {pretrained_path}")
