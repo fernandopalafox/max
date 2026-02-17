@@ -416,39 +416,39 @@ def main(config, save_dir):
             train_state, loss = trainer.train(train_state, train_data, step=step)
             wandb.log({"train/model_loss": float(loss)}, step=step)
 
-            if step % config["eval_freq"] == 0:
-                multi_step_loss = evaluator.compute_multi_step_loss(
-                    train_state.params, eval_trajectory_data
-                )
-                one_step_loss = evaluator.compute_one_step_loss(
-                    train_state.params, eval_trajectory_data
-                )
+            # if step % config["eval_freq"] == 0:
+            #     multi_step_loss = evaluator.compute_multi_step_loss(
+            #         train_state.params, eval_trajectory_data
+            #     )
+            #     one_step_loss = evaluator.compute_one_step_loss(
+            #         train_state.params, eval_trajectory_data
+            #     )
 
-                # Track covariance trace if available
-                cov_trace = covariance_trace(train_state.covariance)
+            #     # Track covariance trace if available
+            #     cov_trace = covariance_trace(train_state.covariance)
 
-                # Optional parameter difference vs ground-truth if provided
-                # param_diff = 0.0
-                # if config.get("true_params") is not None:
-                #     try:
-                #         diff_tree = jax.tree_map(
-                #             lambda x, y: x - y, train_state.params, config["true_params"]
-                #         )
-                #         param_diff = sum(
-                #             jnp.linalg.norm(leaf)
-                #             for leaf in jax.tree_util.tree_leaves(diff_tree)
-                #         )
-                #     except Exception:
-                #         param_diff = 0.0
+            #     # Optional parameter difference vs ground-truth if provided
+            #     # param_diff = 0.0
+            #     # if config.get("true_params") is not None:
+            #     #     try:
+            #     #         diff_tree = jax.tree_map(
+            #     #             lambda x, y: x - y, train_state.params, config["true_params"]
+            #     #         )
+            #     #         param_diff = sum(
+            #     #             jnp.linalg.norm(leaf)
+            #     #             for leaf in jax.tree_util.tree_leaves(diff_tree)
+            #     #         )
+            #     #     except Exception:
+            #     #         param_diff = 0.0
 
-                wandb.log(
-                    {
-                        "eval/multi_step_loss": multi_step_loss,
-                        "eval/one_step_loss": one_step_loss,
-                        "eval/cov_trace": cov_trace,
-                    },
-                    step=step,
-                )
+            #     wandb.log(
+            #         {
+            #             "eval/multi_step_loss": multi_step_loss,
+            #             "eval/one_step_loss": one_step_loss,
+            #             "eval/cov_trace": cov_trace,
+            #         },
+            #         step=step,
+            #     )
 
         # Handle Buffer Overflow
         if buffer_idx >= config["buffer_size"]:

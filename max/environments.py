@@ -60,6 +60,10 @@ class EnvParams:
     true_B: Any = None
     target_point: Any = None
 
+    # Specific to gridworld
+    maze_layout: Any = None
+    start_pos: Any = None
+
 
 
 
@@ -874,6 +878,86 @@ def make_linear_tracking_env(params: EnvParams, true_A, true_B, target_point):
     return reset_fn, step_fn, get_obs_fn
 
 
+def make_gridworld_env(params: EnvParams, maze_layout, start_pos):
+    """
+    Factory function that creates a gridworld maze environment.
+
+    - State: A 2D vector [x, y] (discrete grid coordinates as floats).
+    - Action: A scalar in {0, 1, 2, 3} mapping to {up, down, left, right}.
+    - Dynamics: Action lookup table from maze_layout bitmask grid.
+      Each cell stores a 4-bit int: bit0=up, bit1=down, bit2=left, bit3=right.
+      If the chosen action's bit is set, the agent moves 1 unit; otherwise stays.
+
+    Args:
+        params: EnvParams dataclass with common environment parameters.
+        maze_layout: 2D list/array of shape (10, 10) with bitmask integers.
+                     maze_layout[y][x] gives available actions at cell (x, y).
+        start_pos: Starting position [x, y].
+
+    Returns:
+        Tuple of (reset_fn, step_fn, get_obs_fn).
+    """
+    maze_arr = jnp.array(maze_layout, dtype=jnp.int32)  # shape (10, 10)
+    start = jnp.array(start_pos, dtype=jnp.float32)
+
+    # Movement deltas indexed by action: 0=up(+y), 1=down(-y), 2=left(-x), 3=right(+x)
+    deltas = jnp.array([
+        [0.0, 1.0],   # action 0: up
+        [0.0, -1.0],  # action 1: down
+        [-1.0, 0.0],  # action 2: left
+        [1.0, 0.0],   # action 3: right
+    ])
+
+    @jax.jit
+    def reset_fn(key: jax.random.PRNGKey):
+        """Reset to the maze starting position."""
+        return start
+
+    @jax.jit
+    def get_obs_fn(state: jnp.ndarray):
+        """Returns state with agent dimension."""
+        return state[None, :]  # Shape: (1, 2)
+
+    @jax.jit
+    def step_fn(state: jnp.ndarray, step_count: int, action: jnp.ndarray):
+        """Steps the gridworld environment forward."""
+        # Round and clip action to discrete {0, 1, 2, 3}
+        action_int = jnp.clip(jnp.round(action.squeeze()).astype(jnp.int32), 0, 3)
+
+        # Current cell coordinates
+        x_int = jnp.round(state[0]).astype(jnp.int32)
+        y_int = jnp.round(state[1]).astype(jnp.int32)
+
+        # Look up bitmask for current cell: maze_arr[y, x]
+        bitmask = maze_arr[y_int, x_int]
+
+        # Check if action is available: (bitmask >> action_int) & 1
+        action_available = (bitmask >> action_int) & 1
+
+        # Compute next state: move if available, stay if wall
+        delta = deltas[action_int]
+        next_state = state + delta * action_available.astype(jnp.float32)
+
+        # Reward is always 0
+        reward = 0.0
+        rewards = jnp.array([reward])
+
+        # No termination in gridworld (agent just explores)
+        terminated = False
+
+        # Check truncation
+        truncated = step_count >= params.max_episode_steps
+
+        observations = get_obs_fn(next_state)
+        info = {
+            "reward": reward,
+        }
+
+        return next_state, observations, rewards, terminated, truncated, info
+
+    return reset_fn, step_fn, get_obs_fn
+
+
 def make_damped_pendulum_env(params: EnvParams, true_b, true_J):
     """
     Factory function that creates a damped pendulum environment.
@@ -1242,6 +1326,11 @@ def init_env(config: Dict[str, Any]):
         true_b = env_params_dict.get("true_b", None)
         true_J = env_params_dict.get("true_J", None)
 
+    # Hacky fix for gridworld-specific params
+    if env_name == "gridworld":
+        maze_layout = env_params_dict.get("maze_layout", None)
+        start_pos = env_params_dict.get("start_pos", None)
+
     # Hacky fix for merging_idm-specific params
     if env_name == "merging_idm":
         true_T = jnp.array(env_params_dict.get("true_T"))
@@ -1265,6 +1354,8 @@ def init_env(config: Dict[str, Any]):
         return make_blocker_goal_seeker_env(params)
     elif env_name == "linear_tracking":
         return make_linear_tracking_env(params, true_A, true_B, target_point)
+    elif env_name == "gridworld":
+        return make_gridworld_env(params, maze_layout, start_pos)
     elif env_name == "damped_pendulum":
         return make_damped_pendulum_env(params, true_b, true_J)
     elif env_name == "merging_idm":

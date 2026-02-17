@@ -1,0 +1,552 @@
+{
+  "data_collection": {
+    "num_episodes": 200,
+    "max_episode_length": 100,
+    "seed": 42,
+    "save_path": "./data/pretraining_data",
+    "wandb_project": "gridworld_data_collection",
+    "plot_freq": 20,
+    "num_agents": 1,
+    "dim_state": 2,
+    "dim_action": 1,
+    "state_labels": [
+      "pos_x",
+      "pos_y"
+    ],
+    "env_name": "gridworld",
+    "env_params": {
+      "num_agents": 1,
+      "box_half_width": 100.0,
+      "max_episode_steps": 100,
+      "dt": 0.1,
+      "start_pos": [
+        0,
+        0
+      ],
+      "maze_layout": [
+        [
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          11,
+          13,
+          12,
+          5,
+          0,
+          9,
+          12,
+          5,
+          0,
+          0
+        ],
+        [
+          11,
+          7,
+          0,
+          3,
+          0,
+          3,
+          0,
+          3,
+          0,
+          0
+        ],
+        [
+          11,
+          7,
+          0,
+          3,
+          0,
+          3,
+          0,
+          3,
+          0,
+          0
+        ],
+        [
+          11,
+          7,
+          0,
+          3,
+          0,
+          3,
+          0,
+          3,
+          0,
+          0
+        ],
+        [
+          10,
+          15,
+          12,
+          14,
+          12,
+          14,
+          12,
+          15,
+          12,
+          4
+        ],
+        [
+          0,
+          3,
+          0,
+          0,
+          0,
+          0,
+          0,
+          3,
+          0,
+          0
+        ],
+        [
+          0,
+          10,
+          12,
+          4,
+          0,
+          8,
+          12,
+          6,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    "dynamics": "linear",
+    "dynamics_params": {
+      "init_A": [
+        [
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0
+        ]
+      ],
+      "init_B": [
+        [
+          1.0
+        ],
+        [
+          1.0
+        ]
+      ]
+    },
+    "trainer": "ekf",
+    "trainer_params": {
+      "learning_rate": 1.0,
+      "weight_decay": 0.0,
+      "proc_noise_init": 0.0,
+      "proc_noise_decay": 1.0,
+      "proc_noise_floor": 0.0,
+      "init_cov_scale": 0.1,
+      "jitter": 0.0
+    },
+    "planner_type": "icem",
+    "planner_params": {
+      "horizon": 10,
+      "batch_size": 100,
+      "max_iter": 3,
+      "elit_frac": 0.1,
+      "learning_rate": 0.9,
+      "dim_control": 1,
+      "action_low": [
+        0.0
+      ],
+      "action_high": [
+        3.0
+      ]
+    },
+    "cost_type": "linear_tracking_info",
+    "cost_fn_params": {
+      "weight_jerk": 0.0,
+      "weight_control": 0.01,
+      "weight_info": 0.0,
+      "goal_state": [
+        9,
+        5
+      ],
+      "meas_noise_diag": [
+        0.1,
+        0.1
+      ]
+    },
+    "normalization": {
+      "method": "static"
+    },
+    "normalization_params": {
+      "state": {
+        "min": [
+          0.0,
+          0.0
+        ],
+        "max": [
+          9.0,
+          9.0
+        ]
+      },
+      "action": {
+        "min": [
+          0.0
+        ],
+        "max": [
+          3.0
+        ]
+      },
+      "delta": {
+        "min": [
+          -1.0,
+          -1.0
+        ],
+        "max": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "domain_randomization": {
+      "goal_state": {
+        "min": [
+          8,
+          4
+        ],
+        "max": [
+          9,
+          5
+        ]
+      }
+    }
+  },
+  "pretraining": {
+    "seed": 42,
+    "wandb_project": "gridworld_pretraining",
+    "data_path": "./data/pretraining_data/gridworld_buffer.pkl",
+    "save_path": "./data/pretrained_models",
+    "num_epochs": 150,
+    "batch_size": 64,
+    "train_split": 0.8,
+    "dim_state": 2,
+    "dim_action": 1,
+    "dynamics": "mlp_resnet",
+    "dynamics_params": {
+      "nn_features": [
+        64,
+        64
+      ],
+      "ensemble_size": 1
+    },
+    "trainer": "gd",
+    "trainer_params": {
+      "learning_rate": 0.0003
+    },
+    "normalization": {
+      "method": "static"
+    },
+    "normalization_params": {
+      "state": {
+        "min": [
+          0.0,
+          0.0
+        ],
+        "max": [
+          9.0,
+          9.0
+        ]
+      },
+      "action": {
+        "min": [
+          0.0
+        ],
+        "max": [
+          3.0
+        ]
+      },
+      "delta": {
+        "min": [
+          -1.0,
+          -1.0
+        ],
+        "max": [
+          1.0,
+          1.0
+        ]
+      }
+    }
+  },
+  "finetuning": {
+    "wandb_project": "gridworld_finetuning",
+    "env_name": "gridworld",
+    "num_agents": 1,
+    "total_steps": 200,
+    "dim_state": 2,
+    "dim_action": 1,
+    "train_freq": 1,
+    "train_model_freq": 1,
+    "train_policy_freq": 1,
+    "normalize_freq": 1000000,
+    "eval_freq": 10,
+    "buffer_size": 2000,
+    "seed": 123,
+    "evaluator_type": "rollout",
+    "evaluator_params": {
+      "seed": 123,
+      "max_steps": 100,
+      "num_rollouts": 5,
+      "goal_state": [
+        9,
+        5
+      ]
+    },
+    "env_params": {
+      "num_agents": 1,
+      "box_half_width": 100.0,
+      "max_episode_steps": 100,
+      "dt": 0.1,
+      "start_pos": [
+        0,
+        0
+      ],
+      "maze_layout": [
+        [
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          11,
+          13,
+          12,
+          12,
+          12,
+          12,
+          12,
+          5,
+          0,
+          0
+        ],
+        [
+          11,
+          7,
+          0,
+          0,
+          0,
+          0,
+          0,
+          3,
+          0,
+          0
+        ],
+        [
+          11,
+          14,
+          12,
+          12,
+          12,
+          5,
+          0,
+          2,
+          0,
+          0
+        ],
+        [
+          3,
+          0,
+          0,
+          0,
+          0,
+          3,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          10,
+          13,
+          12,
+          12,
+          12,
+          14,
+          12,
+          13,
+          12,
+          4
+        ],
+        [
+          0,
+          3,
+          0,
+          0,
+          0,
+          0,
+          0,
+          3,
+          0,
+          0
+        ],
+        [
+          0,
+          10,
+          12,
+          12,
+          12,
+          12,
+          12,
+          6,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    "dynamics": "mlp_resnet_tiny_lora",
+    "dynamics_params": {
+      "nn_features": [
+        64,
+        64
+      ],
+      "ensemble_size": 1,
+      "svd_rank": 4,
+      "steering_dim": 4,
+      "projection_seed": 42,
+      "pretrained_params_path": "./data/pretrained_models/mlp_resnet_gridworld.pkl"
+    },
+    "trainer": "ekf",
+    "trainer_params": {
+      "learning_rate": 1.0,
+      "weight_decay": 0.0,
+      "proc_noise_init": 0.01,
+      "proc_noise_decay": 0.99,
+      "proc_noise_floor": 0.001,
+      "init_cov_scale": 0.1,
+      "jitter": 1e-06
+    },
+    "planner_type": "icem",
+    "planner_params": {
+      "horizon": 10,
+      "batch_size": 100,
+      "max_iter": 3,
+      "elit_frac": 0.1,
+      "learning_rate": 0.9,
+      "dim_control": 1,
+      "action_low": [
+        0.0
+      ],
+      "action_high": [
+        3.0
+      ]
+    },
+    "cost_type": "linear_tracking_info",
+    "cost_fn_params": {
+      "weight_jerk": 0.0,
+      "weight_control": 0.01,
+      "weight_info": 1.0,
+      "goal_state": [
+        9,
+        5
+      ],
+      "meas_noise_diag": [
+        0.1,
+        0.1
+      ]
+    },
+    "normalization": {
+      "method": "static"
+    },
+    "normalization_params": {
+      "state": {
+        "min": [
+          0.0,
+          0.0
+        ],
+        "max": [
+          9.0,
+          9.0
+        ]
+      },
+      "action": {
+        "min": [
+          0.0
+        ],
+        "max": [
+          3.0
+        ]
+      },
+      "delta": {
+        "min": [
+          -1.0,
+          -1.0
+        ],
+        "max": [
+          1.0,
+          1.0
+        ]
+      }
+    }
+  }
+}
