@@ -283,19 +283,29 @@ def create_mlp_resnet_tiny_lora(
 
     Required config["dynamics_params"]:
         - nn_features: list of hidden layer sizes
-        - svd_rank: rank of SVD truncation
+        - svd_rank_input: rank of SVD truncation for the input layer
+        - svd_rank_hidden: rank of SVD truncation for hidden layers
+        - svd_rank_output: rank of SVD truncation for the output layer
         - steering_dim: dimension of steering vector per layer
-        - projection_seed: seed for reproducible random projections
         - ensemble_size: (optional, default 1) number of ensemble members
     """
     dim_state = config["dim_state"]
     dim_action = config["dim_action"]
     dyn_params = config["dynamics_params"]
     nn_features = dyn_params["nn_features"]
-    svd_rank = dyn_params["svd_rank"]
+    svd_rank_input = dyn_params.get("svd_rank_input")  # None if not provided
+    svd_rank_hidden = dyn_params["svd_rank_hidden"]
+    svd_rank_output = dyn_params.get("svd_rank_output")  # None if not provided
     steering_dim = dyn_params["steering_dim"]
-    projection_seed = dyn_params["projection_seed"]
     ensemble_size = dyn_params.get("ensemble_size", 1)
+
+    # Load pretrained MLP params if specified
+    pretrained_path = dyn_params.get("pretrained_params_path")
+    pretrained_nn_params = None
+    if pretrained_path:
+        with open(pretrained_path, "rb") as f:
+            pretrained_nn_params = pickle.load(f)
+        print(f"📦 Loaded pretrained MLP weights from {pretrained_path}")
 
     # Initialize TinyLoRA layers
     # Input: state + action, Output: state delta
@@ -304,10 +314,12 @@ def create_mlp_resnet_tiny_lora(
         nn_features=nn_features,
         input_dim=dim_state + dim_action,
         output_dim=dim_state,
-        svd_rank=svd_rank,
+        svd_rank_input=svd_rank_input,
+        svd_rank_hidden=svd_rank_hidden,
+        svd_rank_output=svd_rank_output,
         steering_dim=steering_dim,
-        projection_seed=projection_seed,
         ensemble_size=ensemble_size,
+        pretrained_nn_params=pretrained_nn_params,
     )
 
     params = {"model": trainable_v_init, "normalizer": normalizer_params}
@@ -326,6 +338,106 @@ def create_mlp_resnet_tiny_lora(
         x = jnp.concatenate([normalized_state, normalized_action], axis=-1)
 
         return _tiny_lora_forward(x, params["model"], frozen_layers, ensemble_size)
+
+    @jax.jit
+    def pred_one_step(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts the absolute next state using a residual"""
+        normalized_delta = pred_norm_delta(params, state, action)
+        delta = normalizer.unnormalize(
+            params["normalizer"]["delta"], normalized_delta
+        )
+        return state + delta
+
+    return (
+        DynamicsModel(
+            pred_one_step=pred_one_step, pred_norm_delta=pred_norm_delta
+        ),
+        params,
+    )
+
+
+def create_mlp_resnet_lora_xs(
+    key: jax.Array,
+    config: dict,
+    normalizer: Normalizer,
+    normalizer_params: Optional[jnp.ndarray] = None,
+) -> DynamicsModel:
+    """
+    Creates an MLP ResNet dynamics model with LoRA-XS for efficient adaptation.
+
+    Same architecture as create_mlp_resnet, but uses LoRA-XS to modify layer weights.
+    The effective weight for each layer is: W' = W + U @ diag(Sigma) @ R @ V.T
+
+    Unlike TinyLoRA which uses random projection matrices P with steering vectors v,
+    LoRA-XS trains the R matrix (r x r) directly, giving full expressivity within
+    the rank-r subspace.
+
+    Supports ensembles: when ensemble_size > 1, initializes multiple independent
+    networks and returns the mean prediction across ensemble members.
+
+    Trainable Params: R matrices for each layer (r^2 params per layer)
+    Frozen (in closure): For each layer: W, b, U, Sigma, V
+
+    Required config["dynamics_params"]:
+        - nn_features: list of hidden layer sizes
+        - svd_rank_input: rank for input layer (determines R_0 size)
+        - svd_rank_hidden: rank for hidden layers
+        - svd_rank_output: rank for output layer
+        - ensemble_size: (optional, default 1) number of ensemble members
+        - r_init_std: (optional, default 1e-5) std for Gaussian R initialization
+        - pretrained_params_path: (optional) path to pretrained MLP params
+    """
+    dim_state = config["dim_state"]
+    dim_action = config["dim_action"]
+    dyn_params = config["dynamics_params"]
+    nn_features = dyn_params["nn_features"]
+    svd_rank_input = dyn_params.get("svd_rank_input")  # None if not provided
+    svd_rank_hidden = dyn_params["svd_rank_hidden"]
+    svd_rank_output = dyn_params.get("svd_rank_output")  # None if not provided
+    ensemble_size = dyn_params.get("ensemble_size", 1)
+    r_init_std = dyn_params.get("r_init_std", 1e-5)
+
+    # Load pretrained MLP params if specified
+    pretrained_path = dyn_params.get("pretrained_params_path")
+    pretrained_nn_params = None
+    if pretrained_path:
+        with open(pretrained_path, "rb") as f:
+            pretrained_nn_params = pickle.load(f)
+        print(f"📦 Loaded pretrained MLP weights from {pretrained_path}")
+
+    # Initialize LoRA-XS layers
+    # Input: state + action, Output: state delta
+    frozen_layers, trainable_R_init = _init_lora_xs_layers(
+        key=key,
+        nn_features=nn_features,
+        input_dim=dim_state + dim_action,
+        output_dim=dim_state,
+        svd_rank_input=svd_rank_input,
+        svd_rank_hidden=svd_rank_hidden,
+        svd_rank_output=svd_rank_output,
+        ensemble_size=ensemble_size,
+        pretrained_nn_params=pretrained_nn_params,
+        r_init_std=r_init_std,
+    )
+
+    params = {"model": trainable_R_init, "normalizer": normalizer_params}
+
+    @jax.jit
+    def pred_norm_delta(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts the normalized change in state (for training).
+
+        For ensembles, returns the mean prediction across all members.
+        """
+        norm_params = params["normalizer"]
+        normalized_state = normalizer.normalize(norm_params["state"], state)
+        normalized_action = normalizer.normalize(norm_params["action"], action)
+        x = jnp.concatenate([normalized_state, normalized_action], axis=-1)
+
+        return _lora_xs_forward(x, params["model"], frozen_layers, ensemble_size)
 
     @jax.jit
     def pred_one_step(
@@ -1177,23 +1289,28 @@ def _init_tiny_lora_layers(
     nn_features: Sequence[int],
     input_dim: int,
     output_dim: int,
-    svd_rank: int,
+    svd_rank_input: int,
+    svd_rank_hidden: int,
+    svd_rank_output: int,
     steering_dim: int,
-    projection_seed: int,
     ensemble_size: int = 1,
+    pretrained_nn_params: Optional[dict] = None,
 ) -> tuple[list, dict]:
     """
     Initialize TinyLoRA layers: compute SVD and random projections for each layer.
 
     Args:
-        key: JAX random key for MLP initialization
+        key: JAX random key for MLP initialization and random projections
         nn_features: Hidden layer sizes
         input_dim: Input dimension
         output_dim: Output dimension
-        svd_rank: Rank of SVD truncation
+        svd_rank_input: Rank of SVD truncation for the input layer (layer 0)
+        svd_rank_hidden: Rank of SVD truncation for hidden layers
+        svd_rank_output: Rank of SVD truncation for the output layer (last layer)
         steering_dim: Dimension of steering vector per layer
-        projection_seed: Seed for reproducible random projections
         ensemble_size: Number of ensemble members (default 1 for single model)
+        pretrained_nn_params: Optional pretrained MLP params ({"model": {"params": ...}}).
+            If provided, uses these weights instead of random initialization.
 
     Returns:
         frozen_layers: List of dicts with W, b, U, Sigma, V, P for each layer.
@@ -1201,11 +1318,9 @@ def _init_tiny_lora_layers(
         trainable_v_init: Dict of steering vectors {"v_0": ..., "v_1": ..., ...}.
             When ensemble_size>1, each value has shape (E, steering_dim).
     """
-    # Split keys for each ensemble member
+    # Split keys for MLP initialization and projections
+    key, proj_base_key = jax.random.split(key)
     keys = jax.random.split(key, ensemble_size)
-
-    # Generate independent projection seeds for each ensemble member
-    proj_base_key = jax.random.key(projection_seed)
     proj_keys = jax.random.split(proj_base_key, ensemble_size)
 
     # Create base MLP class
@@ -1228,7 +1343,11 @@ def _init_tiny_lora_layers(
     all_v_inits = []  # List of dicts, one per ensemble member
 
     for ens_idx in range(ensemble_size):
-        full_nn_params = base_mlp.init(keys[ens_idx], dummy_input)
+        # Use pretrained params if provided, otherwise random init
+        if pretrained_nn_params is not None:
+            full_nn_params = {"params": pretrained_nn_params["model"]["params"]}
+        else:
+            full_nn_params = base_mlp.init(keys[ens_idx], dummy_input)
 
         frozen_layers_single = []
         v_init_single = {}
@@ -1236,9 +1355,22 @@ def _init_tiny_lora_layers(
         proj_key = proj_keys[ens_idx]
 
         for i in range(num_layers):
+            # Select appropriate SVD rank for this layer
+            if i == 0:
+                svd_rank = svd_rank_input
+            elif i == num_layers - 1:
+                svd_rank = svd_rank_output
+            else:
+                svd_rank = svd_rank_hidden
+
             layer_name = f"Dense_{i}"
             W = full_nn_params["params"][layer_name]["kernel"]
             b = full_nn_params["params"][layer_name]["bias"]
+
+            # Skip LoRA for this layer if svd_rank is None
+            if svd_rank is None:
+                frozen_layers_single.append({"W": W, "b": b})
+                continue
 
             svd_components = _compute_svd_components(W, svd_rank)
 
@@ -1305,20 +1437,25 @@ def _tiny_lora_forward_single(
 
     for i in range(num_layers):
         layer = frozen_layers[i]
-        v = params_model[f"v_{i}"]
 
-        # Compute Delta = sum_j v[j] * P[j] using einsum
-        Delta = jnp.einsum("u,urk->rk", v, layer["P"])
+        if "U" not in layer:
+            # No LoRA for this layer - use frozen weights directly
+            x = x @ layer["W"] + layer["b"]
+        else:
+            v = params_model[f"v_{i}"]
 
-        # Compute weight modification: U @ diag(Sigma) @ Delta @ V.T
-        SigmaDelta = layer["Sigma"][:, None] * Delta
-        W_delta = layer["U"] @ SigmaDelta @ layer["V"].T
+            # Compute Delta = sum_j v[j] * P[j] using einsum
+            Delta = jnp.einsum("u,urk->rk", v, layer["P"])
 
-        # Effective weight
-        W_eff = layer["W"] + W_delta
+            # Compute weight modification: U @ diag(Sigma) @ Delta @ V.T
+            SigmaDelta = layer["Sigma"][:, None] * Delta
+            W_delta = layer["U"] @ SigmaDelta @ layer["V"].T
 
-        # Apply layer
-        x = x @ W_eff + layer["b"]
+            # Effective weight
+            W_eff = layer["W"] + W_delta
+
+            # Apply layer
+            x = x @ W_eff + layer["b"]
 
         # Apply activation (tanh) for all but last layer
         if i < num_layers - 1:
@@ -1363,6 +1500,222 @@ def _tiny_lora_forward(
     return jnp.mean(outputs, axis=0)
 
 
+# --- LoRA-XS ---
+def _init_lora_xs_layers(
+    key: jax.Array,
+    nn_features: Sequence[int],
+    input_dim: int,
+    output_dim: int,
+    svd_rank_input: int,
+    svd_rank_hidden: int,
+    svd_rank_output: int,
+    ensemble_size: int = 1,
+    pretrained_nn_params: Optional[dict] = None,
+    r_init_std: float = 1e-5,
+) -> tuple[list, dict]:
+    """
+    Initialize LoRA-XS layers: compute SVD for each layer.
+
+    Unlike TinyLoRA, LoRA-XS trains the R matrix directly without random projections.
+    Update formula: W' = W + U @ diag(Sigma) @ R @ V.T
+
+    Args:
+        key: JAX random key for MLP initialization and R matrix initialization
+        nn_features: Hidden layer sizes
+        input_dim: Input dimension
+        output_dim: Output dimension
+        svd_rank_input: Rank for input layer (determines R_0 size)
+        svd_rank_hidden: Rank for hidden layers
+        svd_rank_output: Rank for output layer
+        ensemble_size: Number of ensemble members (default 1 for single model)
+        pretrained_nn_params: Optional pretrained MLP params ({"model": {"params": ...}}).
+            If provided, uses these weights instead of random initialization.
+        r_init_std: Standard deviation for Gaussian initialization of R matrices.
+            Default 1e-5 ensures model starts nearly identical to pretrained.
+
+    Returns:
+        frozen_layers: List of dicts with W, b, U, Sigma, V for each layer.
+            When ensemble_size>1, each value has shape (E, ...).
+        trainable_R_init: Dict of R matrices {"R_0": ..., "R_1": ..., ...}.
+            When ensemble_size>1, each value has shape (E, r, r).
+    """
+    # Split keys for MLP initialization and R matrix initialization
+    key, r_init_key = jax.random.split(key)
+    keys = jax.random.split(key, ensemble_size)
+
+    # Create base MLP class
+    class BaseMLP(nn.Module):
+        features: Sequence[int]
+
+        @nn.compact
+        def __call__(self, x):
+            for feat in self.features:
+                x = nn.Dense(feat)(x)
+                x = nn.tanh(x)
+            return nn.Dense(output_dim)(x)
+
+    base_mlp = BaseMLP(features=nn_features)
+    dummy_input = jnp.ones((input_dim,))
+    num_layers = len(nn_features) + 1
+
+    # Initialize all ensemble members
+    all_frozen_layers = []
+    all_R_inits = []
+
+    for ens_idx in range(ensemble_size):
+        # Use pretrained params if provided, otherwise random init
+        if pretrained_nn_params is not None:
+            full_nn_params = {"params": pretrained_nn_params["model"]["params"]}
+        else:
+            full_nn_params = base_mlp.init(keys[ens_idx], dummy_input)
+
+        frozen_layers_single = []
+        R_init_single = {}
+
+        # Get a unique key for this ensemble member's R matrices
+        r_key = jax.random.fold_in(r_init_key, ens_idx)
+
+        for i in range(num_layers):
+            # Select appropriate SVD rank for this layer
+            if i == 0:
+                svd_rank = svd_rank_input
+            elif i == num_layers - 1:
+                svd_rank = svd_rank_output
+            else:
+                svd_rank = svd_rank_hidden
+
+            layer_name = f"Dense_{i}"
+            W = full_nn_params["params"][layer_name]["kernel"]
+            b = full_nn_params["params"][layer_name]["bias"]
+
+            # Skip LoRA for this layer if svd_rank is None
+            if svd_rank is None:
+                frozen_layers_single.append({"W": W, "b": b})
+                continue
+
+            svd_components = _compute_svd_components(W, svd_rank)
+
+            frozen_layers_single.append({
+                "W": W,
+                "b": b,
+                "U": svd_components["U"],
+                "Sigma": svd_components["Sigma"],
+                "V": svd_components["V"],
+            })
+
+            # Initialize R matrix with Gaussian N(0, r_init_std^2)
+            r_key, layer_key = jax.random.split(r_key)
+            R = jax.random.normal(layer_key, (svd_rank, svd_rank)) * r_init_std
+            R_init_single[f"R_{i}"] = R.astype(jnp.float32)
+
+        all_frozen_layers.append(frozen_layers_single)
+        all_R_inits.append(R_init_single)
+
+    # Return structure based on ensemble size
+    if ensemble_size == 1:
+        return all_frozen_layers[0], all_R_inits[0]
+    else:
+        # Stack frozen layers: list of dicts with stacked arrays
+        frozen_layers_stacked = []
+        for layer_idx in range(num_layers):
+            stacked_layer = {
+                k: jnp.stack(
+                    [all_frozen_layers[e][layer_idx][k] for e in range(ensemble_size)],
+                    axis=0,
+                )
+                for k in all_frozen_layers[0][0].keys()
+            }
+            frozen_layers_stacked.append(stacked_layer)
+
+        # Stack trainable params
+        trainable_R_stacked = {
+            k: jnp.stack([all_R_inits[e][k] for e in range(ensemble_size)], axis=0)
+            for k in all_R_inits[0].keys()
+        }
+
+        return frozen_layers_stacked, trainable_R_stacked
+
+
+def _lora_xs_forward_single(
+    x: jnp.ndarray,
+    params_model: dict,
+    frozen_layers: list,
+) -> jnp.ndarray:
+    """
+    Forward pass through a single LoRA-XS MLP.
+
+    Args:
+        x: Input tensor
+        params_model: Dict with R matrices {"R_0": ..., "R_1": ..., ...}
+        frozen_layers: List of frozen layer dicts from _init_lora_xs_layers
+
+    Returns:
+        Output of the LoRA-XS MLP
+    """
+    num_layers = len(frozen_layers)
+
+    for i in range(num_layers):
+        layer = frozen_layers[i]
+
+        if "U" not in layer:
+            # No LoRA for this layer - use frozen weights directly
+            x = x @ layer["W"] + layer["b"]
+        else:
+            R = params_model[f"R_{i}"]
+
+            # Compute weight modification: U @ diag(Sigma) @ R @ V.T
+            SigmaR = layer["Sigma"][:, None] * R
+            W_delta = layer["U"] @ SigmaR @ layer["V"].T
+
+            # Effective weight
+            W_eff = layer["W"] + W_delta
+
+            # Apply layer
+            x = x @ W_eff + layer["b"]
+
+        # Apply activation (tanh) for all but last layer
+        if i < num_layers - 1:
+            x = jnp.tanh(x)
+
+    return x
+
+
+def _lora_xs_forward(
+    x: jnp.ndarray,
+    params_model: dict,
+    frozen_layers: list,
+    ensemble_size: int = 1,
+) -> jnp.ndarray:
+    """
+    Forward pass through LoRA-XS MLP(s).
+
+    Args:
+        x: Input tensor
+        params_model: Dict with R matrices {"R_0": ..., "R_1": ..., ...}.
+            When ensemble_size>1, each value has shape (E, r, r).
+        frozen_layers: List of frozen layer dicts from _init_lora_xs_layers.
+            When ensemble_size>1, each value has shape (E, ...).
+        ensemble_size: Number of ensemble members (default 1 for single model)
+
+    Returns:
+        Output of the LoRA-XS MLP. When ensemble_size>1, returns the mean
+        across ensemble members.
+    """
+    if ensemble_size == 1:
+        return _lora_xs_forward_single(x, params_model, frozen_layers)
+
+    # Ensemble forward pass using vmap
+    def forward_one_member(ens_idx):
+        member_params = {k: params_model[k][ens_idx] for k in params_model}
+        member_frozen = [
+            {k: layer[k][ens_idx] for k in layer} for layer in frozen_layers
+        ]
+        return _lora_xs_forward_single(x, member_params, member_frozen)
+
+    outputs = jax.vmap(forward_one_member)(jnp.arange(ensemble_size))
+    return jnp.mean(outputs, axis=0)
+
+
 def create_planar_drone_tiny_lora(
     key: jax.Array,
     config: dict,
@@ -1398,10 +1751,17 @@ def create_planar_drone_tiny_lora(
     nn_features = dyn_params["nn_features"]
     svd_rank = dyn_params["svd_rank"]
     steering_dim = dyn_params["steering_dim"]
-    projection_seed = dyn_params["projection_seed"]
     ensemble_size = dyn_params.get("ensemble_size", 1)
     wind_x_param = dyn_params.get("wind_x", 0.0)
     wind_y_param = dyn_params.get("wind_y", 0.0)
+
+    # Load pretrained MLP params if specified
+    pretrained_path = dyn_params.get("pretrained_params_path")
+    pretrained_nn_params = None
+    if pretrained_path:
+        with open(pretrained_path, "rb") as f:
+            pretrained_nn_params = pickle.load(f)
+        print(f"📦 Loaded pretrained MLP weights from {pretrained_path}")
 
     # Initialize TinyLoRA layers for residual MLP
     # Input: [v_x, v_y, phi, wind_x, wind_y] = 5D, Output: 3D acceleration residuals
@@ -1412,8 +1772,8 @@ def create_planar_drone_tiny_lora(
         output_dim=3,
         svd_rank=svd_rank,
         steering_dim=steering_dim,
-        projection_seed=projection_seed,
         ensemble_size=ensemble_size,
+        pretrained_nn_params=pretrained_nn_params,
     )
 
     @jax.jit
@@ -1612,6 +1972,11 @@ def init_dynamics(
             key, config, normalizer, normalizer_params
         )
 
+    elif dynamics_type == "mlp_resnet_lora_xs":
+        model, params = create_mlp_resnet_lora_xs(
+            key, config, normalizer, normalizer_params
+        )
+
     elif dynamics_type == "probabilistic_ensemble":
         dim_state = config.dim_state
         dim_action = config.dim_action
@@ -1665,9 +2030,9 @@ def init_dynamics(
     else:
         raise ValueError(f"Unknown dynamics type: '{dynamics_type}'")
 
-    # Check for pretrained parameters
+    # Check for pretrained parameters (skip for tiny_lora/lora_xs which handle it internally)
     pretrained_path = config.get("dynamics_params", {}).get("pretrained_params_path")
-    if pretrained_path:
+    if pretrained_path and dynamics_type not in ["mlp_resnet_tiny_lora", "planar_drone_tiny_lora", "mlp_resnet_lora_xs"]:
         with open(pretrained_path, "rb") as f:
             params = pickle.load(f)
         print(f"📦 Loaded pretrained params from {pretrained_path}")
