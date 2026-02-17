@@ -136,7 +136,6 @@
     "total_steps": 150,
     "dim_state": 4,
     "dim_action": 2,
-    "train_freq": 1,
     "train_model_freq": 1,
     "train_policy_freq": 1,
     "normalize_freq": 1000000,
@@ -161,13 +160,15 @@
       }
     },
 
-    "dynamics": "mlp_resnet_last_layer",
+    "dynamics": "mlp_resnet_lora_xs",
     "dynamics_params": {
       "nn_features": [32, 32],
       "ensemble_size": 1,
-      "svd_rank": 4,
-      "steering_dim": 8,
-      "projection_seed": 42,
+      "svd_rank_input": null,
+      "svd_rank_hidden": 32,
+      "svd_rank_output": null,
+      "steering_dim": 16,
+      "r_init_std": 1e-5,
       "pretrained_params_path": "./data/pretrained_models/mlp_resnet_linear_tracking.pkl"
     },
 
@@ -178,16 +179,16 @@
       "dt": 0.1,
       "max_accel": 2.0,
       "true_A": [
-        [1.0, 0.0, 0.1, 0.02],
-        [0.0, 1.0, -0.015, 0.1],
-        [0.0, 0.0, 0.92, 0.05],
-        [0.0, 0.0, -0.04, 0.88]
+        [1.0, 0.0, 0.1, 0.0],
+        [0.0, 1.0, 0.0, 0.1],
+        [0.0, 0.0, 0.95, 0.3],
+        [0.0, 0.0, -0.3, 0.95]
       ],
       "true_B": [
-        [0.005, 0.001],
-        [-0.0008, 0.005],
-        [0.1, 0.02],
-        [-0.015, 0.1]
+        [0.007, 0.005],
+        [-0.005, 0.007],
+        [0.12, 0.08],
+        [-0.08, 0.12]
       ],
       "target_point": [5.0, 5.0, 0.0, 0.0]
     },

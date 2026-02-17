@@ -158,6 +158,10 @@ def main(config, save_dir, plot_eval=False):
         config, dynamics_model, init_params, trainer_key
     )
 
+    # Count trainable parameters
+    num_params = sum(x.size for x in jax.tree_util.tree_leaves(train_state.params))
+    wandb.config.update({"num_params": num_params})
+
     # Initialize evaluator
     evaluator = init_evaluator(config)
 
