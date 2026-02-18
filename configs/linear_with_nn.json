@@ -132,7 +132,7 @@
   "finetuning": {
     "wandb_project": "linear_with_nn",
     "seed": 43,
-    "save_dir": "./trained_models",
+    "save_dir": null,
     "plot_run": true,
     "plot_eval": true,
     "env_name": "linear_tracking",
