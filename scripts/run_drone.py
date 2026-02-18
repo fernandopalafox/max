@@ -405,14 +405,14 @@ def main(config, save_dir):
         plt.close(fig)
         print("State components plot logged to wandb.")
 
-        # Animation
-        print("Generating drone animation...")
-        gif_path = make_drone_animation(buffers, buffer_idx, config)
-        wandb.log(
-            {"trajectory/animation": wandb.Video(gif_path, format="gif")},
-            step=config["total_steps"],
-        )
-        print("Animation logged to wandb.")
+        # # Animation
+        # print("Generating drone animation...")
+        # gif_path = make_drone_animation(buffers, buffer_idx, config)
+        # wandb.log(
+        #     {"trajectory/animation": wandb.Video(gif_path, format="gif")},
+        #     step=config["total_steps"],
+        # )
+        # print("Animation logged to wandb.")
 
     wandb.finish()
     print("Run complete.")
