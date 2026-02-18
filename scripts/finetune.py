@@ -137,7 +137,7 @@ def main(config):
     key = jax.random.key(config["seed"])
 
     # Read settings from config
-    save_dir = config.get("save_dir")
+    save_dir = config.get("save_dir", None)
     plot_run = config.get("plot_run", True)
     plot_eval = config.get("plot_eval", False)
 
