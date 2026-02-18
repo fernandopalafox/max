@@ -46,15 +46,23 @@ def create_mlp_resnet(
     dummy_state = jnp.ones((dim_state,))
     dummy_action = jnp.ones((dim_action,))
 
-    # Initialize ensemble parameters
-    keys = jax.random.split(key, ensemble_size)
-    if ensemble_size == 1:
-        model_params = base_model.init(keys[0], dummy_state, dummy_action)
+    # Load pretrained MLP params if specified
+    pretrained_path = config.get("dynamics_params", {}).get("pretrained_params_path")
+    if pretrained_path:
+        with open(pretrained_path, "rb") as f:
+            pretrained_nn_params = pickle.load(f)
+        model_params = pretrained_nn_params["model"]
+        print(f"📦 Loaded pretrained MLP weights from {pretrained_path}")
     else:
-        # Stack parameters across ensemble members using vmap
-        model_params = jax.vmap(base_model.init, in_axes=(0, None, None))(
-            keys, dummy_state, dummy_action
-        )
+        # Initialize ensemble parameters
+        keys = jax.random.split(key, ensemble_size)
+        if ensemble_size == 1:
+            model_params = base_model.init(keys[0], dummy_state, dummy_action)
+        else:
+            # Stack parameters across ensemble members using vmap
+            model_params = jax.vmap(base_model.init, in_axes=(0, None, None))(
+                keys, dummy_state, dummy_action
+            )
     params = {"model": model_params, "normalizer": normalizer_params}
 
     def _pred_norm_delta_single(
@@ -142,6 +150,14 @@ def create_mlp_resnet_last_layer(
     dummy_state = jnp.ones((dim_state,))
     dummy_action = jnp.ones((dim_action,))
 
+    # Load pretrained MLP params if specified
+    pretrained_path = config.get("dynamics_params", {}).get("pretrained_params_path")
+    pretrained_nn_params = None
+    if pretrained_path:
+        with open(pretrained_path, "rb") as f:
+            pretrained_nn_params = pickle.load(f)
+        print(f"📦 Loaded pretrained MLP weights from {pretrained_path}")
+
     # Layer naming: Dense_0, Dense_1, ..., Dense_n where n is output layer
     num_hidden = len(nn_features)
     output_layer_name = f"Dense_{num_hidden}"
@@ -151,7 +167,10 @@ def create_mlp_resnet_last_layer(
 
     def init_and_split_params(k):
         """Initialize full params, return (frozen_params, trainable_params)."""
-        full_params = base_model.init(k, dummy_state, dummy_action)
+        if pretrained_nn_params is not None:
+            full_params = {"params": pretrained_nn_params["model"]["params"]}
+        else:
+            full_params = base_model.init(k, dummy_state, dummy_action)
 
         # Extract frozen hidden layer params
         frozen = {"params": {}}
@@ -2029,12 +2048,5 @@ def init_dynamics(
 
     else:
         raise ValueError(f"Unknown dynamics type: '{dynamics_type}'")
-
-    # Check for pretrained parameters (skip for tiny_lora/lora_xs which handle it internally)
-    pretrained_path = config.get("dynamics_params", {}).get("pretrained_params_path")
-    if pretrained_path and dynamics_type not in ["mlp_resnet_tiny_lora", "planar_drone_tiny_lora", "mlp_resnet_lora_xs"]:
-        with open(pretrained_path, "rb") as f:
-            params = pickle.load(f)
-        print(f"📦 Loaded pretrained params from {pretrained_path}")
 
     return model, params
