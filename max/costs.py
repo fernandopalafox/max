@@ -272,6 +272,62 @@ def _terminal_cost_pendulum_swing_up(state):
     return (phi - jnp.pi) ** 2 + 0.1 * phi_dot ** 2
 
 
+def _stage_cost_gridworld_navigation(
+    state, control, cost_params, weight_control, weight_info, weight_time, info_term_fn
+):
+    """
+    Stage cost for gridworld navigation: Manhattan distance + time penalty + control penalty - info bonus.
+
+    Designed for discrete gridworld maze navigation where:
+    - State is (x, y) position in grid
+    - Goal is to reach target position quickly
+    - Time penalty encourages fast completion
+
+    Args:
+        state: Current state (x, y) position
+        control: Current action (discrete: 0=up, 1=down, 2=left, 3=right)
+        cost_params: Dict with 'dyn_params', 'params_cov_model', and 'goal_state'
+        weight_control: Control penalty weight
+        weight_info: Information gathering weight
+        weight_time: Time penalty per step (encourages faster goal reaching)
+        info_term_fn: Information term function (can be None)
+
+    Returns:
+        Stage cost scalar
+    """
+    goal_state = cost_params["goal_state"]
+
+    # Manhattan distance to goal (more appropriate for gridworld than Euclidean)
+    # In a grid, you can only move up/down/left/right, so Manhattan is natural
+    manhattan_distance = jnp.sum(jnp.abs(state - goal_state))
+
+    # Control penalty (small, just to discourage unnecessary movements)
+    control_cost = weight_control * jnp.sum(control ** 2)
+
+    # Time penalty - constant per step
+    # This ensures agent doesn't stall, always has incentive to reach goal
+    time_cost = weight_time
+
+    # Information gathering bonus (exploration)
+    exploration_term = 0.0
+    if info_term_fn is not None and weight_info > 0:
+        exploration_term = -weight_info * info_term_fn(
+            state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
+        )
+
+    return manhattan_distance + control_cost + time_cost + exploration_term
+
+
+def _terminal_cost_gridworld_navigation(state, cost_params):
+    """
+    Terminal cost for gridworld: Manhattan distance to goal.
+
+    Uses Manhattan distance since gridworld only allows axis-aligned movement.
+    """
+    goal_state = cost_params["goal_state"]
+    return jnp.sum(jnp.abs(state - goal_state))
+
+
 def _stage_cost_drone_state_tracking_w_info(
     state, control, cost_params, state_weights, weight_control, weight_info, weight_ground, info_term_fn
 ):
@@ -638,6 +694,57 @@ def init_cost(config, dynamics_model):
             terminal = _terminal_cost_pendulum_swing_up(states[-1])
 
             # 4. Calculate Jerk Cost (on controls)
+            jerk = 0.0
+            if weight_jerk > 0:
+                control_diffs = jnp.diff(controls, axis=0)
+                jerk = weight_jerk * jnp.sum(control_diffs ** 2)
+
+            return jnp.sum(stage_costs) + terminal + jerk
+
+        return cost_fn
+
+    elif cost_type == "gridworld_navigation":
+        # Extract params
+        params = config["cost_fn_params"]
+        weight_jerk = params.get("weight_jerk", 0.0)
+        weight_control = params.get("weight_control", 0.01)
+        weight_info = params.get("weight_info", 0.0)
+        weight_time = params.get("weight_time", 0.1)
+        meas_noise_diag = jnp.array(params["meas_noise_diag"])
+
+        # Create the info term calculator (JIT-able helper)
+        info_term_fn = None
+        if weight_info > 0:
+            info_term_fn = make_info_gathering_term(
+                dynamics_model.pred_one_step, meas_noise_diag
+            )
+
+        # Vectorize stage cost over the horizon
+        stage_cost_vmap = jax.vmap(
+            lambda s, u, cp: _stage_cost_gridworld_navigation(
+                s, u, cp, weight_control, weight_info, weight_time, info_term_fn
+            ),
+            in_axes=(0, 0, None),
+        )
+
+        @jax.jit
+        def cost_fn(init_state, controls, cost_params):
+            """
+            Calculates total trajectory cost for gridworld navigation.
+            Uses Manhattan distance instead of Euclidean for grid-based movement.
+            """
+            # 1. Rollout trajectory
+            states = _rollout(
+                init_state, controls, cost_params, dynamics_model.pred_one_step
+            )
+
+            # 2. Calculate stage costs (on states 0 to T-1)
+            stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
+
+            # 3. Calculate terminal cost (on state T)
+            terminal = _terminal_cost_gridworld_navigation(states[-1], cost_params)
+
+            # 4. Calculate Jerk Cost (on controls) - usually 0 for gridworld
             jerk = 0.0
             if weight_jerk > 0:
                 control_diffs = jnp.diff(controls, axis=0)

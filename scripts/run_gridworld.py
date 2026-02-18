@@ -170,9 +170,9 @@ def main(config, save_dir, plot_eval=False):
     # Initialize cost function
     cost_fn = init_cost(config, dynamics_model)
 
-    # Initialize planner
+    # Initialize planner (pass dynamics_model for A*)
     key, planner_key = jax.random.split(key)
-    planner, planner_state = init_planner(config, cost_fn, planner_key)
+    planner, planner_state = init_planner(config, cost_fn, planner_key, dynamics_model)
 
     # Initialize buffer
     buffers = init_jax_buffers(

@@ -55,11 +55,17 @@ class Planner(NamedTuple):
 
 
 def init_planner(
-    config: Any, cost_fn: CostFn, key: jax.Array
+    config: Any, cost_fn: CostFn, key: jax.Array, dynamics_model=None
 ) -> tuple[Planner, PlannerState]:
     """
     Initializes the appropriate planner based on the configuration.
     The cost function is now a required argument for initialization.
+
+    Args:
+        config: Configuration dictionary
+        cost_fn: Cost function
+        key: JAX random key
+        dynamics_model: Optional dynamics model (required for A* planner)
     """
     planner_type = config.get("planner_type", "icem")
     print(f"🚀 Initializing planner: {planner_type.upper()}")
@@ -70,6 +76,10 @@ def init_planner(
         planner, state = create_icem_planner(config, cost_fn, key)
     elif planner_type == "random":
         planner, state = create_random_planner(config, cost_fn, key)
+    elif planner_type == "astar":
+        if dynamics_model is None:
+            raise ValueError("A* planner requires dynamics_model to be provided")
+        planner, state = create_astar_planner(config, cost_fn, key, dynamics_model)
     # elif planner_type == "ilqr":
     #     planner, state = create_ilqr_planner(config, cost_fn, key) # Future extension
     else:
@@ -369,6 +379,402 @@ def _icem_solve_internal(
     best_controls = final_best_seq.reshape(horizon, dim_control)
 
     return best_controls, new_state
+
+
+# --- A* Implementation ---
+
+
+def create_astar_planner(
+    config: Any, cost_fn: CostFn, key: jax.Array, dynamics_model
+) -> tuple[Planner, PlannerState]:
+    """
+    Creates an A* planner for discrete gridworld navigation.
+
+    Uses the learned dynamics model to predict transitions and searches
+    for an optimal path using Manhattan distance heuristic.
+
+    Uses jax.pure_callback to allow Python control flow within JIT-compiled code.
+
+    Args:
+        config: Configuration dictionary
+        cost_fn: Cost function
+        key: JAX random key
+        dynamics_model: Dynamics model with pred_one_step method
+    """
+    initial_state = PlannerState(key=key)
+
+    planner_params = config.get("planner_params", {})
+    horizon = planner_params.get("horizon", 50)
+    dim_control = planner_params.get("dim_control", 1)
+
+    # Capture the prediction function in the closure
+    pred_one_step_fn = dynamics_model.pred_one_step
+
+    # Create a pure Python function that will be called via callback
+    def _astar_search_callback(init_env_state_flat, goal_state_flat, dyn_params_flat):
+        """Pure Python A* search using learned model (called from JIT via callback)."""
+        # Convert flat arrays to positions
+        start_x = int(round(float(init_env_state_flat[0])))
+        start_y = int(round(float(init_env_state_flat[1])))
+        goal_x = int(round(float(goal_state_flat[0])))
+        goal_y = int(round(float(goal_state_flat[1])))
+
+        start = (start_x, start_y)
+        goal = (goal_x, goal_y)
+
+        # A* search using model predictions
+        path = _astar_search_model_based(
+            start, goal, pred_one_step_fn, dyn_params_flat, horizon
+        )
+
+        # Convert path to actions
+        if len(path) <= 1:
+            print(f"A* failed: no path from {start} to {goal}")
+            actions = jnp.zeros((horizon, dim_control))
+        else:
+            actions_list = []
+            for i in range(len(path) - 1):
+                curr = path[i]
+                next_pos = path[i + 1]
+                action = _position_diff_to_action(curr, next_pos)
+                actions_list.append(action)
+
+            # Pad with "stay" actions
+            while len(actions_list) < horizon:
+                actions_list.append(0.0)
+
+            actions = jnp.array(actions_list[:horizon]).reshape(horizon, dim_control)
+            print(f"A* found path from {start} to {goal}: {len(path)} steps")
+        return actions
+
+    def solve_fn(
+        state: PlannerState,
+        init_env_state: Array,
+        cost_params: dict,
+    ) -> Tuple[Array, PlannerState]:
+        """A* solve function using pure_callback for JIT compatibility."""
+        goal_state = jnp.array(cost_params["goal_state"])
+        dyn_params = cost_params["dyn_params"]
+
+        # Use pure_callback to call Python A* from within JIT
+        result_shape = jax.ShapeDtypeStruct((horizon, dim_control), jnp.float32)
+        actions = jax.pure_callback(
+            _astar_search_callback,
+            result_shape,
+            init_env_state,
+            goal_state,
+            dyn_params,
+        )
+
+        # Update key for consistency
+        new_key = jax.random.split(state.key)[1]
+        new_state = state.replace(key=new_key)
+
+        return actions, new_state
+
+    return Planner(cost_fn=cost_fn, solve_fn=solve_fn), initial_state
+
+
+def _astar_solve_internal(
+    config: Any,
+    state: PlannerState,
+    init_env_state: Array,
+    cost_params: dict,
+) -> Tuple[Array, PlannerState]:
+    """
+    A* search for discrete gridworld navigation.
+
+    The dynamics model predicts continuous states, which are rounded
+    to discrete grid positions for planning.
+
+    Note: This function uses Python control flow (not JIT-compatible),
+    but materializes JAX tracers to concrete values before A* search.
+    """
+    planner_params = config.get("planner_params", {})
+    horizon = planner_params.get("horizon", 50)
+    dim_control = planner_params.get("dim_control", 1)
+
+    # Extract goal from cost_params
+    goal_state = jnp.array(cost_params["goal_state"])
+
+    # Get maze layout from config
+    maze_layout = config.get("env_params", {}).get("maze_layout", None)
+
+    # Convert JAX arrays to concrete Python values (to avoid tracing issues)
+    # Use .item() to materialize the tracer into a concrete scalar
+    start_x = int(round(float(init_env_state[0].item())))
+    start_y = int(round(float(init_env_state[1].item())))
+    goal_x = int(float(goal_state[0].item()))
+    goal_y = int(float(goal_state[1].item()))
+
+    start = (start_x, start_y)
+    goal = (goal_x, goal_y)
+
+    # A* search with maze layout
+    path = _astar_search_grid(start, goal, maze_layout, horizon)
+
+    # Convert path to actions
+    if len(path) <= 1:
+        # No path found or already at goal
+        actions = jnp.zeros((horizon, dim_control))
+    else:
+        actions_list = []
+        for i in range(len(path) - 1):
+            curr = path[i]
+            next_pos = path[i + 1]
+            action = _position_diff_to_action(curr, next_pos)
+            actions_list.append(action)
+
+        # Pad with "stay" actions (action 0) if path is shorter than horizon
+        while len(actions_list) < horizon:
+            actions_list.append(0.0)
+
+        actions = jnp.array(actions_list[:horizon]).reshape(horizon, dim_control)
+
+    # Update key for randomness (even though A* is deterministic)
+    new_key = jax.random.split(state.key)[1]
+    new_state = state.replace(key=new_key)
+
+    return actions, new_state
+
+
+def _manhattan_distance(pos, goal):
+    """Calculate Manhattan distance heuristic."""
+    return abs(pos[0] - goal[0]) + abs(pos[1] - goal[1])
+
+
+def _get_neighbors(pos, maze_layout=None):
+    """
+    Get valid neighboring grid cells based on maze layout.
+
+    Uses bitmask encoding from maze_layout:
+    - Bit 0 (value 1): can move up (y+1)
+    - Bit 1 (value 2): can move down (y-1)
+    - Bit 2 (value 4): can move left (x-1)
+    - Bit 3 (value 8): can move right (x+1)
+
+    Args:
+        pos: (x, y) current position
+        maze_layout: 2D array of bitmasks (None = assume all moves valid)
+
+    Returns:
+        List of valid (x, y) neighbor positions
+    """
+    x, y = pos
+    neighbors = []
+
+    # If no maze layout provided, assume all moves within bounds are valid
+    if maze_layout is None:
+        grid_size = 10
+        if y + 1 < grid_size:
+            neighbors.append((x, y + 1))
+        if y - 1 >= 0:
+            neighbors.append((x, y - 1))
+        if x - 1 >= 0:
+            neighbors.append((x - 1, y))
+        if x + 1 < grid_size:
+            neighbors.append((x + 1, y))
+        return neighbors
+
+    # Get bitmask for current cell
+    if 0 <= y < len(maze_layout) and 0 <= x < len(maze_layout[0]):
+        bitmask = maze_layout[y][x]
+    else:
+        return []  # Out of bounds
+
+    # Check each direction using bitmask
+    # Action 0: up (y+1) - bit 0
+    if (bitmask & 1) and y + 1 < len(maze_layout):
+        neighbors.append((x, y + 1))
+
+    # Action 1: down (y-1) - bit 1
+    if (bitmask & 2) and y - 1 >= 0:
+        neighbors.append((x, y - 1))
+
+    # Action 2: left (x-1) - bit 2
+    if (bitmask & 4) and x - 1 >= 0:
+        neighbors.append((x - 1, y))
+
+    # Action 3: right (x+1) - bit 3
+    if (bitmask & 8) and x + 1 < len(maze_layout[0]):
+        neighbors.append((x + 1, y))
+
+    return neighbors
+
+
+def _position_diff_to_action(curr, next_pos):
+    """Convert position difference to action index."""
+    dx = next_pos[0] - curr[0]
+    dy = next_pos[1] - curr[1]
+
+    if dy == 1:  # up
+        return 0.0
+    elif dy == -1:  # down
+        return 1.0
+    elif dx == -1:  # left
+        return 2.0
+    elif dx == 1:  # right
+        return 3.0
+    else:  # no movement
+        return 0.0
+
+
+def _astar_search_grid(start, goal, maze_layout=None, max_steps=50):
+    """
+    A* search on a discrete grid with obstacle awareness.
+
+    Uses the maze layout bitmasks to determine valid transitions.
+    If no maze layout is provided, assumes all cells are navigable.
+
+    Args:
+        start: (x, y) starting position
+        goal: (x, y) goal position
+        maze_layout: 2D array of bitmasks indicating valid moves
+        max_steps: maximum path length
+
+    Returns:
+        List of (x, y) positions from start to goal
+    """
+    import heapq
+
+    # Priority queue: (f_score, g_score, position, path)
+    open_set = [(0 + _manhattan_distance(start, goal), 0, start, [start])]
+    closed_set = set()
+
+    while open_set:
+        f_score, g_score, current, path = heapq.heappop(open_set)
+
+        # Check if reached goal
+        if current == goal:
+            return path
+
+        # Check if path is too long
+        if g_score >= max_steps:
+            continue
+
+        # Skip if already visited
+        if current in closed_set:
+            continue
+
+        closed_set.add(current)
+
+        # Explore neighbors (respects maze obstacles)
+        for neighbor in _get_neighbors(current, maze_layout):
+            if neighbor in closed_set:
+                continue
+
+            new_g_score = g_score + 1  # Cost to reach neighbor
+            new_h_score = _manhattan_distance(neighbor, goal)
+            new_f_score = new_g_score + new_h_score
+            new_path = path + [neighbor]
+
+            heapq.heappush(open_set, (new_f_score, new_g_score, neighbor, new_path))
+
+    # No path found, return start only
+    return [start]
+
+
+def _astar_search_model_based(start, goal, pred_one_step_fn, dyn_params, max_steps=50):
+    """
+    A* search using learned dynamics model to determine valid transitions.
+
+    For each potential action, queries the model to see if movement is possible.
+    If predicted next state ≈ current state, the action is blocked (wall).
+
+    Args:
+        start: (x, y) starting position
+        goal: (x, y) goal position
+        pred_one_step_fn: Function (params, state, action) -> next_state
+        dyn_params: Model parameters
+        max_steps: Maximum path length
+
+    Returns:
+        List of (x, y) positions from start to goal
+    """
+    import heapq
+
+    # Priority queue: (f_score, g_score, position, path)
+    open_set = [(0 + _manhattan_distance(start, goal), 0, start, [start])]
+    closed_set = set()
+
+    while open_set:
+        f_score, g_score, current, path = heapq.heappop(open_set)
+
+        # Check if reached goal
+        if current == goal:
+            return path
+
+        # Check if path is too long
+        if g_score >= max_steps:
+            continue
+
+        # Skip if already visited
+        if current in closed_set:
+            continue
+
+        closed_set.add(current)
+
+        # Explore neighbors using model predictions
+        for neighbor in _get_neighbors_model_based(current, pred_one_step_fn, dyn_params):
+            if neighbor in closed_set:
+                continue
+
+            new_g_score = g_score + 1
+            new_h_score = _manhattan_distance(neighbor, goal)
+            new_f_score = new_g_score + new_h_score
+            new_path = path + [neighbor]
+
+            heapq.heappush(open_set, (new_f_score, new_g_score, neighbor, new_path))
+
+    # No path found, return start only
+    return [start]
+
+
+def _get_neighbors_model_based(pos, pred_one_step_fn, dyn_params):
+    """
+    Get valid neighboring cells using learned model predictions.
+
+    For each action {0,1,2,3} (up, down, left, right):
+    - Query model: next_state = pred_one_step(params, current_state, action)
+    - If next_state ≈ current_state → blocked (wall)
+    - If next_state ≠ current_state → valid neighbor
+
+    Args:
+        pos: (x, y) current position
+        pred_one_step_fn: Model prediction function
+        dyn_params: Model parameters
+
+    Returns:
+        List of valid (x, y) neighbor positions
+    """
+    x, y = pos
+    current_state = jnp.array([float(x), float(y)])
+    neighbors = []
+
+    # Test each action: 0=up, 1=down, 2=left, 3=right
+    action_deltas = {
+        0: (0, 1),   # up: y+1
+        1: (0, -1),  # down: y-1
+        2: (-1, 0),  # left: x-1
+        3: (1, 0),   # right: x+1
+    }
+
+    for action_idx, (dx, dy) in action_deltas.items():
+        action = jnp.array([float(action_idx)])
+
+        # Query model
+        predicted_next_state = pred_one_step_fn(dyn_params, current_state, action)
+
+        # Round to grid coordinates
+        pred_x = int(round(float(predicted_next_state[0])))
+        pred_y = int(round(float(predicted_next_state[1])))
+
+        # If prediction differs from current position, it's a valid move
+        # (model learned this action causes movement)
+        if (pred_x, pred_y) != (x, y):
+            neighbors.append((pred_x, pred_y))
+
+    return neighbors
 
 
 # --- iCEM Helper Function ---
