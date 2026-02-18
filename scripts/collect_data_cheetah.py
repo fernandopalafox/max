@@ -146,37 +146,201 @@ def plot_cheetah_trajectory(states, target_velocity, config):
     return fig
 
 
-def create_cheetah_xy_animation(states, dt, max_frames=200):
+def create_cheetah_xy_animation(states, dt, max_frames=100, save_path=None):
     """
-    Creates a simple animation showing the cheetah's forward progress.
-    Returns a figure with the final trajectory plotted.
-    """
-    states = np.array(states)
+    Creates an animated GIF showing the cheetah as a stick-figure mesh.
 
-    # X position over time
-    x_position = states[:, 0]
-    time = np.arange(len(states)) * dt
+    The camera follows the cheetah's forward progress.
+
+    Args:
+        states: Array of 18D states [qpos (9), qvel (9)]
+        dt: Timestep in seconds
+        max_frames: Maximum number of frames (subsampled if needed)
+        save_path: Optional path to save GIF. If None, uses temp file.
+
+    Returns:
+        Path to the saved GIF file.
+    """
+    import tempfile
+
+    states = np.array(states)
 
     # Subsample if too many frames
     if len(states) > max_frames:
         indices = np.linspace(0, len(states) - 1, max_frames, dtype=int)
-        x_position = x_position[indices]
-        time = time[indices]
+        states = states[indices]
+        effective_dt = dt * (len(states) / max_frames)
+    else:
+        effective_dt = dt
 
-    fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(time, x_position, 'b-', linewidth=2, label='X Position')
-    ax.scatter(time[0], x_position[0], color='green', s=100,
-               marker='o', label='Start', zorder=5)
-    ax.scatter(time[-1], x_position[-1], color='red', s=100,
-               marker='x', label='End', zorder=5)
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("X Position (m)")
-    ax.set_title("Cheetah Forward Progress")
-    ax.legend()
+    # Link lengths (scaled for visibility, approximate HalfCheetah proportions)
+    torso_length = 1.0
+    thigh_length = 0.4
+    shin_length = 0.4
+    foot_length = 0.2
+
+    # Initial torso height from MuJoCo XML (torso starts at z=0.7)
+    TORSO_INITIAL_Z = 0.7
+
+    def get_cheetah_points(state):
+        """Compute joint positions from state using forward kinematics."""
+        rootx = state[0]
+        # rootz is a slide joint displacement from initial position (0.7)
+        rootz = TORSO_INITIAL_Z + state[1]
+        rooty = state[2]  # Pitch angle
+
+        # Joint angles
+        bthigh_angle = state[3]
+        bshin_angle = state[4]
+        bfoot_angle = state[5]
+        fthigh_angle = state[6]
+        fshin_angle = state[7]
+        ffoot_angle = state[8]
+
+        # Torso center and endpoints
+        torso_front = np.array([
+            rootx + torso_length / 2 * np.cos(rooty),
+            rootz + torso_length / 2 * np.sin(rooty)
+        ])
+        torso_back = np.array([
+            rootx - torso_length / 2 * np.cos(rooty),
+            rootz - torso_length / 2 * np.sin(rooty)
+        ])
+
+        # Back leg (attached at torso_back)
+        back_hip = torso_back.copy()
+        angle = rooty + bthigh_angle - np.pi / 2
+        back_knee = back_hip + thigh_length * np.array([np.cos(angle), np.sin(angle)])
+        angle += bshin_angle
+        back_ankle = back_knee + shin_length * np.array([np.cos(angle), np.sin(angle)])
+        angle += bfoot_angle
+        back_toe = back_ankle + foot_length * np.array([np.cos(angle), np.sin(angle)])
+
+        # Front leg (attached at torso_front)
+        front_hip = torso_front.copy()
+        angle = rooty + fthigh_angle - np.pi / 2
+        front_knee = front_hip + thigh_length * np.array([np.cos(angle), np.sin(angle)])
+        angle += fshin_angle
+        front_ankle = front_knee + shin_length * np.array([np.cos(angle), np.sin(angle)])
+        angle += ffoot_angle
+        front_toe = front_ankle + foot_length * np.array([np.cos(angle), np.sin(angle)])
+
+        return {
+            'torso': (torso_back, torso_front),
+            'back_leg': [back_hip, back_knee, back_ankle, back_toe],
+            'front_leg': [front_hip, front_knee, front_ankle, front_toe],
+            'rootx': rootx,
+            'rootz': rootz,
+        }
+
+    # Set up figure
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    # Initialize lines
+    torso_line, = ax.plot([], [], 'b-', linewidth=6, solid_capstyle='round')
+    back_thigh, = ax.plot([], [], 'r-', linewidth=4, solid_capstyle='round')
+    back_shin, = ax.plot([], [], 'r-', linewidth=3, solid_capstyle='round')
+    back_foot, = ax.plot([], [], 'r-', linewidth=2, solid_capstyle='round')
+    front_thigh, = ax.plot([], [], 'g-', linewidth=4, solid_capstyle='round')
+    front_shin, = ax.plot([], [], 'g-', linewidth=3, solid_capstyle='round')
+    front_foot, = ax.plot([], [], 'g-', linewidth=2, solid_capstyle='round')
+
+    # Joint markers
+    joints, = ax.plot([], [], 'ko', markersize=4, zorder=5)
+
+    # Ground line and fill
+    ground_line, = ax.plot([], [], 'k-', linewidth=2)
+    ground_fill = ax.axhspan(-0.5, 0, color='#8B4513', alpha=0.3)  # Brown ground fill
+
+    # Trail showing path
+    trail_line, = ax.plot([], [], 'b--', linewidth=1, alpha=0.3)
+
+    ax.set_aspect('equal')
+    ax.set_xlabel('X Position (m)')
+    ax.set_ylabel('Z Position (m)')
     ax.grid(True, alpha=0.3)
 
-    plt.tight_layout()
-    return fig
+    # Store trail positions
+    trail_x = []
+    trail_z = []
+
+    def init():
+        torso_line.set_data([], [])
+        back_thigh.set_data([], [])
+        back_shin.set_data([], [])
+        back_foot.set_data([], [])
+        front_thigh.set_data([], [])
+        front_shin.set_data([], [])
+        front_foot.set_data([], [])
+        joints.set_data([], [])
+        ground_line.set_data([], [])
+        trail_line.set_data([], [])
+        return (torso_line, back_thigh, back_shin, back_foot,
+                front_thigh, front_shin, front_foot, joints, ground_line, trail_line)
+
+    def animate(frame):
+        points = get_cheetah_points(states[frame])
+        rootx = points['rootx']
+        rootz = points['rootz']
+
+        # Update trail
+        trail_x.append(rootx)
+        trail_z.append(rootz)
+        trail_line.set_data(trail_x, trail_z)
+
+        # Update torso
+        torso = points['torso']
+        torso_line.set_data([torso[0][0], torso[1][0]], [torso[0][1], torso[1][1]])
+
+        # Update back leg segments
+        bl = points['back_leg']
+        back_thigh.set_data([bl[0][0], bl[1][0]], [bl[0][1], bl[1][1]])
+        back_shin.set_data([bl[1][0], bl[2][0]], [bl[1][1], bl[2][1]])
+        back_foot.set_data([bl[2][0], bl[3][0]], [bl[2][1], bl[3][1]])
+
+        # Update front leg segments
+        fl = points['front_leg']
+        front_thigh.set_data([fl[0][0], fl[1][0]], [fl[0][1], fl[1][1]])
+        front_shin.set_data([fl[1][0], fl[2][0]], [fl[1][1], fl[2][1]])
+        front_foot.set_data([fl[2][0], fl[3][0]], [fl[2][1], fl[3][1]])
+
+        # Joint markers (all joints)
+        all_joints_x = [bl[0][0], bl[1][0], bl[2][0], bl[3][0],
+                        fl[0][0], fl[1][0], fl[2][0], fl[3][0]]
+        all_joints_z = [bl[0][1], bl[1][1], bl[2][1], bl[3][1],
+                        fl[0][1], fl[1][1], fl[2][1], fl[3][1]]
+        joints.set_data(all_joints_x, all_joints_z)
+
+        # Update view to follow cheetah (camera moves with it)
+        view_width = 4.0
+        ax.set_xlim(rootx - view_width / 2, rootx + view_width / 2)
+        # Ground is at z=0, torso center at ~0.7, show some margin above and below
+        ax.set_ylim(-0.3, 1.5)
+
+        # Ground line
+        ground_line.set_data([rootx - view_width, rootx + view_width], [0, 0])
+
+        # Update title with time and velocity
+        forward_vel = states[frame, 9]  # qvel[0]
+        time = frame * effective_dt
+        ax.set_title(f'Cheetah Animation | t={time:.2f}s | vel={forward_vel:.2f} m/s')
+
+        return (torso_line, back_thigh, back_shin, back_foot,
+                front_thigh, front_shin, front_foot, joints, ground_line, trail_line)
+
+    anim = FuncAnimation(
+        fig, animate, init_func=init,
+        frames=len(states), interval=50, blit=False
+    )
+
+    # Save as GIF
+    if save_path is None:
+        save_path = tempfile.mktemp(suffix='.gif')
+
+    anim.save(save_path, writer='pillow', fps=20)
+    plt.close(fig)
+
+    return save_path
 
 
 def plot_histograms(buffers, buffer_idx, config):
@@ -362,12 +526,13 @@ def main(config, save_dir):
             wandb.log({f"episode/trajectory_ep_{ep+1}": wandb.Image(fig)}, step=ep)
             plt.close(fig)
 
-            # XY progress plot
-            fig = create_cheetah_xy_animation(
+            # Animated GIF of cheetah movement
+            gif_path = create_cheetah_xy_animation(
                 states, config["env_params"]["dt"]
             )
-            wandb.log({f"episode/xy_progress_ep_{ep+1}": wandb.Image(fig)}, step=ep)
-            plt.close(fig)
+            wandb.log({
+                f"episode/cheetah_anim_ep_{ep+1}": wandb.Video(gif_path, fps=20, format="gif")
+            }, step=ep)
 
     # Final histograms
     fig = plot_histograms(buffers, buffer_idx, config)
