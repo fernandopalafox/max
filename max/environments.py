@@ -855,10 +855,8 @@ def make_linear_tracking_env(params: EnvParams, true_A, true_B, target_point):
         reward = -dist_sq
         rewards = jnp.array([reward])
 
-        # Check out-of-bounds
-        pos = next_state[:2]
-        is_oob = jnp.any(jnp.abs(pos) > params.box_half_width)
-        terminated = is_oob
+        # No early termination
+        terminated = False
 
         # Check truncation
         truncated = step_count >= params.max_episode_steps
