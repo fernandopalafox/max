@@ -199,12 +199,12 @@
 
     "trainer": "ekf",
     "trainer_params": {
-      "learning_rate": 10.0,
+      "learning_rate": 40.0,
       "weight_decay": 1.0,
       "proc_noise_init": 0.0,
       "proc_noise_decay": 1.0,
       "proc_noise_floor": 0.0,
-      "init_cov_scale": 0.5,
+      "init_cov_scale": 14.0,
       "jitter": 0.0
     },
 
