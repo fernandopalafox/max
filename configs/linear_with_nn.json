@@ -131,6 +131,10 @@
 
   "finetuning": {
     "wandb_project": "linear_with_nn",
+    "seed": 43,
+    "save_dir": "./trained_models",
+    "plot_run": false,
+    "plot_eval": false,
     "env_name": "linear_tracking",
     "num_agents": 1,
     "total_steps": 150,
@@ -160,7 +164,7 @@
       }
     },
 
-    "dynamics": "mlp_resnet_lora_xs",
+    "dynamics": "mlp_resnet",
     "dynamics_params": {
       "nn_features": [32, 32],
       "ensemble_size": 1,
