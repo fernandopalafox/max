@@ -443,6 +443,47 @@ def _terminal_cost_merging_idm(
     return terminal_tracking + indicator_cost
 
 
+def _stage_cost_cheetah_velocity_tracking(
+    state: jnp.ndarray,
+    control: jnp.ndarray,
+    target_velocity: float,
+    weight_control: float,
+) -> float:
+    """
+    Stage cost for cheetah velocity tracking.
+
+    Cost = (forward_vel - target_vel)^2 + weight_control * ||u||^2
+
+    Args:
+        state: 18D cheetah state [qpos (9D), qvel (9D)]
+        control: 6D action torques
+        target_velocity: Desired forward velocity
+        weight_control: Control penalty weight (0.1 per spec)
+
+    Returns:
+        Scalar cost
+    """
+    # Forward velocity is qvel[0], which is state[9] in the 18D state
+    forward_vel = state[9]
+
+    # Velocity tracking error
+    velocity_error = (forward_vel - target_velocity) ** 2
+
+    # Control penalty
+    control_cost = weight_control * jnp.sum(control ** 2)
+
+    return velocity_error + control_cost
+
+
+def _terminal_cost_cheetah_velocity_tracking(
+    state: jnp.ndarray,
+    target_velocity: float,
+) -> float:
+    """Terminal cost: velocity tracking error only."""
+    forward_vel = state[9]
+    return (forward_vel - target_velocity) ** 2
+
+
 # --- Evaluation cost helpers ---
 
 
@@ -830,10 +871,53 @@ def init_cost(config, dynamics_model):
 
         return cost_fn
 
+    elif cost_type == "cheetah_velocity_tracking":
+        # Cheetah velocity tracking cost
+        params = config["cost_fn_params"]
+        target_velocity = params["target_velocity"]
+        weight_control = params["weight_control"]
+        weight_jerk = params.get("weight_jerk", 0.0)
+
+        # Vectorize stage cost over the horizon
+        stage_cost_vmap = jax.vmap(
+            lambda s, u: _stage_cost_cheetah_velocity_tracking(
+                s, u, target_velocity, weight_control
+            ),
+            in_axes=(0, 0),
+        )
+
+        @jax.jit
+        def cost_fn(init_state, controls, cost_params):
+            """Total trajectory cost for cheetah velocity tracking."""
+            # 1. Rollout trajectory using dynamics
+            states = _rollout(
+                init_state, controls, cost_params, dynamics_model.pred_one_step
+            )
+
+            # 2. Calculate stage costs (on states 0 to T-1)
+            stage_costs = stage_cost_vmap(states[:-1], controls)
+
+            # 3. Calculate terminal cost (on state T)
+            terminal = _terminal_cost_cheetah_velocity_tracking(
+                states[-1], target_velocity
+            )
+
+            # 4. Calculate Jerk Cost (on controls)
+            jerk = 0.0
+            if weight_jerk > 0:
+                control_diffs = jnp.diff(controls, axis=0)
+                jerk = weight_jerk * jnp.sum(control_diffs ** 2)
+
+            return jnp.sum(stage_costs) + terminal + jerk
+
+        return cost_fn
+
     elif cost_type == "goal_cost":
         # Single-step evaluation cost (no rollout)
         params = config.get("cost_fn_params", {})
-        state_weights = jnp.array(params.get("state_weights", [1.0] * config.get("dim_state", 6)))
+        state_weights = jnp.array(
+            params.get("state_weights", [1.0] * config.get("dim_state", 6))
+        )
         weight_control = params.get("weight_control", 0.01)
 
         @jax.jit

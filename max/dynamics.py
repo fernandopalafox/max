@@ -1962,6 +1962,69 @@ def create_merging_idm(
     return model, params
 
 
+def create_cheetah_ground_truth(
+    config: dict,
+) -> tuple[NamedTuple, dict]:
+    """
+    Creates ground truth dynamics for HalfCheetah that wraps MJX physics.
+
+    The mjx_model and mj_model are closed over (not stored in params).
+    This is functional/pure - no external mutable state.
+
+    State: 18D = [qpos (9D), qvel (9D)]
+    Action: 6D torques in [-1, 1]
+    Forward velocity = state[9] = qvel[0]
+
+    Args:
+        config: Configuration dictionary (currently unused but kept for API)
+
+    Returns:
+        (DynamicsModel, params) where params contains None values
+    """
+    from mujoco_playground import registry
+    from mujoco_playground._src import mjx_env
+    from mujoco import mjx
+
+    # Load environment and extract models (closed over)
+    env = registry.load('CheetahRun')
+    mjx_model = env.mjx_model
+    mj_model = env.mj_model
+    n_substeps = env.n_substeps
+
+    @jax.jit
+    def pred_one_step(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """
+        Predicts next state using true MJX physics.
+
+        Args:
+            params: Ignored (kept for API compatibility)
+            state: 18D [qpos (9), qvel (9)]
+            action: 6D torques
+
+        Returns:
+            next_state: 18D [qpos (9), qvel (9)]
+        """
+        qpos = state[:9]
+        qvel = state[9:18]
+
+        # Reconstruct mjx.Data from qpos/qvel
+        data = mjx_env.make_data(mj_model, qpos=qpos, qvel=qvel)
+        data = mjx.forward(mjx_model, data)
+
+        # Step physics
+        data = mjx_env.step(mjx_model, data, action, n_substeps)
+
+        # Pack into 18D state
+        return jnp.concatenate([data.qpos, data.qvel])
+
+    params = {"model": None, "normalizer": None}
+    model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=None)
+
+    return model, params
+
+
 def init_dynamics(
     key: jax.Array,
     config: Any,
@@ -2045,6 +2108,9 @@ def init_dynamics(
         model, params = create_planar_drone_tiny_lora(
             key, config, normalizer, normalizer_params
         )
+
+    elif dynamics_type == "cheetah_ground_truth":
+        model, params = create_cheetah_ground_truth(config)
 
     else:
         raise ValueError(f"Unknown dynamics type: '{dynamics_type}'")

@@ -1,0 +1,88 @@
+{
+  "data_collection": {
+    "num_episodes": 1,
+    "max_episode_length": 500,
+    "seed": 42,
+    "save_path": "./data/cheetah_data",
+    "wandb_project": "cheetah_data_collection",
+    "plot_freq": 10,
+
+    "num_agents": 1,
+    "dim_state": 18,
+    "dim_obs": 17,
+    "dim_action": 6,
+    "state_labels": [
+      "rootx", "rootz", "rooty", "bthigh", "bshin", "bfoot",
+      "fthigh", "fshin", "ffoot",
+      "vel_x", "vel_z", "vel_y", "vel_bthigh", "vel_bshin", "vel_bfoot",
+      "vel_fthigh", "vel_fshin", "vel_ffoot"
+    ],
+
+    "env_name": "cheetah",
+    "env_params": {
+      "num_agents": 1,
+      "max_episode_steps": 500,
+      "dt": 0.01
+    },
+
+    "dynamics": "cheetah_ground_truth",
+    "dynamics_params": {},
+
+    "trainer": "ekf",
+    "trainer_params": {
+      "learning_rate": 1.0,
+      "weight_decay": 0.0,
+      "proc_noise_init": 0.0,
+      "proc_noise_decay": 1.0,
+      "proc_noise_floor": 0.0,
+      "init_cov_scale": 0.1,
+      "jitter": 0.0
+    },
+
+    "planner_type": "icem",
+    "planner_params": {
+      "horizon": 30,
+      "batch_size": 500,
+      "max_iter": 5,
+      "elit_frac": 0.1,
+      "learning_rate": 0.9,
+      "dim_control": 6,
+      "action_low": [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+      "action_high": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    },
+
+    "cost_type": "cheetah_velocity_tracking",
+    "cost_fn_params": {
+      "target_velocity": 3.0,
+      "weight_control": 0.1,
+      "weight_jerk": 0.001
+    },
+
+    "normalization": { "method": "static" },
+    "normalization_params": {
+      "state": {
+        "min": [-100.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,
+                -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0],
+        "max": [100.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+      },
+      "action": {
+        "min": [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+        "max": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      },
+      "delta": {
+        "min": [-1.0, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5,
+                -2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0],
+        "max": [1.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
+                2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+      }
+    },
+
+    "domain_randomization": {
+      "target_velocity": {
+        "min": 1.0,
+        "max": 5.0
+      }
+    }
+  }
+}

@@ -1217,6 +1217,80 @@ def make_merging_idm_env(params: EnvParams, true_T, true_b, idm_params):
     return reset_fn, step_fn, get_obs_fn
 
 
+def make_cheetah_env(params: EnvParams):
+    """
+    Factory function that wraps mujoco_playground CheetahRun environment.
+
+    Internal state: 18D = [qpos (9D), qvel (9D)]
+    Observation: 17D = [qpos[1:] (8D), qvel (9D)] (matches playground)
+    Action: 6D torques in [-1, 1]
+    Forward velocity = state[9] = qvel[0]
+    """
+    from mujoco_playground import registry
+    from mujoco_playground._src import mjx_env
+    from mujoco import mjx
+
+    # Load environment and extract models (closed over)
+    env = registry.load('CheetahRun')
+    mjx_model = env.mjx_model
+    mj_model = env.mj_model
+    n_substeps = env.n_substeps
+
+    @jax.jit
+    def reset_fn(key: jax.random.PRNGKey):
+        """Resets the cheetah environment and returns 18D state."""
+        env_state = env.reset(key)
+        # Pack into 18D: [qpos (9), qvel (9)]
+        return jnp.concatenate([env_state.data.qpos, env_state.data.qvel])
+
+    @jax.jit
+    def step_fn(
+        state: jnp.ndarray,
+        step_count: int,
+        action: jnp.ndarray,
+    ):
+        """Steps the cheetah environment forward."""
+        qpos = state[:9]
+        qvel = state[9:18]
+
+        # Reconstruct mjx.Data and step physics
+        data = mjx_env.make_data(mj_model, qpos=qpos, qvel=qvel)
+        data = mjx.forward(mjx_model, data)
+        data = mjx_env.step(mjx_model, data, action.squeeze(), n_substeps)
+
+        # Pack into 18D next_state
+        next_state = jnp.concatenate([data.qpos, data.qvel])
+
+        # Get observation
+        obs = get_obs_fn(next_state)
+
+        # Reward is forward velocity
+        reward = data.qvel[0]
+        rewards = jnp.array([reward])
+
+        # Check termination (NaN in state)
+        done = jnp.isnan(data.qpos).any() | jnp.isnan(data.qvel).any()
+        terminated = done
+
+        # Truncation based on max steps
+        truncated = step_count >= params.max_episode_steps
+
+        info = {
+            "forward_vel": data.qvel[0],
+        }
+
+        return next_state, obs, rewards, terminated, truncated, info
+
+    @jax.jit
+    def get_obs_fn(state: jnp.ndarray):
+        """Returns 17D observation: [qpos[1:], qvel] matching playground."""
+        # state[1:9] = qpos[1:] (8D), state[9:18] = qvel (9D)
+        obs = jnp.concatenate([state[1:9], state[9:18]])
+        return obs[None, :]  # Add agent dimension
+
+    return reset_fn, step_fn, get_obs_fn
+
+
 def init_env(config: Dict[str, Any]):
     """
     Initialize environment functions based on configuration.
@@ -1274,5 +1348,7 @@ def init_env(config: Dict[str, Any]):
         return make_pursuit_evasion_unicycle_double_integrator_env(params, true_tracking_weight)
     elif env_name == "planar_drone_wind":
         return make_planar_drone_wind_env(params)
+    elif env_name == "cheetah":
+        return make_cheetah_env(params)
     else:
         raise ValueError(f"Unknown environment name: '{env_name}'")
