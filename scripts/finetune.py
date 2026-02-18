@@ -132,15 +132,14 @@ def plot_eval_trajectory(eval_results, config):
     return fig
 
 
-def main(config, save_dir, plot_eval=False):
-    wandb.init(
-        project=config.get("wandb_project", "linear"),
-        config=config,
-        group=config.get("wandb_group"),
-        name=config.get("wandb_run_name"),
-        reinit=True,
-    )
+def main(config):
+    wandb.config.update(config, allow_val_change=True) 
     key = jax.random.key(config["seed"])
+
+    # Read settings from config
+    save_dir = config.get("save_dir", None)
+    plot_run = config.get("plot_run", True)
+    plot_eval = config.get("plot_eval", False)
 
     # Initialize environment
     reset_fn, step_fn, get_obs_fn = init_env(config)
@@ -167,12 +166,17 @@ def main(config, save_dir, plot_eval=False):
 
     # Initial evaluation before training
     eval_results = evaluator.evaluate(train_state.params)
-    init_cov_trace = (
-        jnp.trace(train_state.covariance) / train_state.covariance.shape[0]
-        if train_state.covariance is not None
-        else 0.0
+    wandb.log(
+        {
+            **eval_results,
+            "eval/cov_trace_delta": 0.0,
+        },
+        step=0,
     )
-    wandb.log({**eval_results, "eval/cov_trace": float(init_cov_trace)}, step=0)
+    initial_cov_trace_per_param = None
+    if train_state.covariance is not None:
+        cov_trace = jnp.trace(train_state.covariance)
+        initial_cov_trace_per_param = cov_trace / train_state.covariance.shape[0]
 
     # Initialize cost function
     cost_fn = init_cost(config, dynamics_model)
@@ -274,20 +278,25 @@ def main(config, save_dir, plot_eval=False):
             eval_results = evaluator.evaluate(train_state.params)
 
             # Track covariance trace if available
-            cov_trace = (
-                jnp.trace(train_state.covariance)
-                if train_state.covariance is not None
-                else 0.0
-            )
-            cov_trace_per_param = cov_trace / train_state.covariance.shape[0] if train_state.covariance is not None else 0.0
-
-            wandb.log(
-                {
-                    **eval_results,
-                    "eval/cov_trace": float(cov_trace_per_param),
-                },
-                step=step,
-            )
+            if train_state.covariance is not None:
+                cov_trace = jnp.trace(train_state.covariance)
+                cov_trace_per_param = cov_trace / train_state.covariance.shape[0]
+                cov_trace_delta = cov_trace_per_param - initial_cov_trace_per_param
+                wandb.log(
+                    {
+                        **eval_results,
+                        "eval/cov_trace_delta": float(cov_trace_delta),
+                    },
+                    step=step,
+                )
+            else:
+                wandb.log(
+                    {
+                        **eval_results,
+                        "eval/cov_trace_delta": 0.0,
+                    },
+                    step=step,
+                )
 
         # Train model
         # buffer_idx >= 2 to ensure we have at least one full transition
@@ -329,7 +338,7 @@ def main(config, save_dir, plot_eval=False):
             print(f"Parameter covariance saved to {cov_path}")
 
     # Plot and log trajectory
-    if save_dir:
+    if plot_run:
         print("\nGenerating trajectory plot...")
         fig = plot_linear_trajectory(buffers, buffer_idx, config)
         wandb.log({"trajectory/linear_plot": wandb.Image(fig)}, step=config["total_steps"])
@@ -363,8 +372,33 @@ def main(config, save_dir, plot_eval=False):
         plt.close(fig)
         print("Final eval trajectory logged to wandb as 'final_eval_traj'")
 
-    wandb.finish()
     print("Run complete.")
+    return eval_results.get("eval/terminal_goal_cost")
+
+
+def run_sweep():
+    """Entry point for wandb sweep agents. Simple single-seed run."""
+    wandb.init()
+
+    # Load base config
+    config_path = os.path.join(
+        os.path.dirname(__file__), "..", "configs", "linear_with_nn.json"
+    )
+    with open(config_path, "r") as f:
+        full_config = json.load(f)
+
+    run_config = copy.deepcopy(full_config["finetuning"])
+
+    # Apply wandb.config overrides (handles dotted keys)
+    for key, value in wandb.config.items():
+        keys = key.split(".")
+        target = run_config
+        for k in keys[:-1]:
+            target = target[k]
+        target[keys[-1]] = value
+
+    main(run_config)
+    wandb.finish()
 
 
 if __name__ == "__main__":
@@ -383,27 +417,10 @@ if __name__ == "__main__":
         help="List of weight_info values to sweep.",
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Starting random seed.",
-    )
-    parser.add_argument(
         "--num-seeds",
         type=int,
         default=1,
         help="Number of seeds to run for each lambda value.",
-    )
-    parser.add_argument(
-        "--save-dir",
-        type=str,
-        default="./trained_models",
-        help="Directory to save the learned dynamics model parameters.",
-    )
-    parser.add_argument(
-        "--plot-eval",
-        action="store_true",
-        help="Run final evaluation with trajectory plot logged to wandb.",
     )
     parser.add_argument(
         "--config",
@@ -413,40 +430,52 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Load config from JSON file
-    config_path = os.path.join(
-        os.path.dirname(__file__), "..", "configs", args.config
-    )
-    with open(config_path, "r") as f:
-        full_config = json.load(f)
-    CONFIG = full_config["finetuning"]
-
-    run_name_base = args.run_name or "linear"
-
-    if args.lambdas is None:
-        lambdas = [
-            CONFIG["cost_fn_params"]["weight_info"]
-        ]
+    # Check if running as wandb sweep agent
+    if os.environ.get("WANDB_SWEEP_ID"):
+        run_sweep()
     else:
-        lambdas = args.lambdas
+        # Load config from JSON file
+        config_path = os.path.join(
+            os.path.dirname(__file__), "..", "configs", args.config
+        )
+        with open(config_path, "r") as f:
+            full_config = json.load(f)
+        CONFIG = full_config["finetuning"]
 
-    for lam_idx, lam in enumerate(lambdas, start=1):
-        for seed_idx in range(1, args.num_seeds + 1):
-            seed = args.seed + seed_idx - 1
-            print(f"--- Starting run for lam{lam_idx} (lambda={lam}), run {seed_idx}/{args.num_seeds} ---")
-            run_config = copy.deepcopy(CONFIG)
-            run_config["seed"] = seed
-            run_config["wandb_group"] = "linear_tracking"
-            run_config["cost_fn_params"]["weight_info"] = lam
+        run_name_base = args.run_name or "linear"
 
-            # Build run name: base_lam{idx}_seed{idx}
-            run_name = run_name_base
-            if args.lambdas is not None:
-                run_name = f"{run_name}_lam{lam}"
-            if args.num_seeds > 1:
-                run_name = f"{run_name}_{seed_idx}"
-            run_config["wandb_run_name"] = run_name
+        if args.lambdas is None:
+            lambdas = [CONFIG["cost_fn_params"]["weight_info"]]
+        else:
+            lambdas = args.lambdas
 
-            main(run_config, save_dir=args.save_dir, plot_eval=args.plot_eval)
+        # Generate seeds using JAX RNG from config seed
+        base_key = jax.random.key(CONFIG["seed"])
+        seed_keys = jax.random.split(base_key, args.num_seeds)
+        seeds = [int(jax.random.bits(k)) for k in seed_keys]
 
-    print("All experiments complete.")
+        for lam_idx, lam in enumerate(lambdas, start=1):
+            for seed_idx, seed in enumerate(seeds, start=1):
+                print(f"--- Starting run for lam{lam_idx} (lambda={lam}), seed {seed_idx}/{args.num_seeds} ---")
+                run_config = copy.deepcopy(CONFIG)
+                run_config["seed"] = seed
+                run_config["cost_fn_params"]["weight_info"] = lam
+
+                # Build run name: base_lam{idx}_seed{idx}
+                run_name = run_name_base
+                if args.lambdas is not None:
+                    run_name = f"{run_name}_lam{lam}"
+                if args.num_seeds > 1:
+                    run_name = f"{run_name}_{seed_idx}"
+                run_config["wandb_run_name"] = run_name
+
+                wandb.init(
+                    project=run_config.get("wandb_project", "linear"),
+                    config=run_config,
+                    name=run_config.get("wandb_run_name"),
+                    reinit=True,
+                )
+                main(run_config)
+                wandb.finish()
+
+        print("All experiments complete.")
