@@ -133,6 +133,31 @@ Uses iCEM (improved Cross-Entropy Method) by default.
 4. **New config**: Create JSON in `configs/`
 5. **New script**: Copy `run_lqr.py` and modify as needed
 
+## Running a Full Experiment Loop
+
+To run your own experiments, use the three-stage pipeline with a single config file:
+
+```bash
+# 1. Collect offline data
+python scripts/collect_data.py --config configs/linear_with_nn.json
+
+# 2. Pretrain dynamics model on collected data
+python scripts/pretrain.py --config configs/linear_with_nn.json
+
+# 3. Finetune online with environment interaction
+python scripts/finetune.py --config configs/linear_with_nn.json
+```
+
+Each script reads from the same JSON config but uses its own section (`data_collection`, `pretraining`, `finetuning`). See `configs/linear_with_nn.json` for an example.
+
+**What each stage requires:**
+
+1. **Data collection**: Define an environment and a dynamics model for the planner. Ideally these match exactly, so the planner's rollouts align with the true dynamics.
+
+2. **Pretraining**: Takes the collected transitions and trains a dynamics model (e.g., neural network) with supervised learning.
+
+3. **Finetuning**: Loads the pretrained model and adapts it online in an environment with *different* parameters than data collection (to test generalization).
+
 ## License
 
 MIT License
