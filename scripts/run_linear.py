@@ -133,7 +133,7 @@ def plot_eval_trajectory(eval_results, config):
 
 
 def main(config):
-    wandb.config.update(config)  # Run already initialized by caller
+    wandb.config.update(config, allow_val_change=True) 
     key = jax.random.key(config["seed"])
 
     # Read settings from config
@@ -166,18 +166,17 @@ def main(config):
 
     # Initial evaluation before training
     eval_results = evaluator.evaluate(train_state.params)
+    wandb.log(
+        {
+            **eval_results,
+            "eval/cov_trace_delta": 0.0,
+        },
+        step=0,
+    )
+    initial_cov_trace_per_param = None
     if train_state.covariance is not None:
         cov_trace = jnp.trace(train_state.covariance)
-        cov_trace_per_param = cov_trace / train_state.covariance.shape[0]
-        wandb.log(
-            {
-                **eval_results,
-                "eval/cov_trace": float(cov_trace_per_param),
-            },
-            step=0,
-        )
-    else:
-        wandb.log(eval_results, step=0)
+        initial_cov_trace_per_param = cov_trace / train_state.covariance.shape[0]
 
     # Initialize cost function
     cost_fn = init_cost(config, dynamics_model)
@@ -282,15 +281,22 @@ def main(config):
             if train_state.covariance is not None:
                 cov_trace = jnp.trace(train_state.covariance)
                 cov_trace_per_param = cov_trace / train_state.covariance.shape[0]
+                cov_trace_delta = cov_trace_per_param - initial_cov_trace_per_param
                 wandb.log(
                     {
                         **eval_results,
-                        "eval/cov_trace": float(cov_trace_per_param),
+                        "eval/cov_trace_delta": float(cov_trace_delta),
                     },
                     step=step,
                 )
             else:
-                wandb.log(eval_results, step=step)
+                wandb.log(
+                    {
+                        **eval_results,
+                        "eval/cov_trace_delta": 0.0,
+                    },
+                    step=step,
+                )
 
         # Train model
         # buffer_idx >= 2 to ensure we have at least one full transition
