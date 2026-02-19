@@ -44,8 +44,10 @@
       "horizon": 30,
       "batch_size": 500,
       "max_iter": 5,
-      "elit_frac": 0.1,
+      "elit_frac": 0.02,
       "learning_rate": 0.9,
+      "colored_noise_beta": 0.25,
+      "initial_variance_val": 0.25,
       "dim_control": 6,
       "action_low": [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
       "action_high": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
