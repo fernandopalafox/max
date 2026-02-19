@@ -603,6 +603,8 @@ def init_cost(config, dynamics_model):
 
             return jnp.sum(stage_costs) + terminal + jerk
 
+        # Attach dynamics model for planners that need it (e.g., A*)
+        cost_fn.dynamics_model = dynamics_model
         return cost_fn
 
     elif cost_type == "linear_tracking_info":
@@ -652,6 +654,8 @@ def init_cost(config, dynamics_model):
 
             return jnp.sum(stage_costs) + terminal + jerk
 
+        # Attach dynamics model for planners that need it (e.g., A*)
+        cost_fn.dynamics_model = dynamics_model
         return cost_fn
 
     elif cost_type == "pendulum_swing_up_info":
@@ -701,6 +705,8 @@ def init_cost(config, dynamics_model):
 
             return jnp.sum(stage_costs) + terminal + jerk
 
+        # Attach dynamics model for planners that need it (e.g., A*)
+        cost_fn.dynamics_model = dynamics_model
         return cost_fn
 
     elif cost_type == "gridworld_navigation":
@@ -752,6 +758,8 @@ def init_cost(config, dynamics_model):
 
             return jnp.sum(stage_costs) + terminal + jerk
 
+        # Attach dynamics model for planners that need it (e.g., A*)
+        cost_fn.dynamics_model = dynamics_model
         return cost_fn
 
     elif cost_type == "merging_idm_info":
@@ -872,6 +880,8 @@ def init_cost(config, dynamics_model):
 
             return jnp.sum(stage_costs) + terminal + jerk
 
+        # Attach dynamics model for planners that need it (e.g., A*)
+        cost_fn.dynamics_model = dynamics_model
         return cost_fn
     
     elif cost_type == "drone_state_tracking_info_task_aware":
@@ -935,6 +945,8 @@ def init_cost(config, dynamics_model):
 
             return jnp.sum(stage_costs) + terminal + jerk
 
+        # Attach dynamics model for planners that need it (e.g., A*)
+        cost_fn.dynamics_model = dynamics_model
         return cost_fn
 
     elif cost_type == "goal_cost":
@@ -949,6 +961,8 @@ def init_cost(config, dynamics_model):
             control = controls[0] if controls.ndim > 1 else controls
             return _eval_goal_cost(init_state, control, cost_params, state_weights, weight_control)
 
+        # Attach dynamics model for planners that need it (e.g., A*)
+        cost_fn.dynamics_model = dynamics_model
         return cost_fn
 
     elif cost_type == "terminal_goal_cost":
@@ -957,6 +971,8 @@ def init_cost(config, dynamics_model):
         def cost_fn(init_state, controls, cost_params):
             return _eval_terminal_goal_cost(init_state, cost_params)
 
+        # Attach dynamics model for planners that need it (e.g., A*)
+        cost_fn.dynamics_model = dynamics_model
         return cost_fn
 
     else:

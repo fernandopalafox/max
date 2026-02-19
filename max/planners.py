@@ -55,7 +55,7 @@ class Planner(NamedTuple):
 
 
 def init_planner(
-    config: Any, cost_fn: CostFn, key: jax.Array, dynamics_model=None
+    config: Any, cost_fn: CostFn, key: jax.Array
 ) -> tuple[Planner, PlannerState]:
     """
     Initializes the appropriate planner based on the configuration.
@@ -63,9 +63,8 @@ def init_planner(
 
     Args:
         config: Configuration dictionary
-        cost_fn: Cost function
+        cost_fn: Cost function (may have dynamics_model attribute for A*)
         key: JAX random key
-        dynamics_model: Optional dynamics model (required for A* planner)
     """
     planner_type = config.get("planner_type", "icem")
     print(f"🚀 Initializing planner: {planner_type.upper()}")
@@ -77,9 +76,7 @@ def init_planner(
     elif planner_type == "random":
         planner, state = create_random_planner(config, cost_fn, key)
     elif planner_type == "astar":
-        if dynamics_model is None:
-            raise ValueError("A* planner requires dynamics_model to be provided")
-        planner, state = create_astar_planner(config, cost_fn, key, dynamics_model)
+        planner, state = create_astar_planner(config, cost_fn, key)
     # elif planner_type == "ilqr":
     #     planner, state = create_ilqr_planner(config, cost_fn, key) # Future extension
     else:
@@ -385,7 +382,7 @@ def _icem_solve_internal(
 
 
 def create_astar_planner(
-    config: Any, cost_fn: CostFn, key: jax.Array, dynamics_model
+    config: Any, cost_fn: CostFn, key: jax.Array
 ) -> tuple[Planner, PlannerState]:
     """
     Creates an A* planner for discrete gridworld navigation.
@@ -397,15 +394,20 @@ def create_astar_planner(
 
     Args:
         config: Configuration dictionary
-        cost_fn: Cost function
+        cost_fn: Cost function (with dynamics_model attribute)
         key: JAX random key
-        dynamics_model: Dynamics model with pred_one_step method
     """
     initial_state = PlannerState(key=key)
 
     planner_params = config.get("planner_params", {})
     horizon = planner_params.get("horizon", 50)
     dim_control = planner_params.get("dim_control", 1)
+
+    # Get dynamics model from cost function
+    if not hasattr(cost_fn, 'dynamics_model'):
+        raise ValueError("A* planner requires cost_fn to have dynamics_model attribute")
+
+    dynamics_model = cost_fn.dynamics_model
 
     # Capture the prediction function in the closure
     pred_one_step_fn = dynamics_model.pred_one_step
@@ -428,9 +430,16 @@ def create_astar_planner(
         )
 
         # Convert path to actions
-        if len(path) <= 1:
+        if len(path) <= 0:
             print(f"A* failed: no path from {start} to {goal}")
             actions = jnp.zeros((horizon, dim_control))
+        elif len(path) == 1:
+            # Already at goal or only one waypoint - no movement needed
+            # Use action 0 (arbitrary, agent stays at goal)
+            actions = jnp.zeros((horizon, dim_control))
+            if start != goal:
+                pass
+                #print(f"A* {start}->{goal}: already at goal")
         else:
             actions_list = []
             for i in range(len(path) - 1):
@@ -439,12 +448,14 @@ def create_astar_planner(
                 action = _position_diff_to_action(curr, next_pos)
                 actions_list.append(action)
 
-            # Pad with "stay" actions
+            # Pad with "stay" actions (action 0)
             while len(actions_list) < horizon:
                 actions_list.append(0.0)
 
             actions = jnp.array(actions_list[:horizon]).reshape(horizon, dim_control)
-            print(f"A* found path from {start} to {goal}: {len(path)} steps")
+            # Debug: print first few actions
+            action_str = ', '.join([f"{int(a)}" for a in actions_list[:min(5, len(actions_list))]])
+            #print(f"A* {start}->{goal}: path_len={len(path)}, first_actions=[{action_str}]")
         return actions
 
     def solve_fn(
@@ -670,8 +681,8 @@ def _astar_search_grid(start, goal, maze_layout=None, max_steps=50):
 
             heapq.heappush(open_set, (new_f_score, new_g_score, neighbor, new_path))
 
-    # No path found, return start only
-    return [start]
+    # No path found, return empty path
+    return []
 
 
 def _astar_search_model_based(start, goal, pred_one_step_fn, dyn_params, max_steps=50):
@@ -759,6 +770,8 @@ def _get_neighbors_model_based(pos, pred_one_step_fn, dyn_params):
         3: (1, 0),   # right: x+1
     }
 
+    # Debug: print model predictions for each action
+    debug_preds = []
     for action_idx, (dx, dy) in action_deltas.items():
         action = jnp.array([float(action_idx)])
 
@@ -769,10 +782,17 @@ def _get_neighbors_model_based(pos, pred_one_step_fn, dyn_params):
         pred_x = int(round(float(predicted_next_state[0])))
         pred_y = int(round(float(predicted_next_state[1])))
 
+        debug_preds.append(f"a{action_idx}->({pred_x},{pred_y})")
+
         # If prediction differs from current position, it's a valid move
         # (model learned this action causes movement)
         if (pred_x, pred_y) != (x, y):
             neighbors.append((pred_x, pred_y))
+
+    # Occasionally print debug info (first few cells only)
+    if (x + y) < 3 and len(neighbors) > 0:
+        pass
+        #print(f"  Model @ ({x},{y}): {', '.join(debug_preds)} -> {len(neighbors)} valid neighbors")
 
     return neighbors
 

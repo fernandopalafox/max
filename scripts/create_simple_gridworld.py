@@ -1,9 +1,9 @@
 # create_simple_gridworld.py
 """
-Create simple gridworld layouts with a single 4x4 obstacle block.
+Create simple gridworld layouts for testing.
 
-Layout A: 4x4 block in middle (rows 3-6, cols 3-6)
-Layout B: 4x4 block to the right (rows 3-6, cols 5-8)
+Layout A: 3x3 block at bottom edge (rows 7-9, cols 3-5)
+Layout B: 4x4 block at bottom edge (rows 6-9, cols 3-6)
 
 Start: (0, 0)
 Goal: (9, 9)
@@ -16,7 +16,7 @@ import os
 
 def create_layout_with_obstacle(obstacle_rows, obstacle_cols):
     """
-    Create a 10x10 gridworld with all cells open except for a 4x4 obstacle.
+    Create a 10x10 gridworld with all cells open except for one rectangular obstacle.
 
     Args:
         obstacle_rows: tuple (row_start, row_end) for obstacle
@@ -66,18 +66,18 @@ def create_layout_with_obstacle(obstacle_rows, obstacle_cols):
 def main():
     """Generate simple gridworld layouts and update config."""
 
-    # Layout A: obstacle in middle (rows 3-6, cols 3-6)
-    print("Creating Layout A (obstacle in middle)...")
+    # Layout A: 3x3 obstacle at bottom edge (rows 7-9, cols 3-5)
+    print("Creating Layout A (3x3 obstacle at bottom edge)...")
     layout_a = create_layout_with_obstacle(
-        obstacle_rows=(3, 7),  # rows 3,4,5,6
-        obstacle_cols=(3, 7)   # cols 3,4,5,6
+        obstacle_rows=(7, 10),  # rows 7,8,9
+        obstacle_cols=(3, 6)    # cols 3,4,5
     )
 
-    # Layout B: obstacle to the right (rows 3-6, cols 5-8)
-    print("Creating Layout B (obstacle to the right)...")
+    # Layout B: 4x4 obstacle at bottom edge (rows 6-9, cols 3-6)
+    print("Creating Layout B (4x4 obstacle at bottom edge)...")
     layout_b = create_layout_with_obstacle(
-        obstacle_rows=(3, 7),  # rows 3,4,5,6
-        obstacle_cols=(5, 9)   # cols 5,6,7,8
+        obstacle_rows=(6, 10),  # rows 6,7,8,9
+        obstacle_cols=(3, 7)    # cols 3,4,5,6
     )
 
     # Count navigable cells
@@ -85,7 +85,9 @@ def main():
     navigable_b = sum(1 for row in layout_b for cell in row if cell > 0)
 
     print(f"\nLayout A: {navigable_a} navigable cells (out of 100)")
+    print(f"  - 3×3 obstacle at bottom edge (rows 7-9, cols 3-5)")
     print(f"Layout B: {navigable_b} navigable cells (out of 100)")
+    print(f"  - 4×4 obstacle at bottom edge (rows 6-9, cols 3-6)")
 
     # Load existing config
     config_path = os.path.join(
@@ -113,16 +115,16 @@ def main():
         json.dump(config, f, indent=2)
 
     print(f"\nUpdated {config_path} with simple layouts")
-    print(f"  - Layout A: 4x4 obstacle at rows 3-6, cols 3-6 (middle)")
-    print(f"  - Layout B: 4x4 obstacle at rows 3-6, cols 5-8 (right)")
+    print(f"  - Layout A: 3×3 obstacle at rows 7-9, cols 3-5 (bottom edge)")
+    print(f"  - Layout B: 4×4 obstacle at rows 6-9, cols 3-6 (bottom edge)")
     print(f"  - Start: (0, 0)")
     print(f"  - Goal: (9, 9)")
 
     # Visualize
-    print("\nLayout A (middle obstacle):")
+    print("\nLayout A (3×3 bottom obstacle):")
     print_layout(layout_a)
 
-    print("\nLayout B (right obstacle):")
+    print("\nLayout B (4×4 bottom obstacle):")
     print_layout(layout_b)
 
 

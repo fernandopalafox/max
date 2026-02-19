@@ -170,9 +170,9 @@ def main(config, save_dir, plot_eval=False):
     # Initialize cost function
     cost_fn = init_cost(config, dynamics_model)
 
-    # Initialize planner (pass dynamics_model for A*)
+    # Initialize planner
     key, planner_key = jax.random.split(key)
-    planner, planner_state = init_planner(config, cost_fn, planner_key, dynamics_model)
+    planner, planner_state = init_planner(config, cost_fn, planner_key)
 
     # Initialize buffer
     buffers = init_jax_buffers(
@@ -212,10 +212,21 @@ def main(config, save_dir, plot_eval=False):
         action_continuous = actions[0][None, :]  # Add agent dim
         action_discrete = jnp.round(jnp.clip(action_continuous, 0.0, 3.0))
 
+        # Debug: print state, action, and next state
+        # if step % 10 == 0:  # Print every 10 steps to avoid spam
+            # print(f"Step {step}: state={state}, action={int(action_discrete[0,0])}, dist_to_goal={float(jnp.linalg.norm(state - goal_state)):.2f}")
+
         # Step environment with discrete action
+        prev_state = state
         state, next_obs, rewards, terminated, truncated, info = step_fn(
             state, episode_length, action_discrete
         )
+
+        # Debug: check if state changed
+        # if step % 10 == 0:
+            # moved = not jnp.allclose(state, prev_state)
+            # print(f"  -> next_state={state}, moved={moved}")
+
         done = terminated or truncated
         episode_length += 1
 
@@ -311,7 +322,9 @@ def main(config, save_dir, plot_eval=False):
         print(f"Saved param covariance to {cov_path}")
 
     # Plot trajectory on maze
+    print(f"\nGenerating plots... plot_eval={plot_eval}, 'trajectory' in final_eval_results: {'trajectory' in final_eval_results}")
     if plot_eval and "trajectory" in final_eval_results:
+        print("  Plotting eval trajectory...")
         fig1 = plot_eval_trajectory(
             final_eval_results,
             config["env_params"]["maze_layout"],
@@ -319,9 +332,11 @@ def main(config, save_dir, plot_eval=False):
         )
         wandb.log({"final/eval_trajectory": wandb.Image(fig1)})
         plt.close(fig1)
+        print("  Eval trajectory plot logged to wandb")
 
     # Plot training trajectory
     if buffer_idx > 0:
+        print(f"  Plotting training trajectory (buffer_idx={buffer_idx})...")
         fig2 = plot_gridworld_trajectory(
             buffers,
             buffer_idx,
@@ -331,10 +346,12 @@ def main(config, save_dir, plot_eval=False):
         )
         wandb.log({"final/training_trajectory": wandb.Image(fig2)})
         plt.close(fig2)
+        print("  Training trajectory plot logged to wandb")
 
         fig3 = plot_position_over_time(buffers, buffer_idx, config)
         wandb.log({"final/position_over_time": wandb.Image(fig3)})
         plt.close(fig3)
+        print("  Position over time plot logged to wandb")
 
     wandb.finish()
 
