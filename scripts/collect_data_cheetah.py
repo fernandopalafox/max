@@ -38,14 +38,15 @@ def collect_episode(
     reset_fn,
     step_fn,
     get_obs_fn,
+    get_state_array_fn,
     planner,
     planner_state,
     train_state,
     target_velocity,
     max_episode_length,
 ):
-    """Collect a single episode of transitions."""
-    episode_states = []  # 18D states
+    """Collect a single episode of transitions using mjx.Data state."""
+    episode_states = []  # 18D states (extracted from mjx.Data for visualization)
     episode_obs = []  # 17D observations for buffer
     episode_actions = []
     episode_rewards = []
@@ -67,7 +68,8 @@ def collect_episode(
         actions, planner_state = planner.solve(planner_state, state, cost_params)
         action = actions[0][None, :]  # Add agent dim
 
-        episode_states.append(state)
+        # Extract 18D state array for visualization
+        episode_states.append(get_state_array_fn(data))
         episode_obs.append(current_obs[0])  # Remove agent dim, store 17D
         episode_actions.append(action[0])
 
@@ -85,7 +87,7 @@ def collect_episode(
         jnp.stack(episode_obs),  # 17D observations for buffer
         jnp.stack(episode_actions),
         jnp.array(episode_rewards),
-        len(episode_states),
+        ep_len,
         key,
     )
 
@@ -474,11 +476,14 @@ def main(config, save_dir):
         })
 
         # Collect episode
+        print(f"\nCollecting episode {ep + 1}...")
+        ep_start = time.perf_counter()
         states, obs, actions, rewards, ep_len, key = collect_episode(
             key,
             reset_fn,
             step_fn,
             get_obs_fn,
+            get_state_array_fn,
             planner,
             planner_state,
             train_state,

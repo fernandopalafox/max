@@ -1968,12 +1968,12 @@ def create_cheetah_ground_truth(
     """
     Creates ground truth dynamics for HalfCheetah that wraps MJX physics.
 
-    The mjx_model and mj_model are closed over (not stored in params).
+    The mjx_model is closed over (not stored in params).
     This is functional/pure - no external mutable state.
 
-    State: 18D = [qpos (9D), qvel (9D)]
+    State: mjx.Data (full MuJoCo physics state)
     Action: 6D torques in [-1, 1]
-    Forward velocity = state[9] = qvel[0]
+    Forward velocity = data.qvel[0]
 
     Args:
         config: Configuration dictionary (currently unused but kept for API)
@@ -1988,36 +1988,23 @@ def create_cheetah_ground_truth(
     # Load environment and extract models (closed over)
     env = registry.load('CheetahRun')
     mjx_model = env.mjx_model
-    mj_model = env.mj_model
     n_substeps = env.n_substeps
 
     @jax.jit
-    def pred_one_step(
-        params: Any, state: jnp.ndarray, action: jnp.ndarray
-    ) -> jnp.ndarray:
+    def pred_one_step(params, data: mjx.Data, action: jnp.ndarray) -> mjx.Data:
         """
         Predicts next state using true MJX physics.
 
         Args:
             params: Ignored (kept for API compatibility)
-            state: 18D [qpos (9), qvel (9)]
+            data: mjx.Data (full MuJoCo physics state)
             action: 6D torques
 
         Returns:
-            next_state: 18D [qpos (9), qvel (9)]
+            next_data: mjx.Data (full MuJoCo physics state)
         """
-        qpos = state[:9]
-        qvel = state[9:18]
-
-        # Reconstruct mjx.Data from qpos/qvel
-        data = mjx_env.make_data(mj_model, qpos=qpos, qvel=qvel)
-        data = mjx.forward(mjx_model, data)
-
-        # Step physics
-        data = mjx_env.step(mjx_model, data, action, n_substeps)
-
-        # Pack into 18D state
-        return jnp.concatenate([data.qpos, data.qvel])
+        # Direct physics step - no reconstruction!
+        return mjx_env.step(mjx_model, data, action, n_substeps)
 
     params = {"model": None, "normalizer": None}
     model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=None)

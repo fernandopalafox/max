@@ -444,7 +444,7 @@ def _terminal_cost_merging_idm(
 
 
 def _stage_cost_cheetah_velocity_tracking(
-    state: jnp.ndarray,
+    data,  # mjx.Data
     control: jnp.ndarray,
     target_velocity: float,
     weight_control: float,
@@ -455,7 +455,7 @@ def _stage_cost_cheetah_velocity_tracking(
     Cost = (forward_vel - target_vel)^2 + weight_control * ||u||^2
 
     Args:
-        state: 18D cheetah state [qpos (9D), qvel (9D)]
+        data: mjx.Data (full MuJoCo physics state)
         control: 6D action torques
         target_velocity: Desired forward velocity
         weight_control: Control penalty weight (0.1 per spec)
@@ -463,8 +463,8 @@ def _stage_cost_cheetah_velocity_tracking(
     Returns:
         Scalar cost
     """
-    # Forward velocity is qvel[0], which is state[9] in the 18D state
-    forward_vel = state[9]
+    # Forward velocity is qvel[0] from mjx.Data
+    forward_vel = data.qvel[0]
 
     # Velocity tracking error
     velocity_error = (forward_vel - target_velocity) ** 2
@@ -476,12 +476,30 @@ def _stage_cost_cheetah_velocity_tracking(
 
 
 def _terminal_cost_cheetah_velocity_tracking(
-    state: jnp.ndarray,
+    data,  # mjx.Data
     target_velocity: float,
 ) -> float:
     """Terminal cost: velocity tracking error only."""
-    forward_vel = state[9]
+    forward_vel = data.qvel[0]
     return (forward_vel - target_velocity) ** 2
+
+
+def _rollout_cheetah(init_data, controls, cost_params, pred_fn):
+    """
+    Trajectory rollout for cheetah using mjx.Data directly.
+
+    Returns:
+        data_sequence: Pytree of mjx.Data with leading time dimension
+    """
+    def step(carry, control):
+        data, dyn_params = carry
+        next_data = pred_fn(dyn_params, data, control)
+        return (next_data, dyn_params), next_data
+
+    dyn_params = cost_params["dyn_params"]
+    _, data_sequence = jax.lax.scan(step, (init_data, dyn_params), controls)
+
+    return data_sequence
 
 
 # --- Evaluation cost helpers ---
@@ -872,34 +890,38 @@ def init_cost(config, dynamics_model):
         return cost_fn
 
     elif cost_type == "cheetah_velocity_tracking":
-        # Cheetah velocity tracking cost
+        # Cheetah velocity tracking cost using mjx.Data directly
         params = config["cost_fn_params"]
         target_velocity = params["target_velocity"]
         weight_control = params["weight_control"]
         weight_jerk = params.get("weight_jerk", 0.0)
 
         # Vectorize stage cost over the horizon
+        # When scan outputs mjx.Data, it stacks leaves into a pytree with time dimension
         stage_cost_vmap = jax.vmap(
-            lambda s, u: _stage_cost_cheetah_velocity_tracking(
-                s, u, target_velocity, weight_control
+            lambda d, u: _stage_cost_cheetah_velocity_tracking(
+                d, u, target_velocity, weight_control
             ),
             in_axes=(0, 0),
         )
 
         @jax.jit
-        def cost_fn(init_state, controls, cost_params):
-            """Total trajectory cost for cheetah velocity tracking."""
-            # 1. Rollout trajectory using dynamics
-            states = _rollout(
-                init_state, controls, cost_params, dynamics_model.pred_one_step
+        def cost_fn(init_data, controls, cost_params):
+            """Total trajectory cost for cheetah velocity tracking using mjx.Data."""
+            # 1. Rollout trajectory using dynamics (mjx.Data throughout)
+            data_sequence = _rollout_cheetah(
+                init_data, controls, cost_params, dynamics_model.pred_one_step
             )
 
-            # 2. Calculate stage costs (on states 0 to T-1)
-            stage_costs = stage_cost_vmap(states[:-1], controls)
+            # 2. Calculate stage costs over all timesteps
+            # data_sequence has time dimension from scan
+            stage_costs = stage_cost_vmap(data_sequence, controls)
 
-            # 3. Calculate terminal cost (on state T)
+            # 3. Calculate terminal cost (on final state)
+            # Extract final state using tree_map to get last element of each leaf
+            final_data = jax.tree.map(lambda x: x[-1], data_sequence)
             terminal = _terminal_cost_cheetah_velocity_tracking(
-                states[-1], target_velocity
+                final_data, target_velocity
             )
 
             # 4. Calculate Jerk Cost (on controls)

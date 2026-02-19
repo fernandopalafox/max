@@ -1221,10 +1221,10 @@ def make_cheetah_env(params: EnvParams):
     """
     Factory function that wraps mujoco_playground CheetahRun environment.
 
-    Internal state: 18D = [qpos (9D), qvel (9D)]
+    Internal state: mjx.Data (full MuJoCo physics state)
     Observation: 17D = [qpos[1:] (8D), qvel (9D)] (matches playground)
     Action: 6D torques in [-1, 1]
-    Forward velocity = state[9] = qvel[0]
+    Forward velocity = data.qvel[0]
     """
     from mujoco_playground import registry
     from mujoco_playground._src import mjx_env
@@ -1233,62 +1233,56 @@ def make_cheetah_env(params: EnvParams):
     # Load environment and extract models (closed over)
     env = registry.load('CheetahRun')
     mjx_model = env.mjx_model
-    mj_model = env.mj_model
     n_substeps = env.n_substeps
 
     @jax.jit
-    def reset_fn(key: jax.random.PRNGKey):
-        """Resets the cheetah environment and returns 18D state."""
+    def reset_fn(key: jax.random.PRNGKey) -> mjx.Data:
+        """Resets the cheetah environment and returns mjx.Data directly."""
         env_state = env.reset(key)
-        # Pack into 18D: [qpos (9), qvel (9)]
-        return jnp.concatenate([env_state.data.qpos, env_state.data.qvel])
+        return env_state.data
 
     @jax.jit
     def step_fn(
-        state: jnp.ndarray,
+        data: mjx.Data,
         step_count: int,
         action: jnp.ndarray,
     ):
-        """Steps the cheetah environment forward."""
-        qpos = state[:9]
-        qvel = state[9:18]
-
-        # Reconstruct mjx.Data and step physics
-        data = mjx_env.make_data(mj_model, qpos=qpos, qvel=qvel)
-        data = mjx.forward(mjx_model, data)
-        data = mjx_env.step(mjx_model, data, action.squeeze(), n_substeps)
-
-        # Pack into 18D next_state
-        next_state = jnp.concatenate([data.qpos, data.qvel])
+        """Steps the cheetah environment forward using mjx.Data directly."""
+        # Direct physics step - no reconstruction!
+        next_data = mjx_env.step(mjx_model, data, action.squeeze(), n_substeps)
 
         # Get observation
-        obs = get_obs_fn(next_state)
+        obs = get_obs_fn(next_data)
 
         # Reward is forward velocity
-        reward = data.qvel[0]
+        reward = next_data.qvel[0]
         rewards = jnp.array([reward])
 
         # Check termination (NaN in state)
-        done = jnp.isnan(data.qpos).any() | jnp.isnan(data.qvel).any()
+        done = jnp.isnan(next_data.qpos).any() | jnp.isnan(next_data.qvel).any()
         terminated = done
 
         # Truncation based on max steps
         truncated = step_count >= params.max_episode_steps
 
         info = {
-            "forward_vel": data.qvel[0],
+            "forward_vel": next_data.qvel[0],
         }
 
-        return next_state, obs, rewards, terminated, truncated, info
+        return next_data, obs, rewards, terminated, truncated, info
 
     @jax.jit
-    def get_obs_fn(state: jnp.ndarray):
-        """Returns 17D observation: [qpos[1:], qvel] matching playground."""
-        # state[1:9] = qpos[1:] (8D), state[9:18] = qvel (9D)
-        obs = jnp.concatenate([state[1:9], state[9:18]])
+    def get_obs_fn(data: mjx.Data) -> jnp.ndarray:
+        """Returns 17D observation: [qpos[1:], qvel] from mjx.Data."""
+        obs = jnp.concatenate([data.qpos[1:], data.qvel])
         return obs[None, :]  # Add agent dimension
 
-    return reset_fn, step_fn, get_obs_fn
+    @jax.jit
+    def get_state_array_fn(data: mjx.Data) -> jnp.ndarray:
+        """Helper: extract 18D state array from mjx.Data for visualization."""
+        return jnp.concatenate([data.qpos, data.qvel])
+
+    return reset_fn, step_fn, get_obs_fn, get_state_array_fn
 
 
 def init_env(config: Dict[str, Any]):
