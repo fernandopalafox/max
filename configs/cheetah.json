@@ -1,6 +1,6 @@
 {
   "data_collection": {
-    "num_episodes": 1,
+    "num_episodes": 2,
     "max_episode_length": 500,
     "seed": 42,
     "save_path": "./data/cheetah_data",

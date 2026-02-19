@@ -21,6 +21,7 @@ import argparse
 import os
 import pickle
 import json
+import time
 
 
 def sample_target_velocity(key, dr_config):
@@ -33,63 +34,66 @@ def sample_target_velocity(key, dr_config):
     return float(target_vel), key
 
 
-def collect_episode(
-    key,
+def make_collect_episode_fn(
     reset_fn,
     step_fn,
     get_obs_fn,
     get_state_array_fn,
     planner,
-    planner_state,
-    train_state,
-    target_velocity,
     max_episode_length,
 ):
-    """Collect a single episode of transitions using mjx.Data state."""
-    episode_states = []  # 18D states (extracted from mjx.Data for visualization)
-    episode_obs = []  # 17D observations for buffer
-    episode_actions = []
-    episode_rewards = []
+    """Create a JIT-compiled episode collection function using lax.scan."""
 
-    key, reset_key = jax.random.split(key)
-    state = reset_fn(reset_key)  # 18D state
-    current_obs = get_obs_fn(state)  # 17D observation
+    def collect_episode(
+        key,
+        planner_state,
+        train_state,
+        target_velocity,
+    ):
+        """Collect a single episode of transitions using mjx.Data state."""
+        key, reset_key = jax.random.split(key)
+        data = reset_fn(reset_key)
+        current_obs = get_obs_fn(data)
 
-    for step_idx in range(max_episode_length):
         cost_params = {
             "dyn_params": train_state.params,
             "params_cov_model": train_state.covariance,
             "target_velocity": target_velocity,
         }
-        key, planner_key = jax.random.split(key)
-        planner_state = planner_state.replace(key=planner_key)
 
-        # Plan using 18D state
-        actions, planner_state = planner.solve(planner_state, state, cost_params)
-        action = actions[0][None, :]  # Add agent dim
+        def step_body(carry, step_idx):
+            data, current_obs, planner_state, key = carry
 
-        # Extract 18D state array for visualization
-        episode_states.append(get_state_array_fn(data))
-        episode_obs.append(current_obs[0])  # Remove agent dim, store 17D
-        episode_actions.append(action[0])
+            key, planner_key = jax.random.split(key)
+            planner_state = planner_state.replace(key=planner_key)
 
-        state, next_obs, rewards, terminated, truncated, info = step_fn(
-            state, step_idx, action
-        )
-        episode_rewards.append(rewards[0])
-        current_obs = next_obs
+            actions, planner_state = planner.solve(planner_state, data, cost_params)
+            action = actions[0][None, :]  # Add agent dim
 
-        if terminated or truncated:
-            break
+            # Extract state and obs before stepping
+            state_array = get_state_array_fn(data)
+            obs = current_obs[0]  # Remove agent dim
 
-    return (
-        jnp.stack(episode_states),  # 18D states for visualization
-        jnp.stack(episode_obs),  # 17D observations for buffer
-        jnp.stack(episode_actions),
-        jnp.array(episode_rewards),
-        ep_len,
-        key,
-    )
+            # Step environment
+            data, next_obs, rewards, terminated, truncated, info = step_fn(
+                data, step_idx, action
+            )
+
+            carry = (data, next_obs, planner_state, key)
+            outputs = (state_array, obs, action[0], rewards[0])
+            return carry, outputs
+
+        init_carry = (data, current_obs, planner_state, key)
+        step_indices = jnp.arange(max_episode_length)
+
+        final_carry, outputs = jax.lax.scan(step_body, init_carry, step_indices)
+        states, obs, actions, rewards = outputs
+
+        _, _, _, key = final_carry
+
+        return states, obs, actions, rewards, key
+
+    return jax.jit(collect_episode)
 
 
 def plot_cheetah_trajectory(states, target_velocity, config):
@@ -175,20 +179,20 @@ def create_cheetah_xy_animation(states, dt, max_frames=100, save_path=None):
     else:
         effective_dt = dt
 
-    # Link lengths (scaled for visibility, approximate HalfCheetah proportions)
+    # Link lengths from MuJoCo XML body positions
+    # bthigh to bshin: pos=".16 0 -.25" → sqrt(.16² + .25²) ≈ 0.30
+    # bshin to bfoot: pos="-.28 0 -.14" → sqrt(.28² + .14²) ≈ 0.31
+    # foot extends ~0.19 below ankle (geom pos + half-length + radius)
     torso_length = 1.0
-    thigh_length = 0.4
-    shin_length = 0.4
-    foot_length = 0.2
-
-    # Initial torso height from MuJoCo XML (torso starts at z=0.7)
-    TORSO_INITIAL_Z = 0.7
+    thigh_length = 0.30
+    shin_length = 0.31
+    foot_length = 0.19
 
     def get_cheetah_points(state):
         """Compute joint positions from state using forward kinematics."""
         rootx = state[0]
-        # rootz is a slide joint displacement from initial position (0.7)
-        rootz = TORSO_INITIAL_Z + state[1]
+        # rootz (qpos[1]) is the absolute z-position of the torso
+        rootz = state[1]
         rooty = state[2]  # Pitch angle
 
         # Joint angles
@@ -428,7 +432,8 @@ def main(config, save_dir):
     plot_freq = config.get("plot_freq", 10)
 
     # Initialize components
-    reset_fn, step_fn, get_obs_fn = init_env(config)
+    print("Initializing components...")
+    reset_fn, step_fn, get_obs_fn, get_state_array_fn = init_env(config)
     normalizer, norm_params = init_normalizer(config)
 
     key, model_key = jax.random.split(key)
@@ -445,6 +450,18 @@ def main(config, save_dir):
 
     key, planner_key = jax.random.split(key)
     planner, planner_state = init_planner(config, cost_fn, planner_key)
+
+    # Create JIT-compiled episode collection function
+    dim_obs = config.get("dim_obs", 17)
+    collect_episode = make_collect_episode_fn(
+        reset_fn,
+        step_fn,
+        get_obs_fn,
+        get_state_array_fn,
+        planner,
+        config["max_episode_length"],
+    )
+    print("Initialization complete.")
 
     # Initialize buffer - store 17D observations
     dim_obs = config.get("dim_obs", 17)
@@ -476,22 +493,20 @@ def main(config, save_dir):
         })
 
         # Collect episode
-        print(f"\nCollecting episode {ep + 1}...")
         ep_start = time.perf_counter()
-        states, obs, actions, rewards, ep_len, key = collect_episode(
+        states, obs, actions, rewards, key = collect_episode(
             key,
-            reset_fn,
-            step_fn,
-            get_obs_fn,
-            get_state_array_fn,
-            planner,
             planner_state,
             train_state,
             target_velocity,
-            config["max_episode_length"],
         )
+        # Block until computation is complete for accurate timing
+        jax.block_until_ready(rewards)
+        ep_time = time.perf_counter() - ep_start
 
-        # Add 17D observations to buffer
+        ep_len = config["max_episode_length"]
+
+        # Add observations to buffer
         for t in range(ep_len):
             if buffer_idx >= buffer_size:
                 print(f"Warning: Buffer full at episode {ep}, truncating.")
@@ -499,7 +514,7 @@ def main(config, save_dir):
             buffers = update_buffer_dynamic(
                 buffers,
                 buffer_idx,
-                obs[t : t + 1],  # 17D observation
+                obs[t : t + 1],
                 actions[t : t + 1],
                 rewards[t : t + 1],
                 jnp.zeros(1),
@@ -514,11 +529,12 @@ def main(config, save_dir):
 
         print(
             f"Episode {ep + 1}/{config['num_episodes']}: "
-            f"len={ep_len}, avg_vel={avg_velocity:.2f}, "
+            f"time={ep_time:.2f}s, avg_vel={avg_velocity:.2f}, "
             f"final_x={final_x:.2f}, target={target_velocity:.2f}"
         )
         wandb.log({
             "episode/length": ep_len,
+            "episode/time": ep_time,
             "episode/avg_velocity": avg_velocity,
             "episode/final_x_position": final_x,
             "episode/target_velocity": target_velocity,
@@ -526,12 +542,10 @@ def main(config, save_dir):
 
         # Plot episode trajectory at plot_freq
         if ep == 0 or (ep + 1) % plot_freq == 0:
-            # Trajectory plot
             fig = plot_cheetah_trajectory(states, target_velocity, config)
             wandb.log({f"episode/trajectory_ep_{ep+1}": wandb.Image(fig)}, step=ep)
             plt.close(fig)
 
-            # Animated GIF of cheetah movement
             gif_path = create_cheetah_xy_animation(
                 states, config["env_params"]["dt"]
             )
@@ -554,7 +568,7 @@ def main(config, save_dir):
     save_buffer(buffers, buffer_idx, save_dir, config["env_name"], episode_info)
 
     wandb.finish()
-    print(f"Data collection complete. Total transitions: {buffer_idx}")
+    print(f"\nData collection complete. Total transitions: {buffer_idx}")
 
 
 if __name__ == "__main__":
