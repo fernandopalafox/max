@@ -156,7 +156,7 @@ Each script reads from the same JSON config but uses its own section (`data_coll
 
 2. **Pretraining**: Takes the collected transitions and trains a dynamics model (e.g., neural network) with supervised learning.
 
-3. **Finetuning**: Loads the pretrained model and adapts it online in an environment with *different* parameters than data collection (to test generalization).
+3. **Finetuning**: Loads the pretrained model and adapts it online in an environment with *different* parameters than data collection (to test finetuning).
 
 ## License
 
