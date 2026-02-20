@@ -2003,7 +2003,6 @@ def create_cheetah_ground_truth(
         Returns:
             next_data: mjx.Data (full MuJoCo physics state)
         """
-        # Direct physics step - no reconstruction!
         return mjx_env.step(mjx_model, data, action, n_substeps)
 
     params = {"model": None, "normalizer": None}
