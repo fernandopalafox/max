@@ -119,7 +119,7 @@ def main(config):
     os.makedirs(save_path, exist_ok=True)
     params_np = jax.device_get(train_state.params)
     data_name = os.path.basename(config["data_path"]).replace("_buffer.pkl", "")
-    model_name = f"{config['dynamics']}_{data_name}.pkl"
+    model_name = f"{config['dynamics']}_{data_name}"
     with open(os.path.join(save_path, model_name), "wb") as f:
         pickle.dump(params_np, f)
     print(f"Model saved to {os.path.join(save_path, model_name)}")
