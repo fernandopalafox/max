@@ -363,8 +363,15 @@ def _icem_solve_internal(
     )
 
     final_mean, _, final_key, final_best_seq, _, final_elites = final_carry
+
+    # Temporal shift: roll forward by one timestep, repeat last action
+    shifted_mean = jnp.concatenate([final_mean[dim_control:], final_mean[-dim_control:]])
+    shifted_elites = jnp.concatenate(
+        [final_elites[:, dim_control:], final_elites[:, -dim_control:]], axis=1
+    )
+
     new_state = state.replace(
-        mean=final_mean, elites=final_elites, key=final_key
+        mean=shifted_mean, elites=shifted_elites, key=final_key
     )
     best_controls = final_best_seq.reshape(horizon, dim_control)
 
