@@ -179,20 +179,22 @@ def create_cheetah_xy_animation(states, dt, max_frames=100, save_path=None):
     else:
         effective_dt = dt
 
-    # Link lengths from MuJoCo XML body positions
-    # bthigh to bshin: pos=".16 0 -.25" → sqrt(.16² + .25²) ≈ 0.30
-    # bshin to bfoot: pos="-.28 0 -.14" → sqrt(.28² + .14²) ≈ 0.31
-    # foot extends ~0.19 below ankle (geom pos + half-length + radius)
+    # Link lengths - scaled to fit within torso height of 0.7m
+    # The cheetah's legs bend, so total extended length can exceed standing height
+    # Using slightly shorter lengths for visualization clarity
     torso_length = 1.0
-    thigh_length = 0.30
-    shin_length = 0.31
-    foot_length = 0.19
+    thigh_length = 0.23
+    shin_length = 0.23
+    foot_length = 0.14
+
+    # Initial torso height from MuJoCo XML (torso starts at z=0.7)
+    TORSO_INITIAL_Z = 0.7
 
     def get_cheetah_points(state):
         """Compute joint positions from state using forward kinematics."""
         rootx = state[0]
-        # rootz (qpos[1]) is the absolute z-position of the torso
-        rootz = state[1]
+        # rootz (qpos[1]) is displacement from initial z position
+        rootz = TORSO_INITIAL_Z + state[1]
         rooty = state[2]  # Pitch angle
 
         # Joint angles
@@ -214,8 +216,9 @@ def create_cheetah_xy_animation(states, dt, max_frames=100, save_path=None):
         ])
 
         # Back leg (attached at torso_back)
+        # Thigh hangs down from hip; joint angle 0 means pointing straight down
         back_hip = torso_back.copy()
-        angle = rooty + bthigh_angle - np.pi / 2
+        angle = rooty - np.pi / 2 + bthigh_angle
         back_knee = back_hip + thigh_length * np.array([np.cos(angle), np.sin(angle)])
         angle += bshin_angle
         back_ankle = back_knee + shin_length * np.array([np.cos(angle), np.sin(angle)])
@@ -224,7 +227,7 @@ def create_cheetah_xy_animation(states, dt, max_frames=100, save_path=None):
 
         # Front leg (attached at torso_front)
         front_hip = torso_front.copy()
-        angle = rooty + fthigh_angle - np.pi / 2
+        angle = rooty - np.pi / 2 + fthigh_angle
         front_knee = front_hip + thigh_length * np.array([np.cos(angle), np.sin(angle)])
         angle += fshin_angle
         front_ankle = front_knee + shin_length * np.array([np.cos(angle), np.sin(angle)])
