@@ -41,10 +41,10 @@
 
     "planner_type": "icem",
     "planner_params": {
-      "horizon": 30,
-      "batch_size": 50,
-      "max_iter": 5,
-      "elit_frac": 0.02,
+      "horizon": 15,
+      "batch_size": 200,
+      "max_iter": 1,
+      "elit_frac": 0.05,
       "learning_rate": 0.9,
       "colored_noise_beta": 0.25,
       "initial_variance_val": 0.25,
