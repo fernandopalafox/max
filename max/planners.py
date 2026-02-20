@@ -251,15 +251,48 @@ def _create_icem_solve(config: Any, cost_fn: CostFn) -> Callable:
     unrolled_dim = horizon * dim_control
     initial_var = jnp.ones(unrolled_dim) * initial_var_val
 
-    # Pre-create vmapped noise function (doesn't depend on runtime args)
-    vmapped_noise_fn = jax.vmap(
-        lambda k: powerlaw_psd_gaussian(
-            exponent=colored_noise_beta,
-            size=(unrolled_dim,),
-            rng=k,
-            fmin=colored_noise_fmin,
+    # Pre-compute noise parameters (only depends on static config)
+    # These are closed over by _generate_colored_noise below
+    samples = unrolled_dim
+    f = rfftfreq(samples)
+    fmin_val = jnp.maximum(colored_noise_fmin, 1.0 / samples)
+
+    # Compute s_scale with cutoff frequency handling
+    s_scale = f.copy()
+    ix = int(jnp.sum(s_scale < fmin_val))
+    if ix > 0 and ix < len(s_scale):
+        s_scale = s_scale.at[:ix].set(s_scale[ix])
+    s_scale = s_scale ** (-colored_noise_beta / 2.0)
+
+    # Compute sigma for normalization
+    w = s_scale[1:].at[-1].set(s_scale[-1] * (1 + (samples % 2)) / 2.0)
+    sigma = 2 * jnp.sqrt(jnp.sum(w**2)) / samples
+
+    # Check if samples is even (used for Nyquist handling)
+    samples_even = (samples % 2 == 0)
+
+    def _generate_colored_noise(rng):
+        """Generate colored noise with pre-computed scaling (closes over s_scale, sigma)."""
+        key_sr, key_si = random.split(rng)
+        sr = random.normal(key=key_sr, shape=s_scale.shape) * s_scale
+        si = random.normal(key=key_si, shape=s_scale.shape) * s_scale
+
+        # DC component: set imaginary to 0, scale real by sqrt(2)
+        si = si.at[0].set(0)
+        sr = sr.at[0].set(sr[0] * jnp.sqrt(2))
+
+        # Nyquist component for even-length signals
+        sr, si = jax.lax.cond(
+            samples_even,
+            lambda: (sr.at[-1].set(sr[-1] * jnp.sqrt(2)), si.at[-1].set(0)),
+            lambda: (sr, si)
         )
-    )
+
+        s = sr + 1j * si
+        return irfft(s, n=samples) / sigma
+
+    # Vmap over batch of RNG keys
+    vmapped_noise_fn = jax.vmap(_generate_colored_noise)
 
     @jax.jit
     def solve(
@@ -385,67 +418,3 @@ def create_icem_planner(
         return _solve(state, init_env_state, cost_params)
 
     return Planner(cost_fn=cost_fn, solve_fn=solve_fn), initial_state
-
-
-# --- iCEM Helper Function ---
-
-
-@partial(jax.jit, static_argnums=(0, 1, 3))
-def powerlaw_psd_gaussian(
-    exponent: float, size: tuple, rng: jax.Array, fmin: float = 0
-) -> Array:
-    """Generates Gaussian noise with a power-law power spectral density."""
-    samples = size[-1]
-    f = rfftfreq(samples)
-    fmin = jnp.maximum(fmin, 1.0 / samples)
-
-    s_scale = f
-    ix = jnp.sum(s_scale < fmin)
-
-    def cutoff(x, idx):
-        x_idx = jax.lax.dynamic_slice(x, (idx,), (1,))
-        y = jnp.ones_like(x) * x_idx
-        mask = jnp.arange(x.shape[0]) < idx
-        return jnp.where(mask, y, x)
-
-    s_scale = jax.lax.cond(
-        jnp.logical_and(ix > 0, ix < len(s_scale)),
-        cutoff,
-        lambda x, idx: x,
-        s_scale,
-        ix,
-    )
-    s_scale = s_scale ** (-exponent / 2.0)
-
-    w = s_scale[1:]
-    w = w.at[-1].set(w[-1] * (1 + (samples % 2)) / 2.0)
-    sigma = 2 * jnp.sqrt(jnp.sum(w**2)) / samples
-
-    size_list = list(size)
-    size_list[-1] = len(f)
-    dims_to_add = len(size_list) - 1
-    s_scale_shaped = s_scale[(jnp.newaxis,) * dims_to_add + (Ellipsis,)]
-
-    key_sr, key_si = random.split(rng)
-    sr = random.normal(key=key_sr, shape=tuple(size_list)) * s_scale_shaped
-    si = random.normal(key=key_si, shape=tuple(size_list)) * s_scale_shaped
-
-    si = si.at[..., 0].set(0)
-    sr = sr.at[..., 0].set(sr[..., 0] * jnp.sqrt(2))
-
-    def make_real_if_even(sr_in, si_in):
-        si_out = si_in.at[..., -1].set(0)
-        sr_out = sr_in.at[..., -1].set(sr_in[..., -1] * jnp.sqrt(2))
-        return sr_out, si_out
-
-    sr, si = jax.lax.cond(
-        samples % 2 == 0,
-        make_real_if_even,
-        lambda sr_in, si_in: (sr_in, si_in),
-        sr,
-        si,
-    )
-
-    s = sr + 1j * si
-    y = irfft(s, n=samples, axis=-1) / sigma
-    return y
