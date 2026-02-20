@@ -57,7 +57,7 @@
     "cost_fn_params": {
       "target_velocity": 3.0,
       "weight_control": 0.1,
-      "weight_jerk": 0.001
+      "heading_penalty_factor": 10.0
     },
 
     "normalization": { "method": "static" },
@@ -82,7 +82,7 @@
 
     "domain_randomization": {
       "target_velocity": {
-        "min": 1.0,
+        "min": 0.01,
         "max": 5.0
       }
     }
