@@ -38,7 +38,6 @@ def make_collect_episode_fn(
     reset_fn,
     step_fn,
     get_obs_fn,
-    get_state_array_fn,
     planner,
     max_episode_length,
 ):
@@ -71,7 +70,7 @@ def make_collect_episode_fn(
             action = actions[0][None, :]  # Add agent dim
 
             # Extract state and obs before stepping
-            state_array = get_state_array_fn(data)
+            state_array = jnp.concatenate([data.qpos, data.qvel])
             obs = current_obs[0]  # Remove agent dim
 
             # Step environment
@@ -436,7 +435,7 @@ def main(config, save_dir):
 
     # Initialize components
     print("Initializing components...")
-    reset_fn, step_fn, get_obs_fn, get_state_array_fn = init_env(config)
+    reset_fn, step_fn, get_obs_fn = init_env(config)
     normalizer, norm_params = init_normalizer(config)
 
     key, model_key = jax.random.split(key)
@@ -460,7 +459,6 @@ def main(config, save_dir):
         reset_fn,
         step_fn,
         get_obs_fn,
-        get_state_array_fn,
         planner,
         config["max_episode_length"],
     )

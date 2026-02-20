@@ -1277,12 +1277,7 @@ def make_cheetah_env(params: EnvParams):
         obs = jnp.concatenate([data.qpos[1:], data.qvel])
         return obs[None, :]  # Add agent dimension
 
-    @jax.jit
-    def get_state_array_fn(data: mjx.Data) -> jnp.ndarray:
-        """Helper: extract 18D state array from mjx.Data for visualization."""
-        return jnp.concatenate([data.qpos, data.qvel])
-
-    return reset_fn, step_fn, get_obs_fn, get_state_array_fn
+    return reset_fn, step_fn, get_obs_fn
 
 
 def init_env(config: Dict[str, Any]):
