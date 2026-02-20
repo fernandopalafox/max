@@ -448,17 +448,19 @@ def _stage_cost_cheetah_velocity_tracking(
     control: jnp.ndarray,
     target_velocity: float,
     weight_control: float,
+    heading_penalty_factor: float,
 ) -> float:
     """
-    Stage cost for cheetah velocity tracking.
+    Stage cost for cheetah velocity tracking with flip penalty.
 
-    Cost = (forward_vel - target_vel)^2 + weight_control * ||u||^2
+    Cost = (forward_vel - target_vel)^2 + weight_control * ||u||^2 + flip_penalty
 
     Args:
         data: mjx.Data (full MuJoCo physics state)
         control: 6D action torques
         target_velocity: Desired forward velocity
-        weight_control: Control penalty weight (0.1 per spec)
+        weight_control: Control penalty weight
+        heading_penalty_factor: Penalty for flipping (applied when |root_angle| > pi/2)
 
     Returns:
         Scalar cost
@@ -472,7 +474,14 @@ def _stage_cost_cheetah_velocity_tracking(
     # Control penalty
     control_cost = weight_control * jnp.sum(control ** 2)
 
-    return velocity_error + control_cost
+    # Flip penalty: penalize when root angle exceeds pi/2
+    root_angle = data.qpos[2]
+    flip_penalty = heading_penalty_factor * (
+        (root_angle > jnp.pi / 2).astype(jnp.float32) +
+        (root_angle < -jnp.pi / 2).astype(jnp.float32)
+    )
+
+    return velocity_error + control_cost + flip_penalty
 
 
 def _terminal_cost_cheetah_velocity_tracking(
@@ -892,17 +901,17 @@ def init_cost(config, dynamics_model):
     elif cost_type == "cheetah_velocity_tracking":
         # Cheetah velocity tracking cost using mjx.Data directly
         params = config["cost_fn_params"]
-        target_velocity = params["target_velocity"]
         weight_control = params["weight_control"]
-        weight_jerk = params.get("weight_jerk", 0.0)
+        heading_penalty_factor = params.get("heading_penalty_factor", 10.0)
 
         # Vectorize stage cost over the horizon
-        # When scan outputs mjx.Data, it stacks leaves into a pytree with time dimension
+        # weight_control and heading_penalty_factor are closed over
+        # target_velocity is read from cost_params at runtime
         stage_cost_vmap = jax.vmap(
-            lambda d, u: _stage_cost_cheetah_velocity_tracking(
-                d, u, target_velocity, weight_control
+            lambda d, u, cp: _stage_cost_cheetah_velocity_tracking(
+                d, u, cp["target_velocity"], weight_control, heading_penalty_factor
             ),
-            in_axes=(0, 0),
+            in_axes=(0, 0, None),
         )
 
         @jax.jit
@@ -914,23 +923,15 @@ def init_cost(config, dynamics_model):
             )
 
             # 2. Calculate stage costs over all timesteps
-            # data_sequence has time dimension from scan
-            stage_costs = stage_cost_vmap(data_sequence, controls)
+            stage_costs = stage_cost_vmap(data_sequence, controls, cost_params)
 
             # 3. Calculate terminal cost (on final state)
-            # Extract final state using tree_map to get last element of each leaf
             final_data = jax.tree.map(lambda x: x[-1], data_sequence)
             terminal = _terminal_cost_cheetah_velocity_tracking(
-                final_data, target_velocity
+                final_data, cost_params["target_velocity"]
             )
 
-            # 4. Calculate Jerk Cost (on controls)
-            jerk = 0.0
-            if weight_jerk > 0:
-                control_diffs = jnp.diff(controls, axis=0)
-                jerk = weight_jerk * jnp.sum(control_diffs ** 2)
-
-            return jnp.sum(stage_costs) + terminal + jerk
+            return jnp.sum(stage_costs) + terminal
 
         return cost_fn
 
