@@ -41,7 +41,7 @@
 
     "planner_type": "icem",
     "planner_params": {
-      "horizon": 15,
+      "horizon": 25,
       "batch_size": 200,
       "max_iter": 1,
       "elit_frac": 0.05,
