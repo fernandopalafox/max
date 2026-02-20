@@ -21,8 +21,7 @@
     "env_name": "cheetah",
     "env_params": {
       "num_agents": 1,
-      "max_episode_steps": 500,
-      "dt": 0.01
+      "max_episode_steps": 500
     },
 
     "dynamics": "cheetah_ground_truth",
@@ -175,8 +174,7 @@
 
     "env_params": {
       "num_agents": 1,
-      "max_episode_steps": 500,
-      "dt": 0.01
+      "max_episode_steps": 500
     },
 
     "trainer": "gd",

@@ -103,7 +103,7 @@ def plot_cheetah_trajectory(states, target_velocity, config):
     - Right: Joint angles over time
     """
     states = np.array(states)  # 18D states
-    dt = config["env_params"]["dt"]
+    dt = 0.01
     time = np.arange(len(states)) * dt
 
     # X position is qpos[0] = states[:, 0]
@@ -151,7 +151,7 @@ def plot_cheetah_trajectory(states, target_velocity, config):
     return fig
 
 
-def create_cheetah_xy_animation(states, dt, max_frames=100, save_path=None):
+def create_cheetah_xy_animation(states, max_frames=100, save_path=None):
     """
     Creates an animated GIF showing the cheetah as a stick-figure mesh.
 
@@ -169,6 +169,7 @@ def create_cheetah_xy_animation(states, dt, max_frames=100, save_path=None):
     import tempfile
 
     states = np.array(states)
+    dt = 0.01
 
     # Subsample if too many frames
     if len(states) > max_frames:
@@ -544,14 +545,14 @@ def main(config, save_dir):
         # Plot episode trajectory at plot_freq
         if ep == 0 or (ep + 1) % plot_freq == 0:
             fig = plot_cheetah_trajectory(states, target_velocity, config)
-            wandb.log({f"episode/trajectory_ep_{ep+1}": wandb.Image(fig)}, step=ep)
+            wandb.log({
+                "episode/trajectory": wandb.Image(fig, caption=f"Episode {ep+1}")
+            }, step=ep)
             plt.close(fig)
 
-            gif_path = create_cheetah_xy_animation(
-                states, config["env_params"]["dt"]
-            )
+            gif_path = create_cheetah_xy_animation(states)
             wandb.log({
-                f"episode/cheetah_anim_ep_{ep+1}": wandb.Video(gif_path, fps=20, format="gif")
+                "episode/animation": wandb.Video(gif_path, fps=20, format="gif")
             }, step=ep)
 
     # Final histograms
