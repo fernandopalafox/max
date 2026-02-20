@@ -1,11 +1,11 @@
 {
   "data_collection": {
-    "num_episodes": 2,
-    "max_episode_length": 500,
+    "num_episodes": 1000,
+    "max_episode_length": 300,
     "seed": 42,
     "save_path": "./data/cheetah_data",
     "wandb_project": "cheetah_data_collection",
-    "plot_freq": 10,
+    "plot_freq": 100,
 
     "num_agents": 1,
     "dim_state": 18,
@@ -42,7 +42,7 @@
     "planner_type": "icem",
     "planner_params": {
       "horizon": 30,
-      "batch_size": 500,
+      "batch_size": 50,
       "max_iter": 5,
       "elit_frac": 0.02,
       "learning_rate": 0.9,
@@ -85,6 +85,156 @@
         "min": 0.01,
         "max": 5.0
       }
+    }
+  },
+
+  "pretraining": {
+    "seed": 42,
+    "wandb_project": "cheetah_pretraining",
+    "data_path": "./data/cheetah_data/cheetah_buffer_0219.pkl",
+    "save_path": "./data/pretrained_models",
+
+    "num_epochs": 400,
+    "batch_size": 256,
+    "train_split": 0.8,
+
+    "dim_state": 17,
+    "dim_action": 6,
+
+    "dynamics": "mlp_resnet",
+    "dynamics_params": {
+      "nn_features": [256, 256, 256],
+      "ensemble_size": 3
+    },
+
+    "trainer": "gd",
+    "trainer_params": {
+      "learning_rate": 3e-4
+    },
+
+    "normalization": { "method": "static" },
+    "normalization_params": {
+      "state": {
+        "min": [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,
+                -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0],
+        "max": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+      },
+      "action": {
+        "min": [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+        "max": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      },
+      "delta": {
+        "min": [-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5,
+                -2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0],
+        "max": [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
+                2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+      }
+    }
+  },
+
+  "finetuning": {
+    "wandb_project": "cheetah_finetuning",
+    "seed": 43,
+    "save_dir": null,
+    "plot_run": true,
+    "plot_eval": false,
+    "env_name": "cheetah",
+    "num_agents": 1,
+    "total_steps": 500,
+    "dim_state": 17,
+    "dim_action": 6,
+    "train_model_freq": 1000,
+    "train_policy_freq": 1,
+    "normalize_freq": 1000000,
+    "eval_freq": 10,
+    "buffer_size": 5000,
+
+    "evaluator_type": "rollout",
+    "evaluator_params": {
+      "seed": 123,
+      "max_steps": 300,
+      "num_episodes": 1,
+      "eval_cost_types": ["cheetah_velocity_tracking_learned"],
+      "env_params": {},
+      "dynamics_params": {},
+      "planner_params": {},
+      "cost_fn_params": {
+        "target_velocity": 5.0,
+        "weight_control": 0.1,
+        "heading_penalty_factor": 10.0
+      }
+    },
+
+    "dynamics": "mlp_resnet",
+    "dynamics_params": {
+      "nn_features": [256, 256, 256],
+      "ensemble_size": 3,
+      "pretrained_params_path": "./data/pretrained_models/mlp_resnet_cheetah_buffer_0219.pkl"
+    },
+
+    "env_params": {
+      "num_agents": 1,
+      "max_episode_steps": 500,
+      "dt": 0.01
+    },
+
+    "trainer": "gd",
+    "trainer_params": {
+      "learning_rate": 1.0,
+      "weight_decay": 0.0,
+      "proc_noise_init": 0.0,
+      "proc_noise_decay": 1.0,
+      "proc_noise_floor": 0.0,
+      "init_cov_scale": 0.1,
+      "jitter": 0.0
+    },
+
+    "normalization": { "method": "static" },
+    "normalization_params": {
+      "state": {
+        "min": [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,
+                -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0],
+        "max": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+      },
+      "action": {
+        "min": [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+        "max": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      },
+      "delta": {
+        "min": [-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5,
+                -2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0],
+        "max": [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
+                2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+      }
+    },
+
+    "state_labels": [
+      "rootz", "rooty", "bthigh", "bshin", "bfoot", "fthigh", "fshin", "ffoot",
+      "vel_x", "vel_z", "vel_y", "vel_bthigh", "vel_bshin", "vel_bfoot",
+      "vel_fthigh", "vel_fshin", "vel_ffoot"
+    ],
+
+    "cost_type": "cheetah_velocity_tracking_learned",
+    "planner_type": "icem",
+    "planner_params": {
+      "horizon": 30,
+      "batch_size": 50,
+      "max_iter": 5,
+      "elit_frac": 0.02,
+      "learning_rate": 0.9,
+      "colored_noise_beta": 0.25,
+      "initial_variance_val": 0.25,
+      "dim_control": 6,
+      "action_low": [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+      "action_high": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    },
+
+    "cost_fn_params": {
+      "target_velocity": 0.5,
+      "weight_control": 0.1,
+      "heading_penalty_factor": 10.0
     }
   }
 }

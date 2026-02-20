@@ -511,6 +511,52 @@ def _rollout_cheetah(init_data, controls, cost_params, pred_fn):
     return data_sequence
 
 
+def _stage_cost_cheetah_velocity_tracking_learned(
+    state: jnp.ndarray,  # 17D state vector
+    control: jnp.ndarray,
+    target_velocity: float,
+    weight_control: float,
+    heading_penalty_factor: float,
+) -> float:
+    """
+    Stage cost for cheetah velocity tracking using 17D state vector.
+
+    17D state layout:
+    - [0:8]: positions (rootz, rooty, bthigh, bshin, bfoot, fthigh, fshin, ffoot)
+    - [8:17]: velocities (vel_x, vel_z, vel_y, vel_bthigh, vel_bshin, vel_bfoot,
+                          vel_fthigh, vel_fshin, vel_ffoot)
+
+    Cost = (forward_vel - target_vel)^2 + weight_control * ||u||^2 + flip_penalty
+    """
+    # Forward velocity is vel_x at index 8
+    forward_vel = state[8]
+
+    # Velocity tracking error
+    velocity_error = (forward_vel - target_velocity) ** 2
+
+    # Control penalty
+    control_cost = weight_control * jnp.sum(control ** 2)
+
+    # Flip penalty: penalize when root angle exceeds pi/2
+    # Root angle (rooty) is at index 1
+    root_angle = state[1]
+    flip_penalty = heading_penalty_factor * (
+        (root_angle > jnp.pi / 2).astype(jnp.float32) +
+        (root_angle < -jnp.pi / 2).astype(jnp.float32)
+    )
+
+    return velocity_error + control_cost + flip_penalty
+
+
+def _terminal_cost_cheetah_velocity_tracking_learned(
+    state: jnp.ndarray,  # 17D state vector
+    target_velocity: float,
+) -> float:
+    """Terminal cost: velocity tracking error only."""
+    forward_vel = state[8]  # vel_x at index 8
+    return (forward_vel - target_velocity) ** 2
+
+
 # --- Evaluation cost helpers ---
 
 
@@ -929,6 +975,39 @@ def init_cost(config, dynamics_model):
             final_data = jax.tree.map(lambda x: x[-1], data_sequence)
             terminal = _terminal_cost_cheetah_velocity_tracking(
                 final_data, cost_params["target_velocity"]
+            )
+
+            return jnp.sum(stage_costs) + terminal
+
+        return cost_fn
+
+    elif cost_type == "cheetah_velocity_tracking_learned":
+        # Cheetah velocity tracking for learned models (17D state vector)
+        params = config["cost_fn_params"]
+        weight_control = params["weight_control"]
+        heading_penalty_factor = params.get("heading_penalty_factor", 10.0)
+
+        stage_cost_vmap = jax.vmap(
+            lambda s, u, cp: _stage_cost_cheetah_velocity_tracking_learned(
+                s, u, cp["target_velocity"], weight_control, heading_penalty_factor
+            ),
+            in_axes=(0, 0, None),
+        )
+
+        @jax.jit
+        def cost_fn(init_state, controls, cost_params):
+            """Total trajectory cost for cheetah velocity tracking using learned model."""
+            # 1. Rollout trajectory using dynamics (17D state throughout)
+            states = _rollout(
+                init_state, controls, cost_params, dynamics_model.pred_one_step
+            )
+
+            # 2. Calculate stage costs (on states 0 to T-1)
+            stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
+
+            # 3. Calculate terminal cost (on final state)
+            terminal = _terminal_cost_cheetah_velocity_tracking_learned(
+                states[-1], cost_params["target_velocity"]
             )
 
             return jnp.sum(stage_costs) + terminal
