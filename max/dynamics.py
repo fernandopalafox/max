@@ -162,15 +162,9 @@ def create_mlp_resnet_last_layer(
     num_hidden = len(nn_features)
     output_layer_name = f"Dense_{num_hidden}"
 
-    # Initialize and split parameters for each ensemble member
-    keys = jax.random.split(key, ensemble_size)
-
     def init_and_split_params(k):
         """Initialize full params, return (frozen_params, trainable_params)."""
-        if pretrained_nn_params is not None:
-            full_params = {"params": pretrained_nn_params["model"]["params"]}
-        else:
-            full_params = base_model.init(k, dummy_state, dummy_action)
+        full_params = base_model.init(k, dummy_state, dummy_action)
 
         # Extract frozen hidden layer params
         frozen = {"params": {}}
@@ -183,32 +177,42 @@ def create_mlp_resnet_last_layer(
 
         return frozen, trainable
 
-    if ensemble_size == 1:
-        frozen_params, trainable_params = init_and_split_params(keys[0])
-        # frozen_params is a single dict, trainable_params is a single dict
-    else:
-        # Initialize each ensemble member separately
-        all_frozen = []
-        all_trainable = []
-        for i in range(ensemble_size):
-            frozen, trainable = init_and_split_params(keys[i])
-            all_frozen.append(frozen)
-            all_trainable.append(trainable)
+    if pretrained_nn_params is not None:
+        # Pretrained params already have correct structure (including ensemble dim if applicable)
+        # Just split into frozen (hidden layers) and trainable (output layer)
+        pretrained_model_params = pretrained_nn_params["model"]["params"]
 
-        # Stack frozen params: list of dicts -> dict with stacked arrays
         frozen_params = {"params": {}}
         for i in range(num_hidden):
             layer_name = f"Dense_{i}"
-            frozen_params["params"][layer_name] = {
-                "kernel": jnp.stack([f["params"][layer_name]["kernel"] for f in all_frozen], axis=0),
-                "bias": jnp.stack([f["params"][layer_name]["bias"] for f in all_frozen], axis=0),
-            }
+            frozen_params["params"][layer_name] = pretrained_model_params[layer_name]
 
-        # Stack trainable params
-        trainable_params = {"params": {output_layer_name: {
-            "kernel": jnp.stack([t["params"][output_layer_name]["kernel"] for t in all_trainable], axis=0),
-            "bias": jnp.stack([t["params"][output_layer_name]["bias"] for t in all_trainable], axis=0),
-        }}}
+        trainable_params = {"params": {output_layer_name: pretrained_model_params[output_layer_name]}}
+    else:
+        # Fresh initialization
+        keys = jax.random.split(key, ensemble_size)
+        if ensemble_size == 1:
+            frozen_params, trainable_params = init_and_split_params(keys[0])
+        else:
+            all_frozen = []
+            all_trainable = []
+            for i in range(ensemble_size):
+                frozen, trainable = init_and_split_params(keys[i])
+                all_frozen.append(frozen)
+                all_trainable.append(trainable)
+
+            frozen_params = {"params": {}}
+            for i in range(num_hidden):
+                layer_name = f"Dense_{i}"
+                frozen_params["params"][layer_name] = {
+                    "kernel": jnp.stack([f["params"][layer_name]["kernel"] for f in all_frozen], axis=0),
+                    "bias": jnp.stack([f["params"][layer_name]["bias"] for f in all_frozen], axis=0),
+                }
+
+            trainable_params = {"params": {output_layer_name: {
+                "kernel": jnp.stack([t["params"][output_layer_name]["kernel"] for t in all_trainable], axis=0),
+                "bias": jnp.stack([t["params"][output_layer_name]["bias"] for t in all_trainable], axis=0),
+            }}}
 
     params = {"model": trainable_params, "normalizer": normalizer_params}
 
@@ -241,26 +245,10 @@ def create_mlp_resnet_last_layer(
                 params["model"], frozen_params, norm_params, state, action
             )
         else:
-            # vmap over ensemble members
-            def forward_one_member(ens_idx):
-                # Extract this member's trainable params
-                member_trainable = {"params": {output_layer_name: {
-                    "kernel": params["model"]["params"][output_layer_name]["kernel"][ens_idx],
-                    "bias": params["model"]["params"][output_layer_name]["bias"][ens_idx],
-                }}}
-                # Extract this member's frozen params
-                member_frozen = {"params": {}}
-                for i in range(num_hidden):
-                    layer_name = f"Dense_{i}"
-                    member_frozen["params"][layer_name] = {
-                        "kernel": frozen_params["params"][layer_name]["kernel"][ens_idx],
-                        "bias": frozen_params["params"][layer_name]["bias"][ens_idx],
-                    }
-                return _pred_norm_delta_single(
-                    member_trainable, member_frozen, norm_params, state, action
-                )
-
-            ensemble_preds = jax.vmap(forward_one_member)(jnp.arange(ensemble_size))
+            # vmap over ensemble members - vmap slices both trainable and frozen params
+            ensemble_preds = jax.vmap(
+                lambda tp, fp: _pred_norm_delta_single(tp, fp, norm_params, state, action)
+            )(params["model"], frozen_params)
             return jnp.mean(ensemble_preds, axis=0)
 
     @jax.jit
