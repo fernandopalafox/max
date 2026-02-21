@@ -60,6 +60,9 @@ class EnvParams:
     true_B: Any = None
     target_point: Any = None
 
+    # Specific to cheetah
+    cheetah_mass_scale: float = 1.0  # Multiplier for body masses (default 14kg total)
+
 
 
 
@@ -1232,8 +1235,15 @@ def make_cheetah_env(params: EnvParams):
 
     # Load environment and extract models (closed over)
     env = registry.load('CheetahRun')
-    mjx_model = env.mjx_model
     n_substeps = env.n_substeps
+
+    # Apply mass scaling if specified
+    if params.cheetah_mass_scale != 1.0:
+        mj_model = env.mj_model
+        mj_model.body_mass[:] = mj_model.body_mass * params.cheetah_mass_scale
+        mjx_model = mjx.put_model(mj_model)
+    else:
+        mjx_model = env.mjx_model
 
     @jax.jit
     def reset_fn(key: jax.random.PRNGKey) -> mjx.Data:
