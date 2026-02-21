@@ -140,13 +140,13 @@
     "plot_eval": false,
     "env_name": "cheetah",
     "num_agents": 1,
-    "total_steps": 500,
+    "total_steps": 150,
     "dim_state": 17,
     "dim_action": 6,
-    "train_model_freq": 1000,
+    "train_model_freq": 1,
     "train_policy_freq": 1,
     "normalize_freq": 1000000,
-    "eval_freq": 10,
+    "eval_freq": 50,
     "buffer_size": 5000,
 
     "evaluator_type": "rollout",
@@ -174,12 +174,12 @@
 
     "env_params": {
       "num_agents": 1,
-      "max_episode_steps": 500
+      "max_episode_steps": 5000
     },
 
     "trainer": "gd",
     "trainer_params": {
-      "learning_rate": 1.0,
+      "learning_rate": 3e-5,
       "weight_decay": 0.0,
       "proc_noise_init": 0.0,
       "proc_noise_decay": 1.0,
@@ -217,9 +217,9 @@
     "cost_type": "cheetah_velocity_tracking_learned",
     "planner_type": "icem",
     "planner_params": {
-      "horizon": 30,
-      "batch_size": 50,
-      "max_iter": 5,
+      "horizon": 25,
+      "batch_size": 200,
+      "max_iter": 1,
       "elit_frac": 0.02,
       "learning_rate": 0.9,
       "colored_noise_beta": 0.25,
