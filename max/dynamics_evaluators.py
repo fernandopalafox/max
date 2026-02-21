@@ -176,6 +176,7 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
         "max_steps",
         config.get("env_params", {}).get("max_episode_steps", 200)
     )
+    num_episodes = evaluator_params.get("num_episodes", 1)
 
     # Resolve goal_state and target_velocity from evaluator_params first, then top-level
     eval_cost_fn_params = _resolve_evaluator_config(config, "cost_fn_params")
@@ -254,20 +255,56 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
 
     all_cost_types = stage_cost_types + terminal_cost_types
 
+    # Create vmapped version for multi-episode evaluation
+    @jax.jit
+    def _run_episodes_vmapped(dyn_params: dict, reset_keys: jax.Array, planner_keys: jax.Array):
+        """Run multiple episodes in parallel using vmap."""
+        vmapped_episode = jax.vmap(
+            lambda rk, pk: _run_episode_jitted(dyn_params, rk, pk),
+            in_axes=(0, 0)
+        )
+        return vmapped_episode(reset_keys, planner_keys)
+
     def evaluate_fn(dyn_params: dict) -> dict:
         key = jax.random.key(seed)
-        reset_key, planner_key = jax.random.split(key, 2)
 
-        costs, trajectory, actions = _run_episode_jitted(dyn_params, reset_key, planner_key)
+        if num_episodes == 1:
+            # Backwards compatible: single episode, same behavior as before
+            reset_key, planner_key = jax.random.split(key, 2)
+            costs, trajectory, actions = _run_episode_jitted(dyn_params, reset_key, planner_key)
 
-        results = {}
-        for i, cost_type in enumerate(all_cost_types):
-            results[f"eval/{cost_type}"] = float(costs[i])
+            results = {}
+            for i, cost_type in enumerate(all_cost_types):
+                results[f"eval/{cost_type}"] = float(costs[i])
 
-        # Include trajectory and actions for plotting
-        results["trajectory"] = jax.device_get(trajectory)
-        results["actions"] = jax.device_get(actions)
-        results["goal_state"] = jax.device_get(goal_state)
+            results["trajectory"] = jax.device_get(trajectory)
+            results["actions"] = jax.device_get(actions)
+            results["goal_state"] = jax.device_get(goal_state)
+        else:
+            # Multi-episode: vmap over episodes
+            all_keys = jax.random.split(key, num_episodes * 2)
+            reset_keys = all_keys[:num_episodes]
+            planner_keys = all_keys[num_episodes:]
+
+            # all_costs: (num_episodes, num_cost_types)
+            # all_trajectories: pytree with leading dim num_episodes
+            # all_actions: (num_episodes, max_steps, dim_control)
+            all_costs, all_trajectories, all_actions = _run_episodes_vmapped(
+                dyn_params, reset_keys, planner_keys
+            )
+
+            # Average costs across episodes
+            mean_costs = jnp.mean(all_costs, axis=0)
+
+            results = {}
+            for i, cost_type in enumerate(all_cost_types):
+                results[f"eval/{cost_type}"] = float(mean_costs[i])
+
+            # Return stacked trajectories with shape (num_episodes, max_steps+1, ...)
+            results["trajectory"] = jax.device_get(all_trajectories)
+            results["actions"] = jax.device_get(all_actions)
+            results["goal_state"] = jax.device_get(goal_state)
+            results["num_episodes"] = num_episodes
 
         return results
 
