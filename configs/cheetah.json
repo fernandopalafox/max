@@ -159,7 +159,7 @@
       "dynamics_params": {},
       "planner_params": {},
       "cost_fn_params": {
-        "target_velocity": 5.0,
+        "target_velocity": 4.0,
         "weight_control": 0.1,
         "heading_penalty_factor": 10.0
       }
@@ -174,7 +174,8 @@
 
     "env_params": {
       "num_agents": 1,
-      "max_episode_steps": 5000
+      "max_episode_steps": 5000,
+      "cheetah_mass_scale": 1.5
     },
 
     "trainer": "gd",
