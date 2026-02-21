@@ -149,7 +149,7 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
 
     # --- Initialize components ---
     print("  📦 Initializing evaluation environment...")
-    reset_fn, step_fn, _ = init_env(env_config)
+    reset_fn, step_fn, get_obs_fn = init_env(env_config)
 
     print("  📦 Initializing evaluation dynamics model (structure only)...")
     normalizer, norm_params = init_normalizer(dynamics_config)
@@ -195,13 +195,15 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
     )
     num_episodes = evaluator_params.get("num_episodes", 1)
 
-    # Get goal state for cost_params
+    # Get cost function params for cost_params
+    cost_fn_params = config.get("cost_fn_params", {})
     goal_state = jnp.array(
-        config.get("cost_fn_params", {}).get(
+        cost_fn_params.get(
             "goal_state",
             jnp.zeros(config.get("dim_state", 6))
         )
     )
+    target_velocity = cost_fn_params.get("target_velocity", 0.0)
 
     # --- Define the scan step function ---
     def _scan_step(carry, step_idx):
@@ -217,14 +219,18 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
         """
         env_state, planner_state, cost_params = carry
 
+        # Convert env_state to state array for planner (e.g., mjx.Data -> 17D array)
+        # get_obs_fn returns (1, dim_state), squeeze to (dim_state,)
+        state_array = get_obs_fn(env_state).squeeze(0)
+
         # Plan with current dynamics
-        actions, new_planner_state = planner.solve(planner_state, env_state, cost_params)
+        actions, new_planner_state = planner.solve(planner_state, state_array, cost_params)
         action = actions[0]  # Take first action from horizon
 
         # Compute stage costs for this step (terminal costs are computed separately)
         if num_stage_costs > 0:
             step_costs = jnp.array([
-                cost_fn(env_state, action[None, :], cost_params)
+                cost_fn(state_array, action[None, :], cost_params)
                 for cost_fn in stage_cost_fn_list
             ])
         else:
@@ -233,7 +239,10 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
         # Step environment (ignore termination/truncation - always run full episode)
         new_env_state, _, _, _, _, _ = step_fn(env_state, step_idx, action[None, :])
 
-        return (new_env_state, new_planner_state, cost_params), (step_costs, new_env_state)
+        # Convert new_env_state to state array for terminal cost computation
+        new_state_array = get_obs_fn(new_env_state).squeeze(0)
+
+        return (new_env_state, new_planner_state, cost_params), (step_costs, new_state_array)
 
     def _run_single_episode(dyn_params: dict, reset_key: jax.Array, planner_key: jax.Array) -> jax.Array:
         """
@@ -254,6 +263,7 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
             "dyn_params": dyn_params,
             "params_cov_model": None,
             "goal_state": goal_state,
+            "target_velocity": target_velocity,
         }
 
         # Run rollout with scan (always full max_steps)
@@ -382,7 +392,7 @@ def create_rollout_with_trajectory_evaluator(config: dict) -> Evaluator:
 
     # --- Initialize components ---
     print("  📦 Initializing evaluation environment...")
-    reset_fn, step_fn, _ = init_env(env_config)
+    reset_fn, step_fn, get_obs_fn = init_env(env_config)
 
     print("  📦 Initializing evaluation dynamics model (structure only)...")
     normalizer, norm_params = init_normalizer(dynamics_config)
@@ -423,7 +433,7 @@ def create_rollout_with_trajectory_evaluator(config: dict) -> Evaluator:
         config.get("env_params", {}).get("max_episode_steps", 200)
     )
 
-    # Resolve goal_state from evaluator_params first, then top-level
+    # Resolve goal_state and target_velocity from evaluator_params first, then top-level
     eval_cost_fn_params = _resolve_evaluator_config(config, "cost_fn_params")
     goal_state = jnp.array(
         eval_cost_fn_params.get(
@@ -431,16 +441,21 @@ def create_rollout_with_trajectory_evaluator(config: dict) -> Evaluator:
             jnp.zeros(config.get("dim_state", 6))
         )
     )
+    target_velocity = eval_cost_fn_params.get("target_velocity", 0.0)
 
     def _scan_step(carry, step_idx):
         env_state, planner_state, cost_params = carry
 
-        actions, new_planner_state = planner.solve(planner_state, env_state, cost_params)
+        # Convert env_state to state array for planner (e.g., mjx.Data -> 17D array)
+        # get_obs_fn returns (1, dim_state), squeeze to (dim_state,)
+        state_array = get_obs_fn(env_state).squeeze(0)
+
+        actions, new_planner_state = planner.solve(planner_state, state_array, cost_params)
         action = actions[0]
 
         if num_stage_costs > 0:
             step_costs = jnp.array([
-                cost_fn(env_state, action[None, :], cost_params)
+                cost_fn(state_array, action[None, :], cost_params)
                 for cost_fn in stage_cost_fn_list
             ])
         else:
@@ -448,7 +463,7 @@ def create_rollout_with_trajectory_evaluator(config: dict) -> Evaluator:
 
         new_env_state, _, _, _, _, _ = step_fn(env_state, step_idx, action[None, :])
 
-        return (new_env_state, new_planner_state, cost_params), (step_costs, env_state, action)
+        return (new_env_state, new_planner_state, cost_params), (step_costs, state_array, action)
 
     @jax.jit
     def _run_episode_jitted(dyn_params: dict, reset_key: jax.Array, planner_key: jax.Array):
@@ -459,12 +474,16 @@ def create_rollout_with_trajectory_evaluator(config: dict) -> Evaluator:
             "dyn_params": dyn_params,
             "params_cov_model": None,
             "goal_state": goal_state,
+            "target_velocity": target_velocity,
         }
 
         init_carry = (env_state, planner_state, cost_params)
-        (final_state, _, _), (all_step_costs, all_states, all_actions) = jax.lax.scan(
+        (final_env_state, _, _), (all_step_costs, all_states, all_actions) = jax.lax.scan(
             _scan_step, init_carry, jnp.arange(max_steps)
         )
+
+        # Convert final_env_state to state array
+        final_state = get_obs_fn(final_env_state).squeeze(0)
 
         # Append final state to trajectory
         all_states_with_final = jnp.concatenate([all_states, final_state[None, :]], axis=0)
