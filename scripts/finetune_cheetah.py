@@ -153,13 +153,13 @@ def main(config):
 
     # Initial evaluation before training
     eval_results = evaluator.evaluate(train_state.params)
-    wandb.log(
-        {
-            **eval_results,
-            "eval/cov_trace_delta": 0.0,
-        },
-        step=0,
-    )
+    # Log only scalar metrics (ignore trajectory/actions/goal_state)
+    initial_metrics = {
+        k: v for k, v in eval_results.items()
+        if isinstance(v, (int, float))
+    }
+    initial_metrics["eval/cov_trace_delta"] = 0.0
+    wandb.log(initial_metrics, step=0)
 
     # Track 18D states for animation (includes rootx)
     full_states_for_animation = []
@@ -253,29 +253,25 @@ def main(config):
 
         # Evaluate model
         if step % config["eval_freq"] == 0:
-            # Run rollout evaluation
+            # Run rollout evaluation (returns metrics + trajectory)
             eval_results = evaluator.evaluate(train_state.params)
+
+            # Log only scalar metrics (ignore trajectory/actions/goal_state)
+            metrics_to_log = {
+                k: v for k, v in eval_results.items()
+                if isinstance(v, (int, float))
+            }
 
             # Track covariance trace if available
             if train_state.covariance is not None:
                 cov_trace = jnp.trace(train_state.covariance)
                 cov_trace_per_param = cov_trace / train_state.covariance.shape[0]
                 cov_trace_delta = cov_trace_per_param - initial_cov_trace_per_param
-                wandb.log(
-                    {
-                        **eval_results,
-                        "eval/cov_trace_delta": float(cov_trace_delta),
-                    },
-                    step=step,
-                )
+                metrics_to_log["eval/cov_trace_delta"] = float(cov_trace_delta)
             else:
-                wandb.log(
-                    {
-                        **eval_results,
-                        "eval/cov_trace_delta": 0.0,
-                    },
-                    step=step,
-                )
+                metrics_to_log["eval/cov_trace_delta"] = 0.0
+
+            wandb.log(metrics_to_log, step=step)
 
         # Handle Buffer Overflow
         if buffer_idx >= config["buffer_size"]:
@@ -331,17 +327,17 @@ def main(config):
             }, step=config["total_steps"])
             print("Animation logged to wandb.")
 
-    # Final evaluation with trajectory plot
-    print("\nRunning final evaluation with trajectory plot...")
-    plot_eval_config = copy.deepcopy(config)
-    plot_eval_config["evaluator_type"] = "rollout_with_trajectory"
-    final_evaluator = init_evaluator(plot_eval_config)
-    final_eval_results = final_evaluator.evaluate(train_state.params)
-
-    # Log metrics (excluding trajectory/actions/goal_state which are arrays)
-    metrics_to_log = {k: v for k, v in final_eval_results.items()
-                     if not isinstance(v, np.ndarray)}
-    wandb.log(metrics_to_log, step=config["total_steps"])
+    # Generate final animation from the last evaluation's trajectory
+    if plot_run and "trajectory" in eval_results:
+        print("\nGenerating final evaluation animation...")
+        traj = eval_results["trajectory"]
+        # Unpack qpos and qvel from mjx.Data trajectory (scan stacks as arrays)
+        full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
+        eval_gif_path = create_cheetah_xy_animation(full_states)
+        wandb.log({
+            "eval/final_animation": wandb.Video(eval_gif_path, fps=20, format="gif")
+        }, step=config["total_steps"])
+        print("Evaluation animation logged to wandb.")
 
     print("Run complete.")
 
