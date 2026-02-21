@@ -28,7 +28,7 @@ def plot_cheetah_velocity(buffers, buffer_idx, config, target_velocity):
     # Extract states (agent 0, valid timesteps only)
     states = np.array(buffers["states"][0, :buffer_idx, :])
 
-    dt = config["env_params"]["dt"]
+    dt = 0.01
     time = np.arange(buffer_idx) * dt
 
     # Forward velocity is at index 8 in 17D state
@@ -51,7 +51,7 @@ def plot_cheetah_velocity(buffers, buffer_idx, config, target_velocity):
 def plot_state_components(buffers, buffer_idx, config):
     """Plot joint angles and velocities over time."""
     states = np.array(buffers["states"][0, :buffer_idx, :])
-    dt = config["env_params"]["dt"]
+    dt = 0.01
     time = np.arange(buffer_idx) * dt
 
     state_labels = config.get("state_labels", [f"s{i}" for i in range(17)])
@@ -325,9 +325,7 @@ def main(config):
         if len(full_states_for_animation) > 0:
             print("Generating cheetah animation...")
             full_states_array = np.array(full_states_for_animation)
-            gif_path = create_cheetah_xy_animation(
-                full_states_array, config["env_params"]["dt"]
-            )
+            gif_path = create_cheetah_xy_animation(full_states_array)
             wandb.log({
                 "trajectory/animation": wandb.Video(gif_path, fps=20, format="gif")
             }, step=config["total_steps"])
