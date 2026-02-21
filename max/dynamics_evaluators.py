@@ -195,15 +195,15 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
     )
     num_episodes = evaluator_params.get("num_episodes", 1)
 
-    # Get cost function params for cost_params
-    cost_fn_params = config.get("cost_fn_params", {})
+    # Resolve goal_state and target_velocity from evaluator_params first, then top-level
+    eval_cost_fn_params = _resolve_evaluator_config(config, "cost_fn_params")
     goal_state = jnp.array(
-        cost_fn_params.get(
+        eval_cost_fn_params.get(
             "goal_state",
             jnp.zeros(config.get("dim_state", 6))
         )
     )
-    target_velocity = cost_fn_params.get("target_velocity", 0.0)
+    target_velocity = eval_cost_fn_params.get("target_velocity", 0.0)
 
     # --- Define the scan step function ---
     def _scan_step(carry, step_idx):
@@ -239,10 +239,8 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
         # Step environment (ignore termination/truncation - always run full episode)
         new_env_state, _, _, _, _, _ = step_fn(env_state, step_idx, action[None, :])
 
-        # Convert new_env_state to state array for terminal cost computation
-        new_state_array = get_obs_fn(new_env_state).squeeze(0)
-
-        return (new_env_state, new_planner_state, cost_params), (step_costs, new_state_array)
+        # Return env_state (state BEFORE step) to match trajectory evaluator
+        return (new_env_state, new_planner_state, cost_params), (step_costs, env_state)
 
     def _run_single_episode(dyn_params: dict, reset_key: jax.Array, planner_key: jax.Array) -> jax.Array:
         """
@@ -268,7 +266,9 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
 
         # Run rollout with scan (always full max_steps)
         init_carry = (env_state, planner_state, cost_params)
-        _, (all_step_costs, all_states) = jax.lax.scan(_scan_step, init_carry, jnp.arange(max_steps))
+        (final_env_state, _, _), (all_step_costs, all_env_states) = jax.lax.scan(
+            _scan_step, init_carry, jnp.arange(max_steps)
+        )
 
         # all_step_costs has shape (max_steps, num_stage_costs)
         # Sum stage costs over time
@@ -277,9 +277,9 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
         else:
             accumulated_stage_costs = jnp.array([])
 
-        # Compute terminal costs on the final state only
+        # Compute terminal costs on the final state (state AFTER last step, from carry)
         if num_terminal_costs > 0:
-            final_state = all_states[-1]  # Last state from the rollout
+            final_state = get_obs_fn(final_env_state).squeeze(0)
             terminal_costs = jnp.array([
                 cost_fn(final_state, jnp.zeros((1, config.get("dim_control", 2))), cost_params)
                 for cost_fn in terminal_cost_fn_list
@@ -463,7 +463,8 @@ def create_rollout_with_trajectory_evaluator(config: dict) -> Evaluator:
 
         new_env_state, _, _, _, _, _ = step_fn(env_state, step_idx, action[None, :])
 
-        return (new_env_state, new_planner_state, cost_params), (step_costs, state_array, action)
+        # Return env_state (not state_array) so trajectory contains full state info
+        return (new_env_state, new_planner_state, cost_params), (step_costs, env_state, action)
 
     @jax.jit
     def _run_episode_jitted(dyn_params: dict, reset_key: jax.Array, planner_key: jax.Array):
