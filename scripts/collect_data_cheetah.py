@@ -151,17 +151,21 @@ def plot_cheetah_trajectory(states, target_velocity, config):
     return fig
 
 
-def create_cheetah_xy_animation(states, max_frames=100, save_path=None):
+def create_cheetah_xy_animation(states, max_frames=100, save_path=None, ghost_alpha=0.3):
     """
     Creates an animated GIF showing the cheetah as a stick-figure mesh.
 
-    The camera follows the cheetah's forward progress.
+    The camera follows the cheetah's forward progress. If multiple trajectories
+    are provided, the first trajectory is rendered in full color and subsequent
+    trajectories are rendered as semi-transparent "ghosts".
 
     Args:
-        states: Array of 18D states [qpos (9), qvel (9)]
-        dt: Timestep in seconds
+        states: Array of 18D states [qpos (9), qvel (9)].
+                Single episode: shape (T, 18)
+                Multi-episode: shape (N, T, 18) where N is number of episodes
         max_frames: Maximum number of frames (subsampled if needed)
         save_path: Optional path to save GIF. If None, uses temp file.
+        ghost_alpha: Alpha transparency for ghost cheetahs (0.0-1.0)
 
     Returns:
         Path to the saved GIF file.
@@ -171,11 +175,27 @@ def create_cheetah_xy_animation(states, max_frames=100, save_path=None):
     states = np.array(states)
     dt = 0.01
 
-    # Subsample if too many frames
-    if len(states) > max_frames:
-        indices = np.linspace(0, len(states) - 1, max_frames, dtype=int)
-        states = states[indices]
-        effective_dt = dt * (len(states) / max_frames)
+    # Detect if multi-episode: shape (N, T, 18) vs single (T, 18)
+    if states.ndim == 3:
+        num_episodes = states.shape[0]
+        # Primary trajectory is episode 0
+        primary_states = states[0]
+        # Ghost trajectories are episodes 1:N
+        ghost_states = states[1:] if num_episodes > 1 else None
+    else:
+        # Single trajectory, backwards compatible
+        primary_states = states
+        ghost_states = None
+        num_episodes = 1
+
+    # Subsample if too many frames (apply to all trajectories)
+    orig_len = len(states[0]) if states.ndim == 3 else len(states)
+    if len(primary_states) > max_frames:
+        indices = np.linspace(0, len(primary_states) - 1, max_frames, dtype=int)
+        primary_states = primary_states[indices]
+        if ghost_states is not None:
+            ghost_states = ghost_states[:, indices, :]
+        effective_dt = dt * (orig_len / max_frames)
     else:
         effective_dt = dt
 
@@ -189,6 +209,11 @@ def create_cheetah_xy_animation(states, max_frames=100, save_path=None):
 
     # Initial torso height from MuJoCo XML (torso starts at z=0.7)
     TORSO_INITIAL_Z = 0.7
+
+    # Ghost colors (lighter/transparent versions of main colors)
+    GHOST_TORSO_COLOR = (0.6, 0.6, 0.9)    # Light blue
+    GHOST_BACK_COLOR = (0.9, 0.6, 0.6)     # Light red
+    GHOST_FRONT_COLOR = (0.6, 0.9, 0.6)    # Light green
 
     def get_cheetah_points(state):
         """Compute joint positions from state using forward kinematics."""
@@ -264,6 +289,28 @@ def create_cheetah_xy_animation(states, max_frames=100, save_path=None):
     # Trail showing path
     trail_line, = ax.plot([], [], 'b--', linewidth=1, alpha=0.3)
 
+    # Ghost cheetah lines (one set per ghost episode)
+    ghost_lines = []
+    if ghost_states is not None:
+        for _ in range(len(ghost_states)):
+            ghost_set = {
+                'torso': ax.plot([], [], color=GHOST_TORSO_COLOR,
+                                 linewidth=4, alpha=ghost_alpha)[0],
+                'back_thigh': ax.plot([], [], color=GHOST_BACK_COLOR,
+                                      linewidth=3, alpha=ghost_alpha)[0],
+                'back_shin': ax.plot([], [], color=GHOST_BACK_COLOR,
+                                     linewidth=2, alpha=ghost_alpha)[0],
+                'back_foot': ax.plot([], [], color=GHOST_BACK_COLOR,
+                                     linewidth=1.5, alpha=ghost_alpha)[0],
+                'front_thigh': ax.plot([], [], color=GHOST_FRONT_COLOR,
+                                       linewidth=3, alpha=ghost_alpha)[0],
+                'front_shin': ax.plot([], [], color=GHOST_FRONT_COLOR,
+                                      linewidth=2, alpha=ghost_alpha)[0],
+                'front_foot': ax.plot([], [], color=GHOST_FRONT_COLOR,
+                                      linewidth=1.5, alpha=ghost_alpha)[0],
+            }
+            ghost_lines.append(ghost_set)
+
     ax.set_aspect('equal')
     ax.set_xlabel('X Position (m)')
     ax.set_ylabel('Z Position (m)')
@@ -284,11 +331,19 @@ def create_cheetah_xy_animation(states, max_frames=100, save_path=None):
         joints.set_data([], [])
         ground_line.set_data([], [])
         trail_line.set_data([], [])
-        return (torso_line, back_thigh, back_shin, back_foot,
-                front_thigh, front_shin, front_foot, joints, ground_line, trail_line)
+        # Initialize ghost lines
+        for ghost_set in ghost_lines:
+            for line in ghost_set.values():
+                line.set_data([], [])
+        artists = [torso_line, back_thigh, back_shin, back_foot,
+                   front_thigh, front_shin, front_foot, joints,
+                   ground_line, trail_line]
+        for ghost_set in ghost_lines:
+            artists.extend(ghost_set.values())
+        return tuple(artists)
 
     def animate(frame):
-        points = get_cheetah_points(states[frame])
+        points = get_cheetah_points(primary_states[frame])
         rootx = points['rootx']
         rootz = points['rootz']
 
@@ -320,6 +375,34 @@ def create_cheetah_xy_animation(states, max_frames=100, save_path=None):
                         fl[0][1], fl[1][1], fl[2][1], fl[3][1]]
         joints.set_data(all_joints_x, all_joints_z)
 
+        # Update ghost cheetahs
+        if ghost_states is not None:
+            for ghost_idx, ghost_set in enumerate(ghost_lines):
+                gp = get_cheetah_points(ghost_states[ghost_idx, frame])
+
+                # Update ghost torso
+                gt = gp['torso']
+                ghost_set['torso'].set_data(
+                    [gt[0][0], gt[1][0]], [gt[0][1], gt[1][1]])
+
+                # Update ghost back leg
+                gbl = gp['back_leg']
+                ghost_set['back_thigh'].set_data(
+                    [gbl[0][0], gbl[1][0]], [gbl[0][1], gbl[1][1]])
+                ghost_set['back_shin'].set_data(
+                    [gbl[1][0], gbl[2][0]], [gbl[1][1], gbl[2][1]])
+                ghost_set['back_foot'].set_data(
+                    [gbl[2][0], gbl[3][0]], [gbl[2][1], gbl[3][1]])
+
+                # Update ghost front leg
+                gfl = gp['front_leg']
+                ghost_set['front_thigh'].set_data(
+                    [gfl[0][0], gfl[1][0]], [gfl[0][1], gfl[1][1]])
+                ghost_set['front_shin'].set_data(
+                    [gfl[1][0], gfl[2][0]], [gfl[1][1], gfl[2][1]])
+                ghost_set['front_foot'].set_data(
+                    [gfl[2][0], gfl[3][0]], [gfl[2][1], gfl[3][1]])
+
         # Update view to follow cheetah (camera moves with it)
         view_width = 4.0
         ax.set_xlim(rootx - view_width / 2, rootx + view_width / 2)
@@ -330,16 +413,20 @@ def create_cheetah_xy_animation(states, max_frames=100, save_path=None):
         ground_line.set_data([rootx - view_width, rootx + view_width], [0, 0])
 
         # Update title with time and velocity
-        forward_vel = states[frame, 9]  # qvel[0]
+        forward_vel = primary_states[frame, 9]  # qvel[0]
         time = frame * effective_dt
         ax.set_title(f'Cheetah Animation | t={time:.2f}s | vel={forward_vel:.2f} m/s')
 
-        return (torso_line, back_thigh, back_shin, back_foot,
-                front_thigh, front_shin, front_foot, joints, ground_line, trail_line)
+        artists = [torso_line, back_thigh, back_shin, back_foot,
+                   front_thigh, front_shin, front_foot, joints,
+                   ground_line, trail_line]
+        for ghost_set in ghost_lines:
+            artists.extend(ghost_set.values())
+        return tuple(artists)
 
     anim = FuncAnimation(
         fig, animate, init_func=init,
-        frames=len(states), interval=50, blit=False
+        frames=len(primary_states), interval=50, blit=False
     )
 
     # Save as GIF
