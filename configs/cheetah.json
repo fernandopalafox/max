@@ -137,7 +137,7 @@
     "seed": 43,
     "save_dir": null,
     "plot_run": true,
-    "plot_eval": false,
+    "plot_eval": true,
     "env_name": "cheetah",
     "num_agents": 1,
     "total_steps": 150,
@@ -153,7 +153,7 @@
     "evaluator_params": {
       "seed": 123,
       "max_steps": 300,
-      "num_episodes": 1,
+      "num_episodes": 2,
       "eval_cost_types": ["cheetah_velocity_tracking_learned"],
       "env_params": {},
       "dynamics_params": {},
@@ -165,7 +165,7 @@
       }
     },
 
-    "dynamics": "mlp_resnet",
+    "dynamics": "mlp_resnet_last_layer",
     "dynamics_params": {
       "nn_features": [256, 256, 256],
       "ensemble_size": 3,
@@ -175,17 +175,13 @@
     "env_params": {
       "num_agents": 1,
       "max_episode_steps": 5000,
-      "cheetah_mass_scale": 1.5
+      "cheetah_mass_scale": 0.5
     },
 
-    "trainer": "gd",
+    "trainer": "ekf_efficient",
     "trainer_params": {
-      "learning_rate": 3e-5,
-      "weight_decay": 0.0,
-      "proc_noise_init": 0.0,
-      "proc_noise_decay": 1.0,
-      "proc_noise_floor": 0.0,
-      "init_cov_scale": 0.1,
+      "learning_rate": 40,
+      "init_cov_scale": 14.0,
       "jitter": 0.0
     },
 
