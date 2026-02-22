@@ -313,27 +313,25 @@
     "wandb_project": "gridworld_finetuning",
     "env_name": "gridworld",
     "num_agents": 1,
-    "total_steps": 5000,
+    "total_steps": 250,
     "dim_state": 2,
     "dim_action": 1,
     "train_freq": 1,
     "train_model_freq": 1,
     "train_policy_freq": 1,
     "normalize_freq": 1000000,
-    "eval_freq": 50,
+    "eval_freq": 10,
     "buffer_size": 5000,
     "seed": 123,
     "evaluator_type": "rollout_with_trajectory",
     "evaluator_params": {
       "seed": 123,
       "max_steps": 100,
-      "num_rollouts": 5,
       "goal_state": [
         9,
         9
       ],
       "cost_fn_params": {
-        "weight_jerk": 0.0,
         "weight_control": 0.01,
         "weight_info": 0.0,
         "weight_time": 0.1,
@@ -350,11 +348,15 @@
     "env_params": {
       "num_agents": 1,
       "box_half_width": 100.0,
-      "max_episode_steps": 200,
+      "max_episode_steps": 5000,
       "dt": 0.1,
       "start_pos": [
         0,
         0
+      ],
+      "goal_pos": [
+        9,
+        9
       ],
       "maze_layout": [
         [
@@ -397,34 +399,10 @@
           11,
           15,
           15,
-          15,
-          15,
-          15,
-          15,
-          15,
-          15,
-          7
-        ],
-        [
-          11,
-          15,
-          15,
-          15,
-          15,
-          15,
-          15,
-          15,
-          15,
-          7
-        ],
-        [
-          11,
-          15,
-          15,
           14,
           14,
           14,
-          14,
+          15,
           15,
           15,
           7
@@ -436,8 +414,8 @@
           0,
           0,
           0,
-          0,
           11,
+          15,
           15,
           7
         ],
@@ -448,8 +426,8 @@
           0,
           0,
           0,
-          0,
           11,
+          15,
           15,
           7
         ],
@@ -460,20 +438,44 @@
           0,
           0,
           0,
-          0,
           11,
+          15,
+          15,
+          7
+        ],
+        [
+          11,
+          15,
+          15,
+          13,
+          13,
+          13,
+          15,
+          15,
+          15,
+          7
+        ],
+        [
+          11,
+          15,
+          15,
+          15,
+          15,
+          15,
+          15,
+          15,
           15,
           7
         ],
         [
           10,
           14,
-          6,
-          0,
-          0,
-          0,
-          0,
-          10,
+          14,
+          14,
+          14,
+          14,
+          14,
+          14,
           14,
           6
         ]
@@ -486,25 +488,27 @@
         64
       ],
       "ensemble_size": 1,
+      "svd_rank_input": 3,
       "svd_rank_hidden": 4,
-      "steering_dim": 4,
+      "svd_rank_output": 2,
+      "steering_dim": 8,
       "projection_seed": 42,
       "pretrained_params_path": "./data/pretrained_models/mlp_resnet_gridworld.pkl"
     },
     "trainer": "ekf",
     "trainer_params": {
-      "learning_rate": 1.0,
-      "weight_decay": 0.0,
+      "learning_rate": 40.0,
+      "weight_decay": 1.0,
       "proc_noise_init": 0.01,
-      "proc_noise_decay": 0.99,
-      "proc_noise_floor": 0.001,
-      "init_cov_scale": 0.1,
-      "jitter": 1e-06
+      "proc_noise_decay": 1.0,
+      "proc_noise_floor": 0.0,
+      "init_cov_scale": 14.0,
+      "jitter": 0.0
     },
-    "planner_type": "astar",
+    "planner_type": "icem",
     "planner_params": {
-      "horizon": 30,
-      "batch_size": 200,
+      "horizon": 25,
+      "batch_size": 64,
       "max_iter": 5,
       "elit_frac": 0.1,
       "learning_rate": 0.9,

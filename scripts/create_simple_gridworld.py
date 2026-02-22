@@ -3,7 +3,7 @@
 Create simple gridworld layouts for testing.
 
 Layout A: 3x3 block at bottom edge (rows 7-9, cols 3-5)
-Layout B: 4x4 block at bottom edge (rows 6-9, cols 3-6)
+Layout B: 3x3 block shifted to middle (rows 4-6, cols 3-5)
 
 Start: (0, 0)
 Goal: (9, 9)
@@ -73,11 +73,11 @@ def main():
         obstacle_cols=(3, 6)    # cols 3,4,5
     )
 
-    # Layout B: 4x4 obstacle at bottom edge (rows 6-9, cols 3-6)
-    print("Creating Layout B (4x4 obstacle at bottom edge)...")
+    # Layout B: 3x3 obstacle shifted to middle (rows 4-6, cols 3-5)
+    print("Creating Layout B (3x3 obstacle at middle, rows 4-6)...")
     layout_b = create_layout_with_obstacle(
-        obstacle_rows=(6, 10),  # rows 6,7,8,9
-        obstacle_cols=(3, 7)    # cols 3,4,5,6
+        obstacle_rows=(4, 7),   # rows 4,5,6
+        obstacle_cols=(3, 6)    # cols 3,4,5
     )
 
     # Count navigable cells
@@ -85,9 +85,9 @@ def main():
     navigable_b = sum(1 for row in layout_b for cell in row if cell > 0)
 
     print(f"\nLayout A: {navigable_a} navigable cells (out of 100)")
-    print(f"  - 3×3 obstacle at bottom edge (rows 7-9, cols 3-5)")
+    print(f"  - 3x3 obstacle at bottom edge (rows 7-9, cols 3-5)")
     print(f"Layout B: {navigable_b} navigable cells (out of 100)")
-    print(f"  - 4×4 obstacle at bottom edge (rows 6-9, cols 3-6)")
+    print(f"  - 3x3 obstacle at middle (rows 4-6, cols 3-5)")
 
     # Load existing config
     config_path = os.path.join(
@@ -109,22 +109,23 @@ def main():
     config["finetuning"]["cost_fn_params"]["goal_state"] = [9, 9]
     config["finetuning"]["evaluator_params"]["goal_state"] = [9, 9]
     config["finetuning"]["evaluator_params"]["cost_fn_params"]["goal_state"] = [9, 9]
+    config["finetuning"]["env_params"]["goal_pos"] = [9, 9]
 
     # Save updated config
     with open(config_path, "w") as f:
         json.dump(config, f, indent=2)
 
     print(f"\nUpdated {config_path} with simple layouts")
-    print(f"  - Layout A: 3×3 obstacle at rows 7-9, cols 3-5 (bottom edge)")
-    print(f"  - Layout B: 4×4 obstacle at rows 6-9, cols 3-6 (bottom edge)")
+    print(f"  - Layout A: 3x3 obstacle at rows 7-9, cols 3-5 (bottom edge)")
+    print(f"  - Layout B: 3x3 obstacle at rows 4-6, cols 3-5 (middle)")
     print(f"  - Start: (0, 0)")
     print(f"  - Goal: (9, 9)")
 
     # Visualize
-    print("\nLayout A (3×3 bottom obstacle):")
+    print("\nLayout A (3x3 bottom obstacle):")
     print_layout(layout_a)
 
-    print("\nLayout B (4×4 bottom obstacle):")
+    print("\nLayout B (3x3 middle obstacle):")
     print_layout(layout_b)
 
 

@@ -21,9 +21,29 @@ import json
 
 
 def plot_gridworld_trajectory(buffers, buffer_idx, maze_layout, goal_state, config):
-    """Plot agent trajectory on the maze grid."""
-    states = np.array(buffers["states"][0, :buffer_idx, :])
+    """Plot agent trajectory on the maze grid, showing only the last episode."""
+    all_states = np.array(buffers["states"][0, :buffer_idx, :])
+    all_dones = np.array(buffers["dones"][:buffer_idx])
     maze_arr = np.array(maze_layout)
+
+    # Find the last episode: look for the last done=1 before buffer_idx,
+    # then take states from after the previous done=1 up to (and including) that point.
+    done_indices = np.where(all_dones == 1.0)[0]
+    if len(done_indices) >= 1:
+        # Last episode ends at the last done index
+        last_done = done_indices[-1]
+        # Find start of last episode (after previous done, or from beginning)
+        if len(done_indices) >= 2:
+            prev_done = done_indices[-2]
+            # The state after prev_done is the reset state; episode starts there
+            ep_start = prev_done + 1
+        else:
+            ep_start = 0
+        # Include up to last_done (this is the state just before reset)
+        states = all_states[ep_start:last_done + 1]
+    else:
+        # No episode completed, show everything
+        states = all_states
 
     fig, ax = plt.subplots(figsize=(10, 10))
 
@@ -50,7 +70,7 @@ def plot_gridworld_trajectory(buffers, buffer_idx, maze_layout, goal_state, conf
     ax.set_aspect('equal')
     ax.set_xlabel('X Position')
     ax.set_ylabel('Y Position')
-    ax.set_title('Gridworld Trajectory')
+    ax.set_title(f'Gridworld Trajectory (last episode, {len(states)} steps)')
     ax.legend()
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -247,10 +267,7 @@ def main(config, save_dir, plot_eval=False):
 
         # Reset environment if done
         if done:
-            key, reset_key = jax.random.split(key)
-            state = reset_fn(reset_key)
-            current_obs = get_obs_fn(state)
-
+            # Log distance to goal BEFORE reset
             dist_to_goal = float(jnp.linalg.norm(state - goal_state))
             print(f"Episode finished at step {step}, length={episode_length}, dist_to_goal={dist_to_goal:.2f}")
 
@@ -259,6 +276,9 @@ def main(config, save_dir, plot_eval=False):
                 "episode/dist_to_goal": dist_to_goal,
             }, step=step)
 
+            key, reset_key = jax.random.split(key)
+            state = reset_fn(reset_key)
+            current_obs = get_obs_fn(state)
             episode_length = 0
 
         # Train policy (unused for iCEM)
@@ -287,13 +307,56 @@ def main(config, save_dir, plot_eval=False):
 
         # Train model
         if step % config["train_model_freq"] == 0 and buffer_idx >= 2:
-            train_data = {
-                "states": buffers["states"][0, buffer_idx - 2 : buffer_idx - 1, :],
-                "actions": buffers["actions"][0, buffer_idx - 2 : buffer_idx - 1, :],
-                "next_states": buffers["states"][0, buffer_idx - 1 : buffer_idx, :],
-            }
-            train_state, loss = trainer.train(train_state, train_data, step=step)
-            wandb.log({"train/model_loss": float(loss)}, step=step)
+            # Skip training across episode boundaries: if the previous-to-last
+            # buffer entry was a done step, the "next_state" at buffer_idx-1 is
+            # from a reset (not a real transition), so skip this update.
+            prev_done = float(buffers["dones"][buffer_idx - 2])
+            if prev_done != 1.0:
+                train_data = {
+                    "states": buffers["states"][0, buffer_idx - 2 : buffer_idx - 1, :],
+                    "actions": buffers["actions"][0, buffer_idx - 2 : buffer_idx - 1, :],
+                    "next_states": buffers["states"][0, buffer_idx - 1 : buffer_idx, :],
+                }
+
+                # Diagnostic: log param norm before training
+                old_param_norm = sum(
+                    float(jnp.linalg.norm(v))
+                    for v in jax.tree.leaves(train_state.params["model"])
+                )
+
+                train_state, loss = trainer.train(train_state, train_data, step=step)
+
+                # Diagnostic: log param norm after training + delta
+                new_param_norm = sum(
+                    float(jnp.linalg.norm(v))
+                    for v in jax.tree.leaves(train_state.params["model"])
+                )
+                param_delta = new_param_norm - old_param_norm
+
+                # Log a sample prediction at a diagnostic point
+                # Test: from (2,6) action 3 (right) - goes to (3,6) in layout A
+                # but stays at (2,6) in layout B if (3,6) is blocked
+                diag_state = jnp.array([2.0, 6.0])
+                diag_action = jnp.array([3.0])
+                diag_pred = dynamics_model.pred_one_step(
+                    train_state.params, diag_state, diag_action
+                )
+
+                if step % 50 == 0 or step <= 10:
+                    print(
+                        f"Step {step}: loss={float(loss):.6f}, "
+                        f"param_norm={new_param_norm:.6f}, "
+                        f"param_delta={param_delta:.8f}, "
+                        f"diag_pred(2,6,right)=({float(diag_pred[0]):.3f},{float(diag_pred[1]):.3f})"
+                    )
+
+                wandb.log({
+                    "train/model_loss": float(loss),
+                    "train/param_norm": new_param_norm,
+                    "train/param_delta": abs(param_delta),
+                    "train/diag_pred_x": float(diag_pred[0]),
+                    "train/diag_pred_y": float(diag_pred[1]),
+                }, step=step)
 
         # Handle Buffer Overflow
         if buffer_idx >= config["buffer_size"]:

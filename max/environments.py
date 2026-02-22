@@ -63,6 +63,7 @@ class EnvParams:
     # Specific to gridworld
     maze_layout: Any = None
     start_pos: Any = None
+    goal_pos: Any = None
 
 
 
@@ -876,7 +877,7 @@ def make_linear_tracking_env(params: EnvParams, true_A, true_B, target_point):
     return reset_fn, step_fn, get_obs_fn
 
 
-def make_gridworld_env(params: EnvParams, maze_layout, start_pos):
+def make_gridworld_env(params: EnvParams, maze_layout, start_pos, goal_pos=None):
     """
     Factory function that creates a gridworld maze environment.
 
@@ -891,12 +892,16 @@ def make_gridworld_env(params: EnvParams, maze_layout, start_pos):
         maze_layout: 2D list/array of shape (10, 10) with bitmask integers.
                      maze_layout[y][x] gives available actions at cell (x, y).
         start_pos: Starting position [x, y].
+        goal_pos: Optional goal position [x, y] for episode termination.
+                  If provided, episode terminates when agent reaches goal.
 
     Returns:
         Tuple of (reset_fn, step_fn, get_obs_fn).
     """
     maze_arr = jnp.array(maze_layout, dtype=jnp.int32)  # shape (10, 10)
     start = jnp.array(start_pos, dtype=jnp.float32)
+    has_goal = goal_pos is not None
+    goal = jnp.array(goal_pos, dtype=jnp.float32) if has_goal else jnp.zeros(2)
 
     # Movement deltas indexed by action: 0=up(+y), 1=down(-y), 2=left(-x), 3=right(+x)
     deltas = jnp.array([
@@ -940,8 +945,15 @@ def make_gridworld_env(params: EnvParams, maze_layout, start_pos):
         reward = 0.0
         rewards = jnp.array([reward])
 
-        # No termination in gridworld (agent just explores)
-        terminated = False
+        # Goal-based termination (if goal_pos was provided)
+        if has_goal:
+            next_x = jnp.round(next_state[0]).astype(jnp.int32)
+            next_y = jnp.round(next_state[1]).astype(jnp.int32)
+            goal_x = jnp.round(goal[0]).astype(jnp.int32)
+            goal_y = jnp.round(goal[1]).astype(jnp.int32)
+            terminated = jnp.logical_and(next_x == goal_x, next_y == goal_y)
+        else:
+            terminated = False
 
         # Check truncation
         truncated = step_count >= params.max_episode_steps
@@ -1328,6 +1340,7 @@ def init_env(config: Dict[str, Any]):
     if env_name == "gridworld":
         maze_layout = env_params_dict.get("maze_layout", None)
         start_pos = env_params_dict.get("start_pos", None)
+        goal_pos = env_params_dict.get("goal_pos", None)
 
     # Hacky fix for merging_idm-specific params
     if env_name == "merging_idm":
@@ -1353,7 +1366,7 @@ def init_env(config: Dict[str, Any]):
     elif env_name == "linear_tracking":
         return make_linear_tracking_env(params, true_A, true_B, target_point)
     elif env_name == "gridworld":
-        return make_gridworld_env(params, maze_layout, start_pos)
+        return make_gridworld_env(params, maze_layout, start_pos, goal_pos)
     elif env_name == "damped_pendulum":
         return make_damped_pendulum_env(params, true_b, true_J)
     elif env_name == "merging_idm":

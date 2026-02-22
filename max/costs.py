@@ -725,6 +725,12 @@ def init_cost(config, dynamics_model):
                 dynamics_model.pred_one_step, meas_noise_diag
             )
 
+        # Wrap pred_one_step to round actions to discrete {0,1,2,3}
+        # so the model only sees the same discrete actions it was trained on.
+        def _pred_discrete(params, state, action):
+            discrete_action = jnp.round(jnp.clip(action, 0.0, 3.0))
+            return dynamics_model.pred_one_step(params, state, discrete_action)
+
         # Vectorize stage cost over the horizon
         stage_cost_vmap = jax.vmap(
             lambda s, u, cp: _stage_cost_gridworld_navigation(
@@ -739,9 +745,9 @@ def init_cost(config, dynamics_model):
             Calculates total trajectory cost for gridworld navigation.
             Uses Manhattan distance instead of Euclidean for grid-based movement.
             """
-            # 1. Rollout trajectory
+            # 1. Rollout trajectory (with discrete actions)
             states = _rollout(
-                init_state, controls, cost_params, dynamics_model.pred_one_step
+                init_state, controls, cost_params, _pred_discrete
             )
 
             # 2. Calculate stage costs (on states 0 to T-1)

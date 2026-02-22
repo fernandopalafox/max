@@ -412,9 +412,23 @@ def create_astar_planner(
     # Capture the prediction function in the closure
     pred_one_step_fn = dynamics_model.pred_one_step
 
+    # Diagnostic counter for A* callback
+    _astar_call_count = [0]
+    _last_param_norm = [None]
+
     # Create a pure Python function that will be called via callback
     def _astar_search_callback(init_env_state_flat, goal_state_flat, dyn_params_flat):
         """Pure Python A* search using learned model (called from JIT via callback)."""
+        # Diagnostic: check if params are changing between calls
+        _astar_call_count[0] += 1
+        param_leaves = jax.tree.leaves(dyn_params_flat["model"])
+        current_norm = sum(float(jnp.linalg.norm(v)) for v in param_leaves)
+        if _astar_call_count[0] <= 5 or _astar_call_count[0] % 100 == 0:
+            prev = _last_param_norm[0]
+            delta_str = f", delta={current_norm - prev:.8f}" if prev is not None else ""
+            #print(f"[A* call #{_astar_call_count[0]}] param_norm={current_norm:.6f}{delta_str}")
+        _last_param_norm[0] = current_norm
+
         # Convert flat arrays to positions
         start_x = int(round(float(init_env_state_flat[0])))
         start_y = int(round(float(init_env_state_flat[1])))
