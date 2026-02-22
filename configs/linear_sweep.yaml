@@ -1,0 +1,18 @@
+program: scripts/run_linear.py
+command:
+  - ${env}
+  - python
+  - scripts/run_linear.py
+method: bayes
+metric:
+  name: eval/terminal_goal_cost
+  goal: minimize
+parameters:
+  trainer_params.learning_rate:
+    min: 0.001
+    max: 800.0
+    distribution: log_uniform_values
+  trainer_params.init_cov_scale:
+    min: 0.01
+    max: 15.0
+    distribution: log_uniform_values
