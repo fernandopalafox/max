@@ -47,8 +47,7 @@ class EKF:
                 innovation_cov + self.jitter * jnp.eye(innovation_cov.shape[0])
             )
         )
-        eye_cov = jnp.eye(cov_t.shape[0])
-        cov_tp1 = (eye_cov - kalman_gain @ jac_obs) @ cov_tp1_apriori
+        cov_tp1 = cov_tp1_apriori - kalman_gain @ (jac_obs @ cov_tp1_apriori)
 
         cov_tp1 = 0.5 * (cov_tp1 + cov_tp1.T)
 
@@ -107,8 +106,7 @@ class EKFCovArgs:
                 innovation_cov + self.jitter * jnp.eye(innovation_cov.shape[0])
             )
         )
-        eye_cov = jnp.eye(cov_t.shape[0])
-        cov_tp1 = (eye_cov - kalman_gain @ jac_obs) @ cov_tp1_apriori
+        cov_tp1 = cov_tp1_apriori - kalman_gain @ (jac_obs @ cov_tp1_apriori)
 
         cov_tp1 = 0.5 * (cov_tp1 + cov_tp1.T)
 
