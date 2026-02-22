@@ -340,6 +340,32 @@ def main(config):
         print("Evaluation animation logged to wandb.")
 
     print("Run complete.")
+    return eval_results.get("eval/cheetah_velocity_tracking_learned")
+
+
+def run_sweep():
+    """Entry point for wandb sweep agents. Simple single-seed run."""
+    wandb.init()
+
+    # Load base config
+    config_path = os.path.join(
+        os.path.dirname(__file__), "..", "configs", "cheetah.json"
+    )
+    with open(config_path, "r") as f:
+        full_config = json.load(f)
+
+    run_config = copy.deepcopy(full_config["finetuning"])
+
+    # Apply wandb.config overrides (handles dotted keys)
+    for key, value in wandb.config.items():
+        keys = key.split(".")
+        target = run_config
+        for k in keys[:-1]:
+            target = target[k]
+        target[keys[-1]] = value
+
+    main(run_config)
+    wandb.finish()
 
 
 if __name__ == "__main__":
@@ -364,39 +390,43 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Load config from JSON file
-    config_path = os.path.join(
-        os.path.dirname(__file__), "..", "configs", args.config
-    )
-    with open(config_path, "r") as f:
-        full_config = json.load(f)
-    CONFIG = full_config["finetuning"]
-
-    run_name_base = args.run_name or "cheetah_finetune"
-
-    # Generate seeds using JAX RNG from config seed
-    base_key = jax.random.key(CONFIG["seed"])
-    seed_keys = jax.random.split(base_key, args.num_seeds)
-    seeds = [int(jax.random.bits(k)) for k in seed_keys]
-
-    for seed_idx, seed in enumerate(seeds, start=1):
-        print(f"--- Starting run for seed {seed_idx}/{args.num_seeds} ---")
-        run_config = copy.deepcopy(CONFIG)
-        run_config["seed"] = seed
-
-        # Build run name
-        run_name = run_name_base
-        if args.num_seeds > 1:
-            run_name = f"{run_name}_{seed_idx}"
-        run_config["wandb_run_name"] = run_name
-
-        wandb.init(
-            project=run_config.get("wandb_project", "cheetah_finetuning"),
-            config=run_config,
-            name=run_config.get("wandb_run_name"),
-            reinit=True,
+    # Check if running as wandb sweep agent
+    if os.environ.get("WANDB_SWEEP_ID"):
+        run_sweep()
+    else:
+        # Load config from JSON file
+        config_path = os.path.join(
+            os.path.dirname(__file__), "..", "configs", args.config
         )
-        main(run_config)
-        wandb.finish()
+        with open(config_path, "r") as f:
+            full_config = json.load(f)
+        CONFIG = full_config["finetuning"]
 
-    print("All experiments complete.")
+        run_name_base = args.run_name or "cheetah_finetune"
+
+        # Generate seeds using JAX RNG from config seed
+        base_key = jax.random.key(CONFIG["seed"])
+        seed_keys = jax.random.split(base_key, args.num_seeds)
+        seeds = [int(jax.random.bits(k)) for k in seed_keys]
+
+        for seed_idx, seed in enumerate(seeds, start=1):
+            print(f"--- Starting run for seed {seed_idx}/{args.num_seeds} ---")
+            run_config = copy.deepcopy(CONFIG)
+            run_config["seed"] = seed
+
+            # Build run name
+            run_name = run_name_base
+            if args.num_seeds > 1:
+                run_name = f"{run_name}_{seed_idx}"
+            run_config["wandb_run_name"] = run_name
+
+            wandb.init(
+                project=run_config.get("wandb_project", "cheetah_finetuning"),
+                config=run_config,
+                name=run_config.get("wandb_run_name"),
+                reinit=True,
+            )
+            main(run_config)
+            wandb.finish()
+
+        print("All experiments complete.")
