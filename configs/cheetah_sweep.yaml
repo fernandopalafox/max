@@ -1,0 +1,18 @@
+program: scripts/finetune_cheetah.py
+command:
+  - ${env}
+  - python
+  - scripts/finetune_cheetah.py
+method: bayes
+metric:
+  name: eval/cheetah_velocity_tracking_learned
+  goal: minimize
+parameters:
+  trainer_params.learning_rate:
+    min: 0.1
+    max: 100.0
+    distribution: log_uniform_values
+  trainer_params.init_cov_scale:
+    min: 0.1
+    max: 50.0
+    distribution: log_uniform_values
