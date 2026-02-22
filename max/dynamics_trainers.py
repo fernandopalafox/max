@@ -8,7 +8,7 @@ from max.dynamics import DynamicsModel, PETSDynamicsModel
 from flax import struct
 from flax.traverse_util import path_aware_map
 import jax.flatten_util
-from max.estimators import EKFCovArgs
+from max.estimators import EKFCovArgs, EKFEfficient
 from max.normalizers import STANDARD_NORMALIZER
 
 
@@ -51,6 +51,10 @@ def init_trainer(
         )
     elif trainer_type == "ekf":
         trainer, train_state = create_EKF_trainer(
+            config, dynamics_model, init_params
+        )
+    elif trainer_type == "ekf_efficient":
+        trainer, train_state = create_EKF_efficient_trainer(
             config, dynamics_model, init_params
         )
     elif trainer_type == "pets":
@@ -250,6 +254,117 @@ def create_EKF_trainer(
 
         step_idx = kwargs.get("step", 0)
         return train_step(train_state, data, step_idx)
+
+    return Trainer(train_fn=train_fn), train_state
+
+
+def create_EKF_efficient_trainer(
+    config: Any,
+    dynamics_model: DynamicsModel,
+    init_params: Any,
+) -> tuple[Trainer, TrainState]:
+    """
+    Creates a trainer that updates model parameters using an EKFEfficient for
+    online learning (batch size of 1).
+
+    This is a simplified EKF that assumes identity dynamics (no process noise)
+    and uses a fixed measurement covariance.
+    """
+    dim_state = config["dim_state"]
+    dim_action = config["dim_action"]
+    learning_params = config.get("trainer_params", {})
+    learning_rate = learning_params.get("learning_rate", 3e-4)
+    jitter = learning_params.get("jitter", 1e-6)
+    init_cov_scale = learning_params.get("init_cov_scale", 1.0)
+
+    flat_params_model, unflatten_fn_model = jax.flatten_util.ravel_pytree(
+        init_params["model"]
+    )
+    _, unflatten_fn_norm = jax.flatten_util.ravel_pytree(
+        init_params["normalizer"]
+    )
+    dim_params_model = flat_params_model.shape[0]
+
+    init_covariance = jnp.eye(dim_params_model) * init_cov_scale
+    train_state = TrainState(params=init_params, covariance=init_covariance)
+
+    @jax.jit
+    def parameter_dynamics_fn(params, _):
+        """Identity parameter dynamics (no weight decay)."""
+        return params
+
+    @jax.jit
+    def observation_fn(params, x):
+        state = x[:dim_state]
+        action = x[dim_state : dim_state + dim_action]
+        flat_params_norm = x[dim_state + dim_action :]
+        params_model = unflatten_fn_model(params)
+        params_norm = unflatten_fn_norm(flat_params_norm)
+        params_pytree = {"model": params_model, "normalizer": params_norm}
+        pred_next_state = dynamics_model.pred_one_step(
+            params_pytree, state, action
+        )
+        return pred_next_state - state
+
+    meas_cov = jnp.eye(dim_state) / learning_rate
+
+    estimator = EKFEfficient(
+        dynamics_fn=parameter_dynamics_fn,
+        observation_fn=observation_fn,
+        meas_cov=meas_cov,
+        jitter=jitter,
+    )
+
+    @jax.jit
+    def train_step(
+        train_state: TrainState, data: dict
+    ) -> tuple[TrainState, float]:
+        """Performs a single EKF update on one data point."""
+
+        state = jnp.squeeze(data["states"], axis=0)
+        action = jnp.squeeze(data["actions"], axis=0)
+        next_state = jnp.squeeze(data["next_states"], axis=0)
+
+        flat_params_norm, _ = jax.flatten_util.ravel_pytree(
+            train_state.params["normalizer"]
+        )
+
+        ekf_inp = jnp.concatenate([state, action, flat_params_norm], axis=-1)
+        ekf_out = next_state - state
+
+        flat_params_model, _ = jax.flatten_util.ravel_pytree(
+            train_state.params["model"]
+        )
+        flat_params_model_new, cov_params_model_new, _ = estimator.estimate(
+            flat_params_model,
+            train_state.covariance,
+            ekf_inp,
+            ekf_out,
+        )
+
+        ekf_pred = observation_fn(flat_params_model_new, ekf_inp)
+        loss = jnp.mean((ekf_out - ekf_pred) ** 2)  # "Loss" is innovation
+
+        params_new = {
+            "model": unflatten_fn_model(flat_params_model_new),
+            "normalizer": train_state.params["normalizer"],
+        }
+        new_train_state = train_state.replace(
+            params=params_new, covariance=cov_params_model_new
+        )
+        return new_train_state, loss
+
+    def train_fn(
+        train_state: TrainState, data: dict, **kwargs
+    ) -> tuple[TrainState, float]:
+        batch_size = data["states"].shape[0]
+        if batch_size != 1:
+            raise ValueError(
+                f"EKF efficient trainer only supports a batch size of 1 for online learning. "
+                f"Received batch of size {batch_size}."
+            )
+
+        return train_step(train_state, data)
 
     return Trainer(train_fn=train_fn), train_state
 
