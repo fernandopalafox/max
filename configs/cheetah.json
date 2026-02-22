@@ -140,13 +140,13 @@
     "plot_eval": true,
     "env_name": "cheetah",
     "num_agents": 1,
-    "total_steps": 150,
+    "total_steps": 100,
     "dim_state": 17,
     "dim_action": 6,
     "train_model_freq": 1,
     "train_policy_freq": 1,
     "normalize_freq": 1000000,
-    "eval_freq": 50,
+    "eval_freq": 10,
     "buffer_size": 5000,
 
     "evaluator_type": "rollout",
@@ -180,8 +180,8 @@
 
     "trainer": "ekf_efficient",
     "trainer_params": {
-      "learning_rate": 40,
-      "init_cov_scale": 14.0,
+      "learning_rate": 100.0,
+      "init_cov_scale": 0.011,
       "jitter": 0.0
     },
 
