@@ -65,6 +65,17 @@ class EnvParams:
     start_pos: Any = None
     goal_pos: Any = None
 
+    # Specific to hopper
+    torso_length: float = 0.4
+    thigh_length: float = 0.45
+    leg_length: float = 0.5
+    foot_length: float = 0.39
+    max_torque: float = 100.0
+    contact_stiffness: float = 2000.0
+    contact_damping: float = 100.0
+    friction_coeff: float = 0.7
+    min_height: float = 0.3
+
 
 
 
@@ -1155,6 +1166,157 @@ def make_planar_drone_wind_env(params: EnvParams):
     return reset_fn, step_fn, get_obs_fn
 
 
+def make_hopper_env(params: EnvParams):
+    """
+    Factory function that creates a simplified 2D hopper environment.
+
+    State: [x, y, theta_thigh, theta_leg, theta_foot,
+            x_dot, y_dot, omega_thigh, omega_leg, omega_foot,
+            ground_contact] (11D)
+    Action: [tau_thigh, tau_leg, tau_foot] (3D)
+    Dynamics: Simplified rigid-body chain with soft ground contact,
+              semi-implicit Euler integration.
+
+    Args:
+        params: EnvParams dataclass with environment parameters including
+            mass, gravity, link lengths, contact parameters.
+
+    Returns:
+        Tuple of (reset_fn, step_fn, get_obs_fn).
+    """
+    m = params.mass
+    g = params.gravity
+    dt = params.dt
+    thigh_len = params.thigh_length
+    leg_len = params.leg_length
+    foot_len = params.foot_length
+    max_torque = params.max_torque
+    k_contact = params.contact_stiffness
+    d_contact = params.contact_damping
+    mu_friction = params.friction_coeff
+    min_height = params.min_height
+
+    # Standing height (all links vertical)
+    standing_height = thigh_len + leg_len + foot_len
+
+    @jax.jit
+    def _step_dynamics(state: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
+        """Simplified hopper dynamics with soft ground contact."""
+        # Unpack state
+        x, y = state[0], state[1]
+        th_t, th_l, th_f = state[2], state[3], state[4]
+        xd, yd = state[5], state[6]
+        om_t, om_l, om_f = state[7], state[8], state[9]
+
+        # Clip torques
+        tau_t = jnp.clip(action[0], -max_torque, max_torque)
+        tau_l = jnp.clip(action[1], -max_torque, max_torque)
+        tau_f = jnp.clip(action[2], -max_torque, max_torque)
+
+        # Forward kinematics (cumulative angles from vertical)
+        cum_t = th_t
+        cum_l = th_t + th_l
+        cum_f = th_t + th_l + th_f
+
+        # Foot tip position
+        foot_tip_y = y - thigh_len * jnp.cos(cum_t) - leg_len * jnp.cos(cum_l) - foot_len * jnp.cos(cum_f)
+
+        # Moment of inertia for each link (rod about end)
+        I_t = m * thigh_len**2 / 3.0
+        I_l = m * leg_len**2 / 3.0
+        I_f = m * foot_len**2 / 3.0
+
+        # Joint angular accelerations from torques
+        alpha_t = tau_t / I_t
+        alpha_l = tau_l / I_l
+        alpha_f = tau_f / I_f
+
+        # Gravity on center of mass
+        y_ddot_grav = -g
+
+        # Soft ground contact (differentiable)
+        penetration = jnp.maximum(0.0, -foot_tip_y)
+        in_contact = (penetration > 0.0).astype(jnp.float32)
+        normal_force = k_contact * penetration - d_contact * jnp.minimum(yd, 0.0) * in_contact
+        normal_force = jnp.maximum(normal_force, 0.0)
+
+        y_ddot = y_ddot_grav + normal_force / m
+
+        # Horizontal friction force (simplified: proportional to leg angle)
+        horizontal_force = mu_friction * normal_force * jnp.sin(cum_t) * in_contact
+        x_ddot = horizontal_force / m
+
+        # Semi-implicit Euler integration
+        xd_new = xd + x_ddot * dt
+        yd_new = yd + y_ddot * dt
+        om_t_new = om_t + alpha_t * dt
+        om_l_new = om_l + alpha_l * dt
+        om_f_new = om_f + alpha_f * dt
+
+        x_new = x + xd_new * dt
+        y_new = y + yd_new * dt
+        th_t_new = th_t + om_t_new * dt
+        th_l_new = th_l + om_l_new * dt
+        th_f_new = th_f + om_f_new * dt
+
+        # Ground contact flag
+        ground_contact = in_contact
+
+        return jnp.array([
+            x_new, y_new, th_t_new, th_l_new, th_f_new,
+            xd_new, yd_new, om_t_new, om_l_new, om_f_new,
+            ground_contact
+        ])
+
+    @jax.jit
+    def reset_fn(key: jax.random.PRNGKey):
+        """Reset to standing upright with small random perturbation."""
+        key, subkey = jax.random.split(key)
+        angle_noise = jax.random.uniform(subkey, shape=(3,), minval=-0.05, maxval=0.05)
+        return jnp.array([
+            0.0, standing_height,
+            angle_noise[0], angle_noise[1], angle_noise[2],
+            0.0, 0.0, 0.0, 0.0, 0.0,
+            1.0  # starts on ground
+        ], dtype=jnp.float32)
+
+    @jax.jit
+    def get_obs_fn(state: jnp.ndarray):
+        """Returns state with agent dimension."""
+        return state[None, :]  # Shape: (1, 11)
+
+    @jax.jit
+    def step_fn(state: jnp.ndarray, step_count: int, action: jnp.ndarray):
+        """Steps the hopper environment forward."""
+        clipped_action = jnp.clip(action.squeeze(), -max_torque, max_torque)
+
+        next_state = _step_dynamics(state, clipped_action)
+
+        # Reward: forward velocity + alive bonus - control penalty
+        forward_vel = next_state[5]  # x_dot
+        height = next_state[1]       # y
+        control_cost = 0.001 * jnp.sum(clipped_action ** 2)
+        alive_bonus = 1.0
+        reward = forward_vel + alive_bonus - control_cost
+        rewards = jnp.array([reward])
+
+        # Termination: torso too low
+        terminated = height < min_height
+        truncated = step_count >= params.max_episode_steps
+
+        observations = get_obs_fn(next_state)
+        info = {
+            "reward": reward,
+            "forward_vel": forward_vel,
+            "height": height,
+            "dist_to_target": jnp.abs(height - standing_height),
+        }
+
+        return next_state, observations, rewards, terminated, truncated, info
+
+    return reset_fn, step_fn, get_obs_fn
+
+
 def make_merging_idm_env(params: EnvParams, true_T, true_b, idm_params):
     """
     Factory function for the highway merging IDM environment.
@@ -1378,5 +1540,7 @@ def init_env(config: Dict[str, Any]):
         return make_pursuit_evasion_unicycle_double_integrator_env(params, true_tracking_weight)
     elif env_name == "planar_drone_wind":
         return make_planar_drone_wind_env(params)
+    elif env_name == "hopper":
+        return make_hopper_env(params)
     else:
         raise ValueError(f"Unknown environment name: '{env_name}'")

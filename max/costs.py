@@ -402,6 +402,61 @@ def _terminal_cost_drone_state_tracking(state, cost_params, state_weights):
     return jnp.sum(state_weights * (state - goal_state) ** 2)
 
 
+def _stage_cost_hopper_locomotion(
+    state, control, cost_params,
+    weight_control, weight_forward, weight_height, weight_alive,
+    weight_info, info_term_fn
+):
+    """
+    Stage cost for hopper locomotion: maximize forward velocity,
+    maintain height, alive bonus, control penalty, info gathering.
+
+    Args:
+        state: [x, y, theta_t, theta_l, theta_f, xd, yd, om_t, om_l, om_f, gc] (11,)
+        control: [tau_t, tau_l, tau_f] (3,)
+        cost_params: Dict with 'dyn_params', 'params_cov_model', 'goal_state'
+        weight_forward: Weight for forward velocity reward
+        weight_height: Weight for height maintenance
+        weight_alive: Weight for alive bonus
+        weight_control: Control penalty weight
+        weight_info: Information gathering weight
+        info_term_fn: Information term function (can be None)
+
+    Returns:
+        Stage cost scalar (minimized by planner, so rewards are negated)
+    """
+    goal_state = cost_params["goal_state"]
+
+    # Forward velocity reward (negated for minimization)
+    forward_vel_cost = -weight_forward * state[5]  # -x_dot
+
+    # Height tracking cost (penalize deviation from desired height)
+    height_error = weight_height * (state[1] - goal_state[1]) ** 2
+
+    # Alive bonus (negated for minimization)
+    alive_cost = -weight_alive
+
+    # Control penalty
+    control_cost = weight_control * jnp.sum(control ** 2)
+
+    # Information gathering bonus
+    exploration_term = 0.0
+    if info_term_fn is not None:
+        exploration_term = -weight_info * info_term_fn(
+            state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
+        )
+
+    return forward_vel_cost + height_error + alive_cost + control_cost + exploration_term
+
+
+def _terminal_cost_hopper_locomotion(state, cost_params, weight_forward, weight_height):
+    """Terminal cost: penalize low forward velocity and wrong height."""
+    goal_state = cost_params["goal_state"]
+    forward_vel_cost = -weight_forward * state[5]
+    height_error = weight_height * (state[1] - goal_state[1]) ** 2
+    return forward_vel_cost + height_error
+
+
 def _stage_cost_merging_idm(
     state, control, cost_params,
     Q_diag, q_I, p_y_target, v_g, L, lane_width,
@@ -952,6 +1007,50 @@ def init_cost(config, dynamics_model):
             return jnp.sum(stage_costs) + terminal + jerk
 
         # Attach dynamics model for planners that need it (e.g., A*)
+        cost_fn.dynamics_model = dynamics_model
+        return cost_fn
+
+    elif cost_type == "hopper_locomotion":
+        params = config["cost_fn_params"]
+        weight_jerk = params.get("weight_jerk", 0.0)
+        weight_control = params["weight_control"]
+        weight_info = params["weight_info"]
+        weight_forward = params.get("weight_forward", 1.0)
+        weight_height = params.get("weight_height", 0.5)
+        weight_alive = params.get("weight_alive", 1.0)
+        meas_noise_diag = jnp.array(params["meas_noise_diag"])
+
+        info_term_fn = None
+        if weight_info > 0:
+            info_term_fn = make_info_gathering_term(
+                dynamics_model.pred_one_step, meas_noise_diag
+            )
+
+        stage_cost_vmap = jax.vmap(
+            lambda s, u, cp: _stage_cost_hopper_locomotion(
+                s, u, cp,
+                weight_control, weight_forward, weight_height, weight_alive,
+                weight_info, info_term_fn
+            ),
+            in_axes=(0, 0, None),
+        )
+
+        @jax.jit
+        def cost_fn(init_state, controls, cost_params):
+            """Calculates total trajectory cost for hopper locomotion."""
+            states = _rollout(
+                init_state, controls, cost_params, dynamics_model.pred_one_step
+            )
+            stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
+            terminal = _terminal_cost_hopper_locomotion(
+                states[-1], cost_params, weight_forward, weight_height
+            )
+            jerk = 0.0
+            if weight_jerk > 0:
+                control_diffs = jnp.diff(controls, axis=0)
+                jerk = weight_jerk * jnp.sum(control_diffs ** 2)
+            return jnp.sum(stage_costs) + terminal + jerk
+
         cost_fn.dynamics_model = dynamics_model
         return cost_fn
 
