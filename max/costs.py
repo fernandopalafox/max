@@ -557,6 +557,48 @@ def _terminal_cost_cheetah_velocity_tracking_learned(
     return (forward_vel - target_velocity) ** 2
 
 
+def _stage_cost_cheetah_velocity_tracking_learned_w_info(
+    state: jnp.ndarray,
+    control: jnp.ndarray,
+    cost_params: dict,
+    target_velocity: float,
+    weight_control: float,
+    heading_penalty_factor: float,
+    weight_info: float,
+    info_term_fn,
+) -> float:
+    """
+    Stage cost for cheetah velocity tracking with info gathering bonus.
+
+    17D state layout:
+    - [0:8]: positions (rootz, rooty, bthigh, bshin, bfoot, fthigh, fshin, ffoot)
+    - [8:17]: velocities (vel_x, vel_z, vel_y, vel_bthigh, vel_bshin, vel_bfoot,
+                          vel_fthigh, vel_fshin, vel_ffoot)
+    """
+    # Forward velocity is vel_x at index 8
+    forward_vel = state[8]
+    velocity_error = (forward_vel - target_velocity) ** 2
+
+    # Control penalty
+    control_cost = weight_control * jnp.sum(control ** 2)
+
+    # Flip penalty
+    root_angle = state[1]
+    flip_penalty = heading_penalty_factor * (
+        (root_angle > jnp.pi / 2).astype(jnp.float32) +
+        (root_angle < -jnp.pi / 2).astype(jnp.float32)
+    )
+
+    # Info gathering bonus
+    exploration_term = 0.0
+    if info_term_fn is not None:
+        exploration_term = -weight_info * info_term_fn(
+            state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
+        )
+
+    return velocity_error + control_cost + flip_penalty + exploration_term
+
+
 # --- Evaluation cost helpers ---
 
 
@@ -1010,6 +1052,42 @@ def init_cost(config, dynamics_model):
                 states[-1], cost_params["target_velocity"]
             )
 
+            return jnp.sum(stage_costs) + terminal
+
+        return cost_fn
+
+    elif cost_type == "cheetah_velocity_tracking_learned_info":
+        # Cheetah velocity tracking with info gathering (17D state vector)
+        params = config["cost_fn_params"]
+        weight_control = params["weight_control"]
+        heading_penalty_factor = params.get("heading_penalty_factor", 10.0)
+        weight_info = params.get("weight_info", 0.0)
+        meas_noise_diag = jnp.array(params["meas_noise_diag"])
+
+        info_term_fn = None
+        if weight_info > 0:
+            info_term_fn = make_info_gathering_term(
+                dynamics_model.pred_one_step, meas_noise_diag
+            )
+
+        stage_cost_vmap = jax.vmap(
+            lambda s, u, cp: _stage_cost_cheetah_velocity_tracking_learned_w_info(
+                s, u, cp, cp["target_velocity"], weight_control,
+                heading_penalty_factor, weight_info, info_term_fn
+            ),
+            in_axes=(0, 0, None),
+        )
+
+        @jax.jit
+        def cost_fn(init_state, controls, cost_params):
+            """Cheetah velocity tracking with info gathering."""
+            states = _rollout(
+                init_state, controls, cost_params, dynamics_model.pred_one_step
+            )
+            stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
+            terminal = _terminal_cost_cheetah_velocity_tracking_learned(
+                states[-1], cost_params["target_velocity"]
+            )
             return jnp.sum(stage_costs) + terminal
 
         return cost_fn
