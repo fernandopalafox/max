@@ -91,9 +91,9 @@
     "seed": 42,
     "wandb_project": "cheetah_pretraining",
     "data_path": "./data/cheetah_data/cheetah_buffer_0219.pkl",
-    "save_path": "./data/pretrained_models",
+    "save_path": "./data/pretrained_models/cheetah",
 
-    "num_epochs": 400,
+    "num_epochs": 2000,
     "batch_size": 256,
     "train_split": 0.8,
 
@@ -102,14 +102,17 @@
 
     "dynamics": "mlp_resnet",
     "dynamics_params": {
-      "nn_features": [256, 256, 256],
-      "ensemble_size": 3
+      "nn_features": [256, 256, 64],
+      "ensemble_size": 1
     },
 
     "trainer": "gd",
     "trainer_params": {
       "learning_rate": 3e-4
     },
+
+    "checkpoint_enabled": true,
+    "checkpoint_freq": 50,
 
     "normalization": { "method": "static" },
     "normalization_params": {
