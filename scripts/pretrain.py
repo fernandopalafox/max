@@ -9,12 +9,18 @@ import argparse
 import os
 import pickle
 import json
+from datetime import datetime
 from max.normalizers import init_normalizer
 from max.dynamics import init_dynamics
 from max.dynamics_trainers import init_trainer
 
 
 def main(config):
+    # Create unique run directory with timestamp
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(config["save_path"], run_timestamp)
+    os.makedirs(run_dir, exist_ok=True)
+    print(f"Run directory: {run_dir}")
     wandb.init(
         project=config.get("wandb_project", "pretraining"),
         config=config,
@@ -63,6 +69,11 @@ def main(config):
     key, trainer_key = jax.random.split(key)
     trainer, train_state = init_trainer(config, dynamics_model, init_params, trainer_key)
 
+    # Count and log trainable parameters
+    num_params = sum(x.size for x in jax.tree_util.tree_leaves(train_state.params))
+    print(f"Trainable parameters: {num_params:,}")
+    wandb.config.update({"num_params": num_params})
+
     # JIT'd test loss function
     @jax.jit
     def compute_loss(params, data):
@@ -76,6 +87,14 @@ def main(config):
     batch_size = config["batch_size"]
     num_epochs = config["num_epochs"]
     train_losses, test_losses = [], []
+
+    # Checkpoint config
+    checkpoint_enabled = config.get("checkpoint_enabled", False)
+    checkpoint_freq = config.get("checkpoint_freq", 10)
+    if checkpoint_enabled:
+        checkpoint_dir = os.path.join(run_dir, "checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        print(f"Checkpointing every {checkpoint_freq} epochs to {checkpoint_dir}")
 
     print(f"Training: {n_train} samples, Testing: {n_samples - n_train} samples")
 
@@ -102,6 +121,13 @@ def main(config):
         if (epoch + 1) % 10 == 0:
             print(f"Epoch {epoch+1}/{num_epochs}: train={train_loss:.6f}, test={test_loss:.6f}")
 
+        # Save checkpoint
+        if checkpoint_enabled and (epoch + 1) % checkpoint_freq == 0:
+            ckpt_path = os.path.join(checkpoint_dir, f"epoch_{epoch+1}.pkl")
+            with open(ckpt_path, "wb") as f:
+                pickle.dump(jax.device_get(train_state.params), f)
+            print(f"Checkpoint saved: {ckpt_path}")
+
     # Plot losses
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(train_losses, label="Train")
@@ -115,14 +141,13 @@ def main(config):
     plt.close(fig)
 
     # Save model with descriptive name: {dynamics}_{data_source}.pkl
-    save_path = config["save_path"]
-    os.makedirs(save_path, exist_ok=True)
     params_np = jax.device_get(train_state.params)
     data_name = os.path.basename(config["data_path"]).replace("_buffer.pkl", "")
-    model_name = f"{config['dynamics']}_{data_name}"
-    with open(os.path.join(save_path, model_name), "wb") as f:
+    model_name = f"{config['dynamics']}_{data_name}.pkl"
+    model_path = os.path.join(run_dir, model_name)
+    with open(model_path, "wb") as f:
         pickle.dump(params_np, f)
-    print(f"Model saved to {os.path.join(save_path, model_name)}")
+    print(f"Model saved to {model_path}")
 
     wandb.finish()
 
