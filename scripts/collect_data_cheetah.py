@@ -439,12 +439,22 @@ def create_cheetah_xy_animation(states, max_frames=100, save_path=None, ghost_al
     return save_path
 
 
-def plot_histograms(buffers, buffer_idx, config):
-    """Plot histograms of observations and actions."""
+def plot_histograms(buffers, buffer_idx, config, max_samples=50000):
+    """Plot histograms of observations and actions.
+
+    Args:
+        max_samples: If buffer has more transitions than this, subsample to avoid crashes.
+    """
     # Buffer stores 17D observations
     dim_obs = config.get("dim_obs", 17)
     observations = np.array(buffers["states"][0, :buffer_idx, :dim_obs])
     actions = np.array(buffers["actions"][0, :buffer_idx, :])
+
+    # Subsample if buffer is too large
+    if buffer_idx > max_samples:
+        indices = np.random.choice(buffer_idx, size=max_samples, replace=False)
+        observations = observations[indices]
+        actions = actions[indices]
 
     norm_params = config["normalization_params"]
 
