@@ -342,8 +342,9 @@ def create_EKF_efficient_trainer(
             ekf_out,
         )
 
-        ekf_pred = observation_fn(flat_params_model_new, ekf_inp)
-        loss = jnp.mean((ekf_out - ekf_pred) ** 2)  # "Loss" is innovation
+        # Prequential Error
+        pre_fit_pred = observation_fn(flat_params_model, ekf_inp)
+        pre_fit_loss = jnp.mean((ekf_out - pre_fit_pred) ** 2)
 
         params_new = {
             "model": unflatten_fn_model(flat_params_model_new),
@@ -352,7 +353,7 @@ def create_EKF_efficient_trainer(
         new_train_state = train_state.replace(
             params=params_new, covariance=cov_params_model_new
         )
-        return new_train_state, loss
+        return new_train_state, pre_fit_loss
 
     def train_fn(
         train_state: TrainState, data: dict, **kwargs
