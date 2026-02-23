@@ -1,6 +1,6 @@
 {
   "data_collection": {
-    "num_episodes": 1000,
+    "num_episodes": 4000,
     "max_episode_length": 300,
     "seed": 42,
     "save_path": "./data/cheetah_data",
@@ -82,7 +82,7 @@
     "domain_randomization": {
       "target_velocity": {
         "min": 0.01,
-        "max": 5.0
+        "max": 6.0
       }
     }
   },
@@ -90,10 +90,10 @@
   "pretraining": {
     "seed": 42,
     "wandb_project": "cheetah_pretraining",
-    "data_path": "./data/cheetah_data/cheetah_buffer_0219.pkl",
+    "data_path": "./data/cheetah_data/cheetah_buffer_300k.pkl",
     "save_path": "./data/pretrained_models/cheetah",
 
-    "num_epochs": 2000,
+    "num_epochs": 1000,
     "batch_size": 256,
     "train_split": 0.8,
 
@@ -102,13 +102,13 @@
 
     "dynamics": "mlp_resnet",
     "dynamics_params": {
-      "nn_features": [256, 256, 64],
-      "ensemble_size": 1
+      "nn_features": [256, 256, 256, 21],
+      "ensemble_size": 3
     },
 
     "trainer": "gd",
     "trainer_params": {
-      "learning_rate": 3e-4
+      "learning_rate": 1e-4
     },
 
     "checkpoint_enabled": true,
@@ -143,7 +143,7 @@
     "plot_eval": true,
     "env_name": "cheetah",
     "num_agents": 1,
-    "total_steps": 100,
+    "total_steps": 150,
     "dim_state": 17,
     "dim_action": 6,
     "train_model_freq": 1,
@@ -161,6 +161,7 @@
       "env_params": {},
       "dynamics_params": {},
       "planner_params": {},
+      "cost_type": "cheetah_velocity_tracking_learned",
       "cost_fn_params": {
         "target_velocity": 4.0,
         "weight_control": 0.1,
@@ -168,11 +169,14 @@
       }
     },
 
-    "dynamics": "mlp_resnet_last_layer",
+    "dynamics": "mlp_resnet_lora_xs",
     "dynamics_params": {
-      "nn_features": [256, 256, 256],
+      "nn_features": [256, 256, 256, 21],
       "ensemble_size": 3,
-      "pretrained_params_path": "./data/pretrained_models/mlp_resnet_cheetah_buffer_0219.pkl"
+      "pretrained_params_path": "./data/pretrained_models/cheetah/final/cheetah_new3_1000ep.pkl",
+      "svd_rank_input": null, 
+      "svd_rank_hidden": 14,
+      "svd_rank_output": null
     },
 
     "env_params": {
@@ -183,8 +187,8 @@
 
     "trainer": "ekf_efficient",
     "trainer_params": {
-      "learning_rate": 100.0,
-      "init_cov_scale": 0.011,
+      "learning_rate": 10.0,
+      "init_cov_scale": 10.0,
       "jitter": 0.0
     },
 
@@ -214,7 +218,7 @@
       "vel_fthigh", "vel_fshin", "vel_ffoot"
     ],
 
-    "cost_type": "cheetah_velocity_tracking_learned",
+    "cost_type": "cheetah_velocity_tracking_learned_info",
     "planner_type": "icem",
     "planner_params": {
       "horizon": 25,
@@ -230,9 +234,12 @@
     },
 
     "cost_fn_params": {
-      "target_velocity": 0.5,
+      "target_velocity": 0.1,
       "weight_control": 0.1,
-      "heading_penalty_factor": 10.0
+      "heading_penalty_factor": 10.0,
+      "weight_info": 0.0,
+      "meas_noise_diag": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01,
+                          0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
     }
   }
 }
