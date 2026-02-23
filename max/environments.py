@@ -60,6 +60,9 @@ class EnvParams:
     true_B: Any = None
     target_point: Any = None
 
+    # Specific to cheetah
+    cheetah_mass_scale: float = 1.0  # Multiplier for body masses (default 14kg total)
+
     # Specific to gridworld
     maze_layout: Any = None
     start_pos: Any = None
@@ -1475,6 +1478,76 @@ def make_merging_idm_env(params: EnvParams, true_T, true_b, idm_params):
     return reset_fn, step_fn, get_obs_fn
 
 
+def make_cheetah_env(params: EnvParams):
+    """
+    Factory function that wraps mujoco_playground CheetahRun environment.
+
+    Internal state: mjx.Data (full MuJoCo physics state)
+    Observation: 17D = [qpos[1:] (8D), qvel (9D)] (matches playground)
+    Action: 6D torques in [-1, 1]
+    Forward velocity = data.qvel[0]
+    """
+    from mujoco_playground import registry
+    from mujoco_playground._src import mjx_env
+    from mujoco import mjx
+
+    # Load environment and extract models (closed over)
+    env = registry.load('CheetahRun')
+    n_substeps = env.n_substeps
+
+    # Apply mass scaling if specified
+    if params.cheetah_mass_scale != 1.0:
+        mj_model = env.mj_model
+        mj_model.body_mass[:] = mj_model.body_mass * params.cheetah_mass_scale
+        mjx_model = mjx.put_model(mj_model)
+    else:
+        mjx_model = env.mjx_model
+
+    @jax.jit
+    def reset_fn(key: jax.random.PRNGKey) -> mjx.Data:
+        """Resets the cheetah environment and returns mjx.Data directly."""
+        env_state = env.reset(key)
+        return env_state.data
+
+    @jax.jit
+    def step_fn(
+        data: mjx.Data,
+        step_count: int,
+        action: jnp.ndarray,
+    ):
+        """Steps the cheetah environment forward using mjx.Data directly."""
+        # Direct physics step - no reconstruction!
+        next_data = mjx_env.step(mjx_model, data, action.squeeze(), n_substeps)
+
+        # Get observation
+        obs = get_obs_fn(next_data)
+
+        # Reward is forward velocity
+        reward = next_data.qvel[0]
+        rewards = jnp.array([reward])
+
+        # Check termination (NaN in state)
+        done = jnp.isnan(next_data.qpos).any() | jnp.isnan(next_data.qvel).any()
+        terminated = done
+
+        # Truncation based on max steps
+        truncated = step_count >= params.max_episode_steps
+
+        info = {
+            "forward_vel": next_data.qvel[0],
+        }
+
+        return next_data, obs, rewards, terminated, truncated, info
+
+    @jax.jit
+    def get_obs_fn(data: mjx.Data) -> jnp.ndarray:
+        """Returns 17D observation: [qpos[1:], qvel] from mjx.Data."""
+        obs = jnp.concatenate([data.qpos[1:], data.qvel])
+        return obs[None, :]  # Add agent dimension
+
+    return reset_fn, step_fn, get_obs_fn
+
+
 def init_env(config: Dict[str, Any]):
     """
     Initialize environment functions based on configuration.
@@ -1540,6 +1613,8 @@ def init_env(config: Dict[str, Any]):
         return make_pursuit_evasion_unicycle_double_integrator_env(params, true_tracking_weight)
     elif env_name == "planar_drone_wind":
         return make_planar_drone_wind_env(params)
+    elif env_name == "cheetah":
+        return make_cheetah_env(params)
     elif env_name == "hopper":
         return make_hopper_env(params)
     else:

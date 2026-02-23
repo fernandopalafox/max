@@ -233,50 +233,10 @@ def _cem_solve_internal(
 # --- iCEM Implementation ---
 
 
-def create_icem_planner(
-    config: Any, cost_fn: CostFn, key: jax.Array
-) -> tuple[Planner, PlannerState]:
-    """Creates an Improved Cross-Entropy Method (iCEM) planner."""
-    planner_params = config.get("planner_params", {})
-    horizon = planner_params.get("horizon")
-    dim_control = planner_params.get("dim_control")
-    batch_size = planner_params.get("batch_size")
-    elit_frac = planner_params.get("elit_frac")
-    unrolled_dim = horizon * dim_control
-    num_elites = int(elit_frac * batch_size)
-    initial_mean_val = planner_params.get("initial_mean_val", 0.0)
-    initial_var_val = planner_params.get("initial_variance_val", 0.5)
-
-    initial_mean = jnp.ones(unrolled_dim) * initial_mean_val
-    initial_elites = jnp.zeros((num_elites, unrolled_dim))
-    initial_state = PlannerState(
-        key=key, mean=initial_mean, elites=initial_elites
-    )
-    initial_var = jnp.ones(unrolled_dim) * initial_var_val
-
-    @partial(jax.jit)
-    def solve_fn(
-        state: PlannerState,
-        init_env_state: Array,
-        cost_params: Array,
-    ) -> Tuple[Array, PlannerState]:
-        """JIT-compiled solve function for iCEM."""
-        return _icem_solve_internal(
-            cost_fn, config, state, init_env_state, cost_params, initial_var
-        )
-
-    return Planner(cost_fn=cost_fn, solve_fn=solve_fn), initial_state
-
-
-def _icem_solve_internal(
-    cost_fn: CostFn,
-    config: Any,
-    state: PlannerState,
-    init_env_state: Array,
-    cost_params: Array,
-    initial_var: Array,
-) -> Tuple[Array, PlannerState]:
-    """Core logic for the iCEM algorithm."""
+def _create_icem_solve(config: Any, cost_fn: CostFn) -> Callable:
+    """
+    Creates a JIT-compiled iCEM solve function with all parameters closed over.
+    """
     # Unpack config
     planner_params = config.get("planner_params", {})
     batch_size = planner_params.get("batch_size")
@@ -290,92 +250,145 @@ def _icem_solve_internal(
     colored_noise_beta = planner_params.get("colored_noise_beta", 2.0)
     colored_noise_fmin = planner_params.get("colored_noise_fmin", 0.0)
     keep_elites_frac = planner_params.get("keep_elites_frac", 0.3)
+    initial_var_val = planner_params.get("initial_variance_val", 0.5)
 
+    # Compute derived values
     num_elites = int(elit_frac * batch_size)
     num_keep_elites = int(keep_elites_frac * num_elites)
     unrolled_dim = horizon * dim_control
+    initial_var = jnp.ones(unrolled_dim) * initial_var_val
 
-    # Vectorize cost and noise functions
-    vmapped_cost_fn = jax.vmap(
-        lambda ctrls: cost_fn(
-            init_env_state, ctrls.reshape(horizon, dim_control), cost_params
-        )
-    )
-    vmapped_noise_fn = jax.vmap(
-        lambda k: powerlaw_psd_gaussian(
-            exponent=colored_noise_beta,
-            size=(unrolled_dim,),
-            rng=k,
-            fmin=colored_noise_fmin,
-        )
-    )
+    # Pre-compute noise parameters (only depends on static config)
+    # These are closed over by _generate_colored_noise below
+    samples = unrolled_dim
+    f = rfftfreq(samples)
+    fmin_val = jnp.maximum(colored_noise_fmin, 1.0 / samples)
 
-    def icem_iteration(carry, i):
-        mean, var, key, best_seq, best_cost, iter_elites = carry
-        key, noise_key = random.split(key)
+    # Compute s_scale with cutoff frequency handling
+    s_scale = f.copy()
+    ix = int(jnp.sum(s_scale < fmin_val))
+    if ix > 0 and ix < len(s_scale):
+        s_scale = s_scale.at[:ix].set(s_scale[ix])
+    s_scale = s_scale ** (-colored_noise_beta / 2.0)
 
-        noise_keys = random.split(noise_key, batch_size)
-        samples = mean + vmapped_noise_fn(noise_keys) * jnp.sqrt(var)
+    # Compute sigma for normalization
+    w = s_scale[1:].at[-1].set(s_scale[-1] * (1 + (samples % 2)) / 2.0)
+    sigma = 2 * jnp.sqrt(jnp.sum(w**2)) / samples
 
-        elites_to_use = jax.lax.cond(
-            i == 0,
-            lambda: state.elites[:num_keep_elites],
-            lambda: iter_elites[:num_keep_elites],
-        )
-        samples = samples.at[:num_keep_elites].set(elites_to_use)
-        samples = jnp.clip(samples, action_low, action_high)
-        samples = jax.lax.cond(
-            i == max_iter - 1,
-            lambda s: s.at[-1].set(mean),
-            lambda s: s,
-            samples,
-        )
+    # Check if samples is even (used for Nyquist handling)
+    samples_even = (samples % 2 == 0)
 
-        costs = vmapped_cost_fn(samples)
-        _, elite_indices = jax.lax.top_k(-costs, k=num_elites)
-        new_iter_elites = samples[elite_indices]
+    def _generate_colored_noise(rng):
+        """Generate colored noise with pre-computed scaling (closes over s_scale, sigma)."""
+        key_sr, key_si = random.split(rng)
+        sr = random.normal(key=key_sr, shape=s_scale.shape) * s_scale
+        si = random.normal(key=key_si, shape=s_scale.shape) * s_scale
 
-        current_best_cost = costs[elite_indices[0]]
-        current_best_seq = new_iter_elites[0]
-        best_seq, best_cost = jax.lax.cond(
-            current_best_cost < best_cost,
-            lambda: (current_best_seq, current_best_cost),
-            lambda: (best_seq, best_cost),
+        # DC component: set imaginary to 0, scale real by sqrt(2)
+        si = si.at[0].set(0)
+        sr = sr.at[0].set(sr[0] * jnp.sqrt(2))
+
+        # Nyquist component for even-length signals
+        sr, si = jax.lax.cond(
+            samples_even,
+            lambda: (sr.at[-1].set(sr[-1] * jnp.sqrt(2)), si.at[-1].set(0)),
+            lambda: (sr, si)
         )
 
-        elite_mean = jnp.mean(new_iter_elites, axis=0)
-        elite_var = jnp.var(new_iter_elites, axis=0)
-        new_mean = (1 - learning_rate) * mean + learning_rate * elite_mean
-        new_var = (1 - learning_rate) * var + learning_rate * elite_var
+        s = sr + 1j * si
+        return irfft(s, n=samples) / sigma
 
-        return (
-            new_mean,
-            new_var,
-            key,
-            best_seq,
-            best_cost,
-            new_iter_elites,
-        ), None
+    # Vmap over batch of RNG keys
+    vmapped_noise_fn = jax.vmap(_generate_colored_noise)
 
-    init_carry = (
-        state.mean,
-        initial_var,
-        state.key,
-        state.mean,
-        jnp.inf,
-        jnp.zeros((num_elites, unrolled_dim)),
-    )
-    final_carry, _ = jax.lax.scan(
-        icem_iteration, init_carry, jnp.arange(max_iter)
-    )
+    @jax.jit
+    def solve(
+        state: PlannerState,
+        init_env_state: Array,
+        cost_params: dict,
+    ) -> Tuple[Array, PlannerState]:
+        # Vmapped cost depends on runtime init_env_state and cost_params
+        vmapped_cost_fn = jax.vmap(
+            lambda ctrls: cost_fn(
+                init_env_state, ctrls.reshape(horizon, dim_control), cost_params
+            )
+        )
 
-    final_mean, _, final_key, final_best_seq, _, final_elites = final_carry
-    new_state = state.replace(
-        mean=final_mean, elites=final_elites, key=final_key
-    )
-    best_controls = final_best_seq.reshape(horizon, dim_control)
+        def icem_iteration(carry, i):
+            mean, var, key, best_seq, best_cost, iter_elites = carry
+            key, noise_key = random.split(key)
 
-    return best_controls, new_state
+            noise_keys = random.split(noise_key, batch_size)
+            samples = mean + vmapped_noise_fn(noise_keys) * jnp.sqrt(var)
+
+            elites_to_use = jax.lax.cond(
+                i == 0,
+                lambda: state.elites[:num_keep_elites],
+                lambda: iter_elites[:num_keep_elites],
+            )
+            samples = samples.at[:num_keep_elites].set(elites_to_use)
+            samples = jnp.clip(samples, action_low, action_high)
+            samples = jax.lax.cond(
+                i == max_iter - 1,
+                lambda s: s.at[-1].set(mean),
+                lambda s: s,
+                samples,
+            )
+
+            costs = vmapped_cost_fn(samples)
+            _, elite_indices = jax.lax.top_k(-costs, k=num_elites)
+            new_iter_elites = samples[elite_indices]
+
+            current_best_cost = costs[elite_indices[0]]
+            current_best_seq = new_iter_elites[0]
+            best_seq, best_cost = jax.lax.cond(
+                current_best_cost < best_cost,
+                lambda: (current_best_seq, current_best_cost),
+                lambda: (best_seq, best_cost),
+            )
+
+            elite_mean = jnp.mean(new_iter_elites, axis=0)
+            elite_var = jnp.var(new_iter_elites, axis=0)
+            new_mean = (1 - learning_rate) * mean + learning_rate * elite_mean
+            new_var = (1 - learning_rate) * var + learning_rate * elite_var
+
+            return (
+                new_mean,
+                new_var,
+                key,
+                best_seq,
+                best_cost,
+                new_iter_elites,
+            ), None
+
+        init_carry = (
+            state.mean,
+            initial_var,
+            state.key,
+            state.mean,
+            jnp.inf,
+            jnp.zeros((num_elites, unrolled_dim)),
+        )
+        final_carry, _ = jax.lax.scan(
+            icem_iteration, init_carry, jnp.arange(max_iter)
+        )
+
+        final_mean, _, final_key, final_best_seq, _, final_elites = final_carry
+
+        # Temporal shift: roll forward by one timestep, repeat last action
+        shifted_mean = jnp.concatenate(
+            [final_mean[dim_control:], final_mean[-dim_control:]]
+        )
+        shifted_elites = jnp.concatenate(
+            [final_elites[:, dim_control:], final_elites[:, -dim_control:]], axis=1
+        )
+
+        new_state = state.replace(
+            mean=shifted_mean, elites=shifted_elites, key=final_key
+        )
+        best_controls = final_best_seq.reshape(horizon, dim_control)
+
+        return best_controls, new_state
 
 
 # --- A* Implementation ---
@@ -810,8 +823,7 @@ def _get_neighbors_model_based(pos, pred_one_step_fn, dyn_params):
 
     return neighbors
 
-
-# --- iCEM Helper Function ---
+    return solve
 
 
 @partial(jax.jit, static_argnums=(0, 1, 3))
