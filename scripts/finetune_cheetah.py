@@ -249,7 +249,13 @@ def main(config):
                 "next_states": buffers["states"][0, buffer_idx - 1 : buffer_idx, :],
             }
             train_state, loss = trainer.train(train_state, train_data, step=step)
-            wandb.log({"train/model_loss": float(loss)}, step=step)
+            total_accumulated_loss += float(loss)
+            wandb.log({
+                "train/model_loss": float(loss),
+                "train/total_accumulated_loss": total_accumulated_loss
+            }, step=step)
+            dt_train = time.time() - _t0
+            t_train += dt_train
 
         # Evaluate model
         if step % config["eval_freq"] == 0:
@@ -340,7 +346,7 @@ def main(config):
         print("Evaluation animation logged to wandb.")
 
     print("Run complete.")
-    return eval_results.get("eval/cheetah_velocity_tracking_learned")
+    return total_accumulated_loss
 
 
 def run_sweep():
@@ -377,6 +383,13 @@ if __name__ == "__main__":
         help="Custom name for the W&B run.",
     )
     parser.add_argument(
+        "--lambdas",
+        type=float,
+        nargs="+",
+        default=None,
+        help="List of weight_info values to sweep.",
+    )
+    parser.add_argument(
         "--num-seeds",
         type=int,
         default=1,
@@ -404,29 +417,38 @@ if __name__ == "__main__":
 
         run_name_base = args.run_name or "cheetah_finetune"
 
+        if args.lambdas is None:
+            lambdas = [CONFIG["cost_fn_params"]["weight_info"]]
+        else:
+            lambdas = args.lambdas
+
         # Generate seeds using JAX RNG from config seed
         base_key = jax.random.key(CONFIG["seed"])
         seed_keys = jax.random.split(base_key, args.num_seeds)
         seeds = [int(jax.random.bits(k)) for k in seed_keys]
 
-        for seed_idx, seed in enumerate(seeds, start=1):
-            print(f"--- Starting run for seed {seed_idx}/{args.num_seeds} ---")
-            run_config = copy.deepcopy(CONFIG)
-            run_config["seed"] = seed
+        for lam_idx, lam in enumerate(lambdas, start=1):
+            for seed_idx, seed in enumerate(seeds, start=1):
+                print(f"--- Starting run for lam{lam_idx} (lambda={lam}), seed {seed_idx}/{args.num_seeds} ---")
+                run_config = copy.deepcopy(CONFIG)
+                run_config["seed"] = seed
+                run_config["cost_fn_params"]["weight_info"] = lam
 
-            # Build run name
-            run_name = run_name_base
-            if args.num_seeds > 1:
-                run_name = f"{run_name}_{seed_idx}"
-            run_config["wandb_run_name"] = run_name
+                # Build run name: base_lam{idx}_seed{idx}
+                run_name = run_name_base
+                if args.lambdas is not None:
+                    run_name = f"{run_name}_lam{lam}"
+                if args.num_seeds > 1:
+                    run_name = f"{run_name}_{seed_idx}"
+                run_config["wandb_run_name"] = run_name
 
-            wandb.init(
-                project=run_config.get("wandb_project", "cheetah_finetuning"),
-                config=run_config,
-                name=run_config.get("wandb_run_name"),
-                reinit=True,
-            )
-            main(run_config)
-            wandb.finish()
+                wandb.init(
+                    project=run_config.get("wandb_project", "cheetah_finetuning"),
+                    config=run_config,
+                    name=run_config.get("wandb_run_name"),
+                    reinit=True,
+                )
+                main(run_config)
+                wandb.finish()
 
         print("All experiments complete.")
