@@ -1,6 +1,6 @@
 {
   "data_collection": {
-    "num_episodes": 4000,
+    "num_episodes": 1000,
     "max_episode_length": 300,
     "seed": 42,
     "save_path": "./data/cheetah_data",
@@ -42,7 +42,7 @@
     "planner_params": {
       "horizon": 25,
       "batch_size": 200,
-      "max_iter": 1,
+      "max_iter": 2,
       "elit_frac": 0.05,
       "learning_rate": 0.9,
       "colored_noise_beta": 0.25,
@@ -93,17 +93,18 @@
     "data_path": "./data/cheetah_data/cheetah_buffer_300k.pkl",
     "save_path": "./data/pretrained_models/cheetah",
 
-    "num_epochs": 1000,
+    "num_epochs": 500,
     "batch_size": 256,
     "train_split": 0.8,
 
     "dim_state": 17,
     "dim_action": 6,
 
-    "dynamics": "mlp_resnet",
+    "dynamics": "cheetah_resnet",
     "dynamics_params": {
-      "nn_features": [256, 256, 256, 21],
-      "ensemble_size": 3
+      "nn_features": [256,256,256,64],
+      "ensemble_size": 1,
+      "cheetah_mass_scale": 2.0
     },
 
     "trainer": "gd",
@@ -143,10 +144,10 @@
     "plot_eval": true,
     "env_name": "cheetah",
     "num_agents": 1,
-    "total_steps": 150,
+    "total_steps": 50,
     "dim_state": 17,
     "dim_action": 6,
-    "train_model_freq": 1,
+    "train_model_freq": 1001,
     "train_policy_freq": 1,
     "normalize_freq": 1000000,
     "eval_freq": 10,
@@ -163,20 +164,21 @@
       "planner_params": {},
       "cost_type": "cheetah_velocity_tracking_learned",
       "cost_fn_params": {
-        "target_velocity": 4.0,
+        "target_velocity": 2.5,
         "weight_control": 0.1,
         "heading_penalty_factor": 10.0
       }
     },
 
-    "dynamics": "mlp_resnet_lora_xs",
+    "dynamics": "cheetah_resnet",
     "dynamics_params": {
-      "nn_features": [256, 256, 256, 21],
-      "ensemble_size": 3,
-      "pretrained_params_path": "./data/pretrained_models/cheetah/final/cheetah_new3_1000ep.pkl",
-      "svd_rank_input": null, 
+      "nn_features": [256,256,256,64],
+      "ensemble_size": 1,
+      "pretrained_params_path": "./data/pretrained_models/cheetah/final/cheetah_residual.pkl",
+      "svd_rank_input": null,
       "svd_rank_hidden": 14,
-      "svd_rank_output": null
+      "svd_rank_output": null,
+      "cheetah_mass_scale": 2.0
     },
 
     "env_params": {
@@ -185,7 +187,7 @@
       "cheetah_mass_scale": 0.5
     },
 
-    "trainer": "ekf_efficient",
+    "trainer": "gd",
     "trainer_params": {
       "learning_rate": 10.0,
       "init_cov_scale": 10.0,
@@ -224,7 +226,7 @@
       "horizon": 25,
       "batch_size": 200,
       "max_iter": 1,
-      "elit_frac": 0.02,
+      "elit_frac": 0.05,
       "learning_rate": 0.9,
       "colored_noise_beta": 0.25,
       "initial_variance_val": 0.25,
@@ -234,7 +236,7 @@
     },
 
     "cost_fn_params": {
-      "target_velocity": 0.1,
+      "target_velocity": 2.5,
       "weight_control": 0.1,
       "heading_penalty_factor": 10.0,
       "weight_info": 0.0,
