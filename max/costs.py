@@ -703,6 +703,116 @@ def _terminal_cost_swimmer_goal_following(
     return terminal_weight * jnp.sum((root_pos - goal_position) ** 2)
 
 
+# --- Hopper cost functions ---
+
+
+def _stage_cost_hopper_stand_task(
+    data,  # mjx.Data
+    control: jnp.ndarray,
+    target_height: float,
+    weight_height: float,
+    weight_orientation: float,
+    weight_velocity: float,
+    weight_control: float,
+    torso_id: int,
+    foot_id: int,
+) -> float:
+    """
+    Stage cost for hopper standing task with three terms:
+
+    1. Height Cost: (z_t - z_target)^2 - penalizes torso height below target
+    2. Orientation Cost: (1 - cos(theta_t))^2 - penalizes tilting from vertical
+    3. Stationary Cost: v_x^2 + v_z^2 - penalizes horizontal/vertical velocity
+
+    Plus control penalty.
+
+    Args:
+        data: mjx.Data (full MuJoCo physics state)
+        control: 4D action torques [waist, hip, knee, ankle]
+        target_height: Target height for torso above foot (default 0.6m)
+        weight_height: Weight for height cost term
+        weight_orientation: Weight for orientation cost term
+        weight_velocity: Weight for velocity cost term
+        weight_control: Control penalty weight
+        torso_id: Body ID for torso
+        foot_id: Body ID for foot
+
+    Returns:
+        Scalar cost
+    """
+    # 1. Height Cost: (z_t - z_target)^2
+    # Calculate height as torso_z - foot_z (following playground pattern)
+    torso_z = data.xipos[torso_id, -1]
+    foot_z = data.xipos[foot_id, -1]
+    height = torso_z - foot_z
+    height_error = (height - target_height) ** 2
+    height_cost = weight_height * height_error
+
+    # 2. Orientation Cost: (1 - cos(theta_t))^2
+    # rooty is qpos[2] - the pitch angle around y-axis
+    # When upright, rooty = 0, so cos(0) = 1
+    rooty = data.qpos[2]
+    orientation_error = (1.0 - jnp.cos(rooty)) ** 2
+    orientation_cost = weight_orientation * orientation_error
+
+    # 3. Stationary Cost: v_x^2 + v_z^2
+    # qvel[0] = rootx velocity (horizontal)
+    # qvel[1] = rootz velocity (vertical)
+    v_x = data.qvel[0]
+    v_z = data.qvel[1]
+    velocity_cost = weight_velocity * (v_x ** 2 + v_z ** 2)
+
+    # 4. Control penalty
+    control_cost = weight_control * jnp.sum(control ** 2)
+
+    return height_cost + orientation_cost + velocity_cost + control_cost
+
+
+def _terminal_cost_hopper_stand_task(
+    data,  # mjx.Data
+    target_height: float,
+    weight_height: float,
+    weight_orientation: float,
+    weight_velocity: float,
+    torso_id: int,
+    foot_id: int,
+) -> float:
+    """Terminal cost: same as stage cost without control penalty."""
+    torso_z = data.xipos[torso_id, -1]
+    foot_z = data.xipos[foot_id, -1]
+    height = torso_z - foot_z
+    height_error = (height - target_height) ** 2
+    height_cost = weight_height * height_error
+
+    rooty = data.qpos[2]
+    orientation_error = (1.0 - jnp.cos(rooty)) ** 2
+    orientation_cost = weight_orientation * orientation_error
+
+    v_x = data.qvel[0]
+    v_z = data.qvel[1]
+    velocity_cost = weight_velocity * (v_x ** 2 + v_z ** 2)
+
+    return height_cost + orientation_cost + velocity_cost
+
+
+def _rollout_hopper(init_data, controls, cost_params, pred_fn):
+    """
+    Trajectory rollout for hopper using mjx.Data directly.
+
+    Returns:
+        data_sequence: Pytree of mjx.Data with leading time dimension
+    """
+    def step(carry, control):
+        data, dyn_params = carry
+        next_data = pred_fn(dyn_params, data, control)
+        return (next_data, dyn_params), next_data
+
+    dyn_params = cost_params["dyn_params"]
+    _, data_sequence = jax.lax.scan(step, (init_data, dyn_params), controls)
+
+    return data_sequence
+
+
 # --- Evaluation cost helpers ---
 
 
@@ -1259,6 +1369,52 @@ def init_cost(config, dynamics_model):
             final_data = jax.tree.map(lambda x: x[-1], data_sequence)
             terminal = _terminal_cost_swimmer_goal_following(
                 final_data, cost_params["goal_position"], terminal_weight
+            )
+
+            return jnp.sum(stage_costs) + terminal
+
+        return cost_fn
+
+    elif cost_type == "hopper_stand_task":
+        # Hopper standing task cost using mjx.Data directly
+        params = config["cost_fn_params"]
+        target_height = params.get("target_height", 0.6)
+        weight_height = params.get("weight_height", 10.0)
+        weight_orientation = params.get("weight_orientation", 5.0)
+        weight_velocity = params.get("weight_velocity", 1.0)
+        weight_control = params.get("weight_control", 0.1)
+
+        # Get body IDs from loaded environment
+        from mujoco_playground import registry
+        env = registry.load('HopperStand')
+        torso_id = env.mj_model.body("torso").id
+        foot_id = env.mj_model.body("foot").id
+
+        # Vectorize stage cost over the horizon
+        stage_cost_vmap = jax.vmap(
+            lambda d, u, cp: _stage_cost_hopper_stand_task(
+                d, u, target_height, weight_height, weight_orientation,
+                weight_velocity, weight_control, torso_id, foot_id
+            ),
+            in_axes=(0, 0, None),
+        )
+
+        @jax.jit
+        def cost_fn(init_data, controls, cost_params):
+            """Total trajectory cost for hopper standing task."""
+            # 1. Rollout trajectory using dynamics (mjx.Data throughout)
+            data_sequence = _rollout_hopper(
+                init_data, controls, cost_params, dynamics_model.pred_one_step
+            )
+
+            # 2. Calculate stage costs over all timesteps
+            stage_costs = stage_cost_vmap(data_sequence, controls, cost_params)
+
+            # 3. Calculate terminal cost (on final state)
+            final_data = jax.tree.map(lambda x: x[-1], data_sequence)
+            terminal = _terminal_cost_hopper_stand_task(
+                final_data, target_height, weight_height, weight_orientation,
+                weight_velocity, torso_id, foot_id
             )
 
             return jnp.sum(stage_costs) + terminal
