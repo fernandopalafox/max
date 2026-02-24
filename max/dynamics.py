@@ -1349,10 +1349,21 @@ def _init_tiny_lora_layers(
     all_frozen_layers = []  # List of (list of dicts), one per ensemble member
     all_v_inits = []  # List of dicts, one per ensemble member
 
+    # Get pretrained params - already has ensemble dim stacked if ensemble_size > 1
+    pretrained_model_params = None
+    if pretrained_nn_params is not None:
+        pretrained_model_params = pretrained_nn_params["model"]["params"]
+
     for ens_idx in range(ensemble_size):
         # Use pretrained params if provided, otherwise random init
-        if pretrained_nn_params is not None:
-            full_nn_params = {"params": pretrained_nn_params["model"]["params"]}
+        if pretrained_model_params is not None:
+            # Extract this ensemble member's weights by indexing into axis 0
+            single_member_params = {}
+            for layer_name, layer_params in pretrained_model_params.items():
+                single_member_params[layer_name] = {
+                    k: v[ens_idx] for k, v in layer_params.items()
+                }
+            full_nn_params = {"params": single_member_params}
         else:
             full_nn_params = base_mlp.init(keys[ens_idx], dummy_input)
 
@@ -1411,7 +1422,7 @@ def _init_tiny_lora_layers(
                     [all_frozen_layers[e][layer_idx][k] for e in range(ensemble_size)],
                     axis=0,
                 )
-                for k in all_frozen_layers[0][0].keys()
+                for k in all_frozen_layers[0][layer_idx].keys()  # Use THIS layer's keys
             }
             frozen_layers_stacked.append(stacked_layer)
 
@@ -1495,15 +1506,16 @@ def _tiny_lora_forward(
     if ensemble_size == 1:
         return _tiny_lora_forward_single(x, params_model, frozen_layers)
 
-    # Ensemble forward pass using vmap
-    def forward_one_member(ens_idx):
-        member_params = {k: params_model[k][ens_idx] for k in params_model}
-        member_frozen = [
-            {k: layer[k][ens_idx] for k in layer} for layer in frozen_layers
-        ]
+    # Ensemble forward pass using vmap over params directly
+    # This avoids dynamic indexing which can cause issues with gradients
+    def forward_one_member(member_params, member_frozen):
         return _tiny_lora_forward_single(x, member_params, member_frozen)
 
-    outputs = jax.vmap(forward_one_member)(jnp.arange(ensemble_size))
+    # vmap over axis 0 of each array in the pytrees
+    outputs = jax.vmap(forward_one_member, in_axes=(0, 0))(
+        params_model,  # vmap over axis 0 of each v vector
+        frozen_layers,  # vmap over axis 0 of each frozen tensor
+    )
     return jnp.mean(outputs, axis=0)
 
 
@@ -1569,10 +1581,21 @@ def _init_lora_xs_layers(
     all_frozen_layers = []
     all_R_inits = []
 
+    # Get pretrained params - already has ensemble dim stacked if ensemble_size > 1
+    pretrained_model_params = None
+    if pretrained_nn_params is not None:
+        pretrained_model_params = pretrained_nn_params["model"]["params"]
+
     for ens_idx in range(ensemble_size):
         # Use pretrained params if provided, otherwise random init
-        if pretrained_nn_params is not None:
-            full_nn_params = {"params": pretrained_nn_params["model"]["params"]}
+        if pretrained_model_params is not None:
+            # Extract this ensemble member's weights by indexing into axis 0
+            single_member_params = {}
+            for layer_name, layer_params in pretrained_model_params.items():
+                single_member_params[layer_name] = {
+                    k: v[ens_idx] for k, v in layer_params.items()
+                }
+            full_nn_params = {"params": single_member_params}
         else:
             full_nn_params = base_mlp.init(keys[ens_idx], dummy_input)
 
@@ -1630,11 +1653,11 @@ def _init_lora_xs_layers(
                     [all_frozen_layers[e][layer_idx][k] for e in range(ensemble_size)],
                     axis=0,
                 )
-                for k in all_frozen_layers[0][0].keys()
+                for k in all_frozen_layers[0][layer_idx].keys()  # Use THIS layer's keys
             }
             frozen_layers_stacked.append(stacked_layer)
 
-        # Stack trainable params
+        # Stack trainable params (R matrices)
         trainable_R_stacked = {
             k: jnp.stack([all_R_inits[e][k] for e in range(ensemble_size)], axis=0)
             for k in all_R_inits[0].keys()
@@ -1711,15 +1734,17 @@ def _lora_xs_forward(
     if ensemble_size == 1:
         return _lora_xs_forward_single(x, params_model, frozen_layers)
 
-    # Ensemble forward pass using vmap
-    def forward_one_member(ens_idx):
-        member_params = {k: params_model[k][ens_idx] for k in params_model}
-        member_frozen = [
-            {k: layer[k][ens_idx] for k in layer} for layer in frozen_layers
-        ]
+    # Ensemble forward pass using vmap over params directly
+    # This avoids dynamic indexing which can cause issues with gradients
+    def forward_one_member(member_params, member_frozen):
         return _lora_xs_forward_single(x, member_params, member_frozen)
 
-    outputs = jax.vmap(forward_one_member)(jnp.arange(ensemble_size))
+    # Restructure params_model from {k: (E, r, r)} to [(r, r), (r, r), ...] per key
+    # Then vmap over axis 0 of each array
+    outputs = jax.vmap(forward_one_member, in_axes=(0, 0))(
+        params_model,  # vmap over axis 0 of each R matrix
+        frozen_layers,  # vmap over axis 0 of each frozen tensor
+    )
     return jnp.mean(outputs, axis=0)
 
 
