@@ -1975,6 +1975,479 @@ def create_merging_idm(
     return model, params
 
 
+# =============================================================================
+# Cheetah ResNet: MuJoCo physics + trainable residual MLP
+# =============================================================================
+
+
+def create_cheetah_resnet(
+    key: jax.Array,
+    config: dict,
+    normalizer: Normalizer,
+    normalizer_params: Optional[jnp.ndarray] = None,
+) -> tuple[NamedTuple, dict]:
+    """
+    Cheetah dynamics with MJX physics + trainable MLP residual.
+
+    Combines:
+    - Nominal MJX cheetah physics (closed over mjx_model, n_substeps)
+    - Trainable MLP residual predicting observation corrections (17D)
+
+    State: 17D observation [qpos[1:] (8D), qvel (9D)]
+    Action: 6D torques in [-1, 1]
+
+    Residual Input: [obs (17D), action (6D)] normalized = 23D
+    Residual Output: [delta_obs (17D)] normalized
+
+    Trainable Params: All MLP weights (hidden + output layers)
+
+    config["dynamics_params"]:
+        - nn_features: list of hidden layer sizes
+        - ensemble_size: (optional, default 1)
+        - pretrained_params_path: (optional) path to pretrained MLP
+        - cheetah_mass_scale: (optional, default 1.0) mass scaling
+
+    Returns:
+        (DynamicsModel, params) where params = {"model": nn_params, "normalizer": norm_params}
+    """
+    from mujoco_playground import registry
+    from mujoco_playground._src import mjx_env
+    from mujoco import mjx
+
+    # Load environment and extract models
+    env = registry.load('CheetahRun')
+    n_substeps = env.n_substeps
+
+    # Apply mass scaling if specified
+    dyn_params = config["dynamics_params"]
+    mass_scale = dyn_params.get("cheetah_mass_scale", 1.0)
+    if mass_scale != 1.0:
+        import mujoco
+        mj_model = env.mj_model
+        # Scale both mass and inertia (inertia scales linearly with mass for uniform density)
+        mj_model.body_mass[:] *= mass_scale
+        mj_model.body_inertia[:] *= mass_scale
+        # Recalculate dependent constants (invweight, actuator_acc0, etc.)
+        mujoco.mj_setConst(mj_model)
+        mjx_model = mjx.put_model(mj_model)
+        print(f"🐆 Applied cheetah mass scale: {mass_scale}")
+    else:
+        mjx_model = env.mjx_model
+
+    # Extract config parameters
+    dim_obs = 17  # qpos[1:] (8) + qvel (9)
+    dim_action = 6
+    nn_features = dyn_params["nn_features"]
+    ensemble_size = dyn_params.get("ensemble_size", 1)
+
+    # Create residual MLP: predicts observation delta
+    class ResidualMLP(nn.Module):
+        features: Sequence[int]
+
+        @nn.compact
+        def __call__(self, obs, action):
+            x = jnp.concatenate([obs, action], axis=-1)
+            for feat in self.features:
+                x = nn.Dense(feat)(x)
+                x = nn.tanh(x)
+            return nn.Dense(dim_obs)(x)
+
+    residual_net = ResidualMLP(features=nn_features)
+    dummy_obs = jnp.ones((dim_obs,))
+    dummy_action = jnp.ones((dim_action,))
+
+    # Load pretrained or initialize fresh
+    pretrained_path = dyn_params.get("pretrained_params_path")
+    if pretrained_path:
+        with open(pretrained_path, "rb") as f:
+            pretrained = pickle.load(f)
+        model_params = pretrained["model"]
+        print(f"📦 Loaded pretrained cheetah_resnet weights from {pretrained_path}")
+    else:
+        keys = jax.random.split(key, ensemble_size)
+        if ensemble_size == 1:
+            model_params = residual_net.init(keys[0], dummy_obs, dummy_action)
+        else:
+            model_params = jax.vmap(residual_net.init, in_axes=(0, None, None))(
+                keys, dummy_obs, dummy_action
+            )
+
+    # Create template mjx.Data for observation reconstruction
+    template_key = jax.random.PRNGKey(0)
+    env_state = env.reset(template_key)
+    template_data = env_state.data
+
+    # Helper: Observation -> MJX Data
+    def obs_to_mjx_data(obs: jnp.ndarray) -> mjx.Data:
+        """Reconstruct mjx.Data from 17D observation (rootx set to 0)."""
+        qpos = jnp.concatenate([jnp.zeros(1), obs[:8]])
+        qvel = obs[8:]
+        return template_data.replace(qpos=qpos, qvel=qvel)
+
+    # Helper: MJX Data -> Observation
+    def mjx_data_to_obs(data: mjx.Data) -> jnp.ndarray:
+        """Extract 17D observation from mjx.Data."""
+        return jnp.concatenate([data.qpos[1:], data.qvel])
+
+    # Single model prediction of normalized delta
+    def _pred_norm_delta_single(model_params, norm_params, obs, action):
+        norm_obs = normalizer.normalize(norm_params["state"], obs)
+        norm_action = normalizer.normalize(norm_params["action"], action)
+        return residual_net.apply(model_params, norm_obs, norm_action)
+
+    @jax.jit
+    def pred_norm_delta(params, obs, action):
+        """Predict normalized delta (for training loss)."""
+        norm_params = params["normalizer"]
+        if ensemble_size == 1:
+            return _pred_norm_delta_single(params["model"], norm_params, obs, action)
+        else:
+            preds = jax.vmap(
+                lambda mp: _pred_norm_delta_single(mp, norm_params, obs, action)
+            )(params["model"])
+            return jnp.mean(preds, axis=0)
+
+    @jax.jit
+    def pred_one_step(params, obs, action):
+        """Predict next observation: physics step + residual correction."""
+        # 1. Reconstruct mjx.Data from observation
+        data = obs_to_mjx_data(obs)
+
+        # 2. Step physics (stop gradient - we don't want to differentiate through MJX)
+        next_data = mjx_env.step(mjx_model, data, action, n_substeps)
+
+        # 3. Extract observation from physics and stop gradients
+        obs_physics = jax.lax.stop_gradient(mjx_data_to_obs(next_data))
+
+        # 4. Compute residual correction
+        norm_delta = pred_norm_delta(params, obs, action)
+        delta = normalizer.unnormalize(params["normalizer"]["delta"], norm_delta)
+
+        # 5. Apply correction: physics + learned residual
+        return obs_physics + delta
+
+    params = {"model": model_params, "normalizer": normalizer_params}
+    model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=pred_norm_delta)
+
+    return model, params
+
+
+def create_cheetah_resnet_last_layer(
+    key: jax.Array,
+    config: dict,
+    normalizer: Normalizer,
+    normalizer_params: Optional[jnp.ndarray] = None,
+) -> tuple[NamedTuple, dict]:
+    """
+    Cheetah dynamics with MJX physics + MLP residual (only output layer trainable).
+
+    Same architecture as create_cheetah_resnet, but only the output layer
+    is exposed for training. Hidden layers are randomly initialized and frozen
+    (baked into the model closure).
+
+    State: 17D observation [qpos[1:] (8D), qvel (9D)]
+    Action: 6D torques in [-1, 1]
+
+    Residual Input: [obs (17D), action (6D)] normalized = 23D
+    Residual Output: [delta_obs (17D)] normalized
+
+    Trainable Params: Only output layer weights
+    Frozen Params: Hidden layer weights (baked into closure)
+
+    config["dynamics_params"]:
+        - nn_features: list of hidden layer sizes
+        - ensemble_size: (optional, default 1)
+        - pretrained_params_path: (optional) path to pretrained MLP
+        - cheetah_mass_scale: (optional, default 1.0) mass scaling
+
+    Returns:
+        (DynamicsModel, params) where params = {"model": output_layer_params, "normalizer": norm_params}
+    """
+    from mujoco_playground import registry
+    from mujoco_playground._src import mjx_env
+    from mujoco import mjx
+
+    # Load environment and extract models
+    env = registry.load('CheetahRun')
+    n_substeps = env.n_substeps
+
+    # Apply mass scaling if specified
+    dyn_params = config["dynamics_params"]
+    mass_scale = dyn_params.get("cheetah_mass_scale", 1.0)
+    if mass_scale != 1.0:
+        import mujoco
+        mj_model = env.mj_model
+        # Scale both mass and inertia (inertia scales linearly with mass for uniform density)
+        mj_model.body_mass[:] *= mass_scale
+        mj_model.body_inertia[:] *= mass_scale
+        # Recalculate dependent constants (invweight, actuator_acc0, etc.)
+        mujoco.mj_setConst(mj_model)
+        mjx_model = mjx.put_model(mj_model)
+        print(f"🐆 Applied cheetah mass scale: {mass_scale}")
+    else:
+        mjx_model = env.mjx_model
+
+    # Extract config parameters
+    dim_obs = 17
+    dim_action = 6
+    nn_features = dyn_params["nn_features"]
+    ensemble_size = dyn_params.get("ensemble_size", 1)
+
+    # Create residual MLP
+    class ResidualMLP(nn.Module):
+        features: Sequence[int]
+
+        @nn.compact
+        def __call__(self, obs, action):
+            x = jnp.concatenate([obs, action], axis=-1)
+            for feat in self.features:
+                x = nn.Dense(feat)(x)
+                x = nn.tanh(x)
+            return nn.Dense(dim_obs)(x)
+
+    residual_net = ResidualMLP(features=nn_features)
+    dummy_obs = jnp.ones((dim_obs,))
+    dummy_action = jnp.ones((dim_action,))
+
+    # Initialize or load full MLP params
+    pretrained_path = dyn_params.get("pretrained_params_path")
+    if pretrained_path:
+        with open(pretrained_path, "rb") as f:
+            pretrained = pickle.load(f)
+        full_nn_params = pretrained["model"]
+        print(f"📦 Loaded pretrained cheetah_resnet weights from {pretrained_path}")
+    else:
+        keys = jax.random.split(key, ensemble_size)
+        if ensemble_size == 1:
+            full_nn_params = residual_net.init(keys[0], dummy_obs, dummy_action)
+        else:
+            full_nn_params = jax.vmap(residual_net.init, in_axes=(0, None, None))(
+                keys, dummy_obs, dummy_action
+            )
+
+    # Split params: hidden layers (frozen) vs output layer (trainable)
+    num_hidden = len(nn_features)
+    output_layer_name = f"Dense_{num_hidden}"
+
+    if ensemble_size == 1:
+        # Extract frozen hidden layer params (baked into closure)
+        frozen_params = {"params": {}}
+        for i in range(num_hidden):
+            layer_name = f"Dense_{i}"
+            frozen_params["params"][layer_name] = full_nn_params["params"][layer_name]
+
+        # Extract trainable output layer params
+        trainable_params = {"params": {output_layer_name: full_nn_params["params"][output_layer_name]}}
+    else:
+        # Ensemble: frozen and trainable params have ensemble dimension
+        frozen_params = {"params": {}}
+        for i in range(num_hidden):
+            layer_name = f"Dense_{i}"
+            frozen_params["params"][layer_name] = full_nn_params["params"][layer_name]
+
+        trainable_params = {"params": {output_layer_name: full_nn_params["params"][output_layer_name]}}
+
+    # Create template mjx.Data for observation reconstruction
+    template_key = jax.random.PRNGKey(0)
+    env_state = env.reset(template_key)
+    template_data = env_state.data
+
+    def obs_to_mjx_data(obs: jnp.ndarray) -> mjx.Data:
+        qpos = jnp.concatenate([jnp.zeros(1), obs[:8]])
+        qvel = obs[8:]
+        return template_data.replace(qpos=qpos, qvel=qvel)
+
+    def mjx_data_to_obs(data: mjx.Data) -> jnp.ndarray:
+        return jnp.concatenate([data.qpos[1:], data.qvel])
+
+    # Single model prediction of normalized delta
+    def _pred_norm_delta_single(model_params, norm_params, obs, action):
+        norm_obs = normalizer.normalize(norm_params["state"], obs)
+        norm_action = normalizer.normalize(norm_params["action"], action)
+        # Reconstruct full NN params: frozen (from closure) + trainable (from input)
+        full_params = {"params": {**frozen_params["params"], **model_params["params"]}}
+        return residual_net.apply(full_params, norm_obs, norm_action)
+
+    @jax.jit
+    def pred_norm_delta(params, obs, action):
+        """Predict normalized delta (for training loss)."""
+        norm_params = params["normalizer"]
+        if ensemble_size == 1:
+            return _pred_norm_delta_single(params["model"], norm_params, obs, action)
+        else:
+            # For ensemble, need to combine frozen (ensemble) with trainable (ensemble)
+            def _single_member(idx):
+                # Extract single member from trainable params
+                member_trainable = {"params": {
+                    output_layer_name: {
+                        k: v[idx] for k, v in params["model"]["params"][output_layer_name].items()
+                    }
+                }}
+                # Extract single member from frozen params
+                member_frozen = {"params": {}}
+                for layer_name in frozen_params["params"]:
+                    member_frozen["params"][layer_name] = {
+                        k: v[idx] for k, v in frozen_params["params"][layer_name].items()
+                    }
+                # Combine
+                full_params = {"params": {**member_frozen["params"], **member_trainable["params"]}}
+                norm_obs = normalizer.normalize(norm_params["state"], obs)
+                norm_action = normalizer.normalize(norm_params["action"], action)
+                return residual_net.apply(full_params, norm_obs, norm_action)
+
+            preds = jax.vmap(_single_member)(jnp.arange(ensemble_size))
+            return jnp.mean(preds, axis=0)
+
+    @jax.jit
+    def pred_one_step(params, obs, action):
+        """Predict next observation: physics step + residual correction."""
+        data = obs_to_mjx_data(obs)
+        next_data = mjx_env.step(mjx_model, data, action, n_substeps)
+        # Stop gradient through physics - only train the residual MLP
+        obs_physics = jax.lax.stop_gradient(mjx_data_to_obs(next_data))
+
+        norm_delta = pred_norm_delta(params, obs, action)
+        delta = normalizer.unnormalize(params["normalizer"]["delta"], norm_delta)
+
+        return obs_physics + delta
+
+    params = {"model": trainable_params, "normalizer": normalizer_params}
+    model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=pred_norm_delta)
+
+    return model, params
+
+
+def create_cheetah_resnet_lora_xs(
+    key: jax.Array,
+    config: dict,
+    normalizer: Normalizer,
+    normalizer_params: Optional[jnp.ndarray] = None,
+) -> tuple[NamedTuple, dict]:
+    """
+    Cheetah dynamics with MJX physics + LoRA-XS residual for efficient adaptation.
+
+    Applies LoRA-XS to the residual MLP layers.
+    Update formula: W' = W + U @ diag(Sigma) @ R @ V.T
+
+    State: 17D observation [qpos[1:] (8D), qvel (9D)]
+    Action: 6D torques in [-1, 1]
+
+    Residual Input: [obs (17D), action (6D)] normalized = 23D
+    Residual Output: [delta_obs (17D)] normalized
+
+    Trainable Params: R matrices for each layer (r^2 params per layer)
+    Frozen (in closure): For each layer: W, b, U, Sigma, V
+
+    config["dynamics_params"]:
+        - nn_features: list of hidden layer sizes
+        - svd_rank_input: (optional) rank for input layer
+        - svd_rank_hidden: rank for hidden layers
+        - svd_rank_output: (optional) rank for output layer
+        - r_init_std: (optional, default 1e-5) std for R matrix init
+        - ensemble_size: (optional, default 1)
+        - pretrained_params_path: (optional) path to pretrained MLP
+        - cheetah_mass_scale: (optional, default 1.0) mass scaling
+
+    Returns:
+        (DynamicsModel, params) where params = {"model": R_matrices, "normalizer": norm_params}
+    """
+    from mujoco_playground import registry
+    from mujoco_playground._src import mjx_env
+    from mujoco import mjx
+
+    # Load environment and extract models
+    env = registry.load('CheetahRun')
+    n_substeps = env.n_substeps
+
+    # Apply mass scaling if specified
+    dyn_params = config["dynamics_params"]
+    mass_scale = dyn_params.get("cheetah_mass_scale", 1.0)
+    if mass_scale != 1.0:
+        import mujoco
+        mj_model = env.mj_model
+        # Scale both mass and inertia (inertia scales linearly with mass for uniform density)
+        mj_model.body_mass[:] *= mass_scale
+        mj_model.body_inertia[:] *= mass_scale
+        # Recalculate dependent constants (invweight, actuator_acc0, etc.)
+        mujoco.mj_setConst(mj_model)
+        mjx_model = mjx.put_model(mj_model)
+        print(f"🐆 Applied cheetah mass scale: {mass_scale}")
+    else:
+        mjx_model = env.mjx_model
+
+    # Extract config parameters
+    dim_obs = 17
+    dim_action = 6
+    nn_features = dyn_params["nn_features"]
+    svd_rank_input = dyn_params.get("svd_rank_input")
+    svd_rank_hidden = dyn_params["svd_rank_hidden"]
+    svd_rank_output = dyn_params.get("svd_rank_output")
+    r_init_std = dyn_params.get("r_init_std", 1e-5)
+    ensemble_size = dyn_params.get("ensemble_size", 1)
+
+    # Load pretrained MLP params if specified
+    pretrained_path = dyn_params.get("pretrained_params_path")
+    pretrained_nn_params = None
+    if pretrained_path:
+        with open(pretrained_path, "rb") as f:
+            pretrained_nn_params = pickle.load(f)
+        print(f"📦 Loaded pretrained cheetah_resnet weights from {pretrained_path}")
+
+    # Initialize LoRA-XS layers for residual MLP
+    # Input: [obs (17D), action (6D)] = 23D, Output: 17D observation delta
+    frozen_layers, trainable_R_init = _init_lora_xs_layers(
+        key=key,
+        nn_features=nn_features,
+        input_dim=dim_obs + dim_action,  # 23D
+        output_dim=dim_obs,  # 17D
+        svd_rank_input=svd_rank_input,
+        svd_rank_hidden=svd_rank_hidden,
+        svd_rank_output=svd_rank_output,
+        ensemble_size=ensemble_size,
+        pretrained_nn_params=pretrained_nn_params,
+        r_init_std=r_init_std,
+    )
+
+    # Create template mjx.Data for observation reconstruction
+    template_key = jax.random.PRNGKey(0)
+    env_state = env.reset(template_key)
+    template_data = env_state.data
+
+    def obs_to_mjx_data(obs: jnp.ndarray) -> mjx.Data:
+        qpos = jnp.concatenate([jnp.zeros(1), obs[:8]])
+        qvel = obs[8:]
+        return template_data.replace(qpos=qpos, qvel=qvel)
+
+    def mjx_data_to_obs(data: mjx.Data) -> jnp.ndarray:
+        return jnp.concatenate([data.qpos[1:], data.qvel])
+
+    @jax.jit
+    def pred_norm_delta(params, obs, action):
+        """Predict normalized delta using LoRA-XS MLP."""
+        norm_obs = normalizer.normalize(params["normalizer"]["state"], obs)
+        norm_action = normalizer.normalize(params["normalizer"]["action"], action)
+        x = jnp.concatenate([norm_obs, norm_action], axis=-1)
+        return _lora_xs_forward(x, params["model"], frozen_layers, ensemble_size)
+
+    @jax.jit
+    def pred_one_step(params, obs, action):
+        """Predict next observation: physics step + LoRA-XS residual correction."""
+        data = obs_to_mjx_data(obs)
+        next_data = mjx_env.step(mjx_model, data, action, n_substeps)
+        # Stop gradient through physics - only train the residual LoRA-XS params
+        obs_physics = jax.lax.stop_gradient(mjx_data_to_obs(next_data))
+
+        norm_delta = pred_norm_delta(params, obs, action)
+        delta = normalizer.unnormalize(params["normalizer"]["delta"], norm_delta)
+
+        return obs_physics + delta
+
+    params = {"model": trainable_R_init, "normalizer": normalizer_params}
+    model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=pred_norm_delta)
+
+    return model, params
+
+
 def create_cheetah_ground_truth(
     config: dict,
 ) -> tuple[NamedTuple, dict]:
@@ -2110,6 +2583,21 @@ def init_dynamics(
 
     elif dynamics_type == "cheetah_ground_truth":
         model, params = create_cheetah_ground_truth(config)
+
+    elif dynamics_type == "cheetah_resnet":
+        model, params = create_cheetah_resnet(
+            key, config, normalizer, normalizer_params
+        )
+
+    elif dynamics_type == "cheetah_resnet_last_layer":
+        model, params = create_cheetah_resnet_last_layer(
+            key, config, normalizer, normalizer_params
+        )
+
+    elif dynamics_type == "cheetah_resnet_lora_xs":
+        model, params = create_cheetah_resnet_lora_xs(
+            key, config, normalizer, normalizer_params
+        )
 
     else:
         raise ValueError(f"Unknown dynamics type: '{dynamics_type}'")
