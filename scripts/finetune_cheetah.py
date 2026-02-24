@@ -1,6 +1,14 @@
 # finetune_cheetah.py
 
+# Enable deterministic GPU operations for debugging (set before importing JAX)
+import os
+os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
+
+import time
+
 import jax
+jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
