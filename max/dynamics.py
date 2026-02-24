@@ -2024,6 +2024,55 @@ def create_cheetah_ground_truth(
     return model, params
 
 
+def create_swimmer_ground_truth(
+    config: dict,
+) -> tuple[NamedTuple, dict]:
+    """
+    Creates ground truth dynamics for Swimmer (6 links) that wraps MJX physics.
+
+    The mjx_model is closed over (not stored in params).
+    This is functional/pure - no external mutable state.
+
+    State: mjx.Data (full MuJoCo physics state)
+    Action: 5D torques in [-1, 1]
+    Forward velocity = data.qvel[0]
+
+    Args:
+        config: Configuration dictionary (currently unused but kept for API)
+
+    Returns:
+        (DynamicsModel, params) where params contains None values
+    """
+    from mujoco_playground import registry
+    from mujoco_playground._src import mjx_env
+    from mujoco import mjx
+
+    # Load environment and extract models (closed over)
+    env = registry.load('SwimmerSwimmer6')
+    mjx_model = env.mjx_model
+    n_substeps = env.n_substeps
+
+    @jax.jit
+    def pred_one_step(params, data: mjx.Data, action: jnp.ndarray) -> mjx.Data:
+        """
+        Predicts next state using true MJX physics.
+
+        Args:
+            params: Ignored (kept for API compatibility)
+            data: mjx.Data (full MuJoCo physics state)
+            action: 5D torques
+
+        Returns:
+            next_data: mjx.Data (full MuJoCo physics state)
+        """
+        return mjx_env.step(mjx_model, data, action, n_substeps)
+
+    params = {"model": None, "normalizer": None}
+    model = DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=None)
+
+    return model, params
+
+
 def init_dynamics(
     key: jax.Array,
     config: Any,
@@ -2110,6 +2159,9 @@ def init_dynamics(
 
     elif dynamics_type == "cheetah_ground_truth":
         model, params = create_cheetah_ground_truth(config)
+
+    elif dynamics_type == "swimmer_ground_truth":
+        model, params = create_swimmer_ground_truth(config)
 
     else:
         raise ValueError(f"Unknown dynamics type: '{dynamics_type}'")

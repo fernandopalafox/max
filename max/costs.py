@@ -599,6 +599,110 @@ def _stage_cost_cheetah_velocity_tracking_learned_w_info(
     return velocity_error + control_cost + flip_penalty + exploration_term
 
 
+# --- Swimmer cost functions ---
+
+
+def _stage_cost_swimmer_velocity_tracking(
+    data,  # mjx.Data
+    control: jnp.ndarray,
+    target_velocity: float,
+    weight_control: float,
+) -> float:
+    """
+    Stage cost for swimmer velocity tracking.
+
+    Cost = (forward_vel - target_vel)^2 + weight_control * ||u||^2
+
+    Args:
+        data: mjx.Data (full MuJoCo physics state)
+        control: 5D action torques
+        target_velocity: Desired forward velocity
+        weight_control: Control penalty weight
+
+    Returns:
+        Scalar cost
+    """
+    # Forward velocity is qvel[0] (x-direction) from mjx.Data
+    forward_vel = data.qvel[0]
+
+    # Velocity tracking error
+    velocity_error = (forward_vel - target_velocity) ** 2
+
+    # Control penalty
+    control_cost = weight_control * jnp.sum(control ** 2)
+
+    return velocity_error + control_cost
+
+
+def _terminal_cost_swimmer_velocity_tracking(
+    data,  # mjx.Data
+    target_velocity: float,
+) -> float:
+    """Terminal cost: velocity tracking error only."""
+    forward_vel = data.qvel[0]
+    return (forward_vel - target_velocity) ** 2
+
+
+def _rollout_swimmer(init_data, controls, cost_params, pred_fn):
+    """
+    Trajectory rollout for swimmer using mjx.Data directly.
+
+    Returns:
+        data_sequence: Pytree of mjx.Data with leading time dimension
+    """
+    def step(carry, control):
+        data, dyn_params = carry
+        next_data = pred_fn(dyn_params, data, control)
+        return (next_data, dyn_params), next_data
+
+    dyn_params = cost_params["dyn_params"]
+    _, data_sequence = jax.lax.scan(step, (init_data, dyn_params), controls)
+
+    return data_sequence
+
+
+def _stage_cost_swimmer_goal_following(
+    data,  # mjx.Data
+    control: jnp.ndarray,
+    goal_position: jnp.ndarray,
+    weight_control: float,
+) -> float:
+    """
+    Stage cost for swimmer goal following.
+
+    Cost = ||root_pos - goal_pos||^2 + weight_control * ||u||^2
+
+    Args:
+        data: mjx.Data (full MuJoCo physics state)
+        control: 5D action torques
+        goal_position: Target (x, y) position (2,)
+        weight_control: Control penalty weight
+
+    Returns:
+        Scalar cost
+    """
+    # Root position is qpos[0:2] (x, y) from mjx.Data
+    root_pos = data.qpos[:2]
+
+    # Goal distance error (squared)
+    goal_error = jnp.sum((root_pos - goal_position) ** 2)
+
+    # Control penalty
+    control_cost = weight_control * jnp.sum(control ** 2)
+
+    return goal_error + control_cost
+
+
+def _terminal_cost_swimmer_goal_following(
+    data,  # mjx.Data
+    goal_position: jnp.ndarray,
+    terminal_weight: float,
+) -> float:
+    """Terminal cost: weighted goal distance error."""
+    root_pos = data.qpos[:2]
+    return terminal_weight * jnp.sum((root_pos - goal_position) ** 2)
+
+
 # --- Evaluation cost helpers ---
 
 
@@ -1088,6 +1192,75 @@ def init_cost(config, dynamics_model):
             terminal = _terminal_cost_cheetah_velocity_tracking_learned(
                 states[-1], cost_params["target_velocity"]
             )
+            return jnp.sum(stage_costs) + terminal
+
+        return cost_fn
+
+    elif cost_type == "swimmer_velocity_tracking":
+        # Swimmer velocity tracking cost using mjx.Data directly
+        params = config["cost_fn_params"]
+        weight_control = params["weight_control"]
+
+        # Vectorize stage cost over the horizon
+        stage_cost_vmap = jax.vmap(
+            lambda d, u, cp: _stage_cost_swimmer_velocity_tracking(
+                d, u, cp["target_velocity"], weight_control
+            ),
+            in_axes=(0, 0, None),
+        )
+
+        @jax.jit
+        def cost_fn(init_data, controls, cost_params):
+            """Total trajectory cost for swimmer velocity tracking using mjx.Data."""
+            # 1. Rollout trajectory using dynamics (mjx.Data throughout)
+            data_sequence = _rollout_swimmer(
+                init_data, controls, cost_params, dynamics_model.pred_one_step
+            )
+
+            # 2. Calculate stage costs over all timesteps
+            stage_costs = stage_cost_vmap(data_sequence, controls, cost_params)
+
+            # 3. Calculate terminal cost (on final state)
+            final_data = jax.tree.map(lambda x: x[-1], data_sequence)
+            terminal = _terminal_cost_swimmer_velocity_tracking(
+                final_data, cost_params["target_velocity"]
+            )
+
+            return jnp.sum(stage_costs) + terminal
+
+        return cost_fn
+
+    elif cost_type == "swimmer_goal_following":
+        # Swimmer goal following cost using mjx.Data directly
+        params = config["cost_fn_params"]
+        weight_control = params.get("weight_control", 0.0)
+        terminal_weight = params.get("terminal_weight", 10.0)
+
+        # Vectorize stage cost over the horizon
+        stage_cost_vmap = jax.vmap(
+            lambda d, u, cp: _stage_cost_swimmer_goal_following(
+                d, u, cp["goal_position"], weight_control
+            ),
+            in_axes=(0, 0, None),
+        )
+
+        @jax.jit
+        def cost_fn(init_data, controls, cost_params):
+            """Total trajectory cost for swimmer goal following using mjx.Data."""
+            # 1. Rollout trajectory using dynamics (mjx.Data throughout)
+            data_sequence = _rollout_swimmer(
+                init_data, controls, cost_params, dynamics_model.pred_one_step
+            )
+
+            # 2. Calculate stage costs over all timesteps
+            stage_costs = stage_cost_vmap(data_sequence, controls, cost_params)
+
+            # 3. Calculate terminal cost (on final state)
+            final_data = jax.tree.map(lambda x: x[-1], data_sequence)
+            terminal = _terminal_cost_swimmer_goal_following(
+                final_data, cost_params["goal_position"], terminal_weight
+            )
+
             return jnp.sum(stage_costs) + terminal
 
         return cost_fn
