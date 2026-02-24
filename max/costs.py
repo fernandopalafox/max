@@ -714,8 +714,6 @@ def _stage_cost_hopper_stand_task(
     weight_orientation: float,
     weight_velocity: float,
     weight_control: float,
-    torso_id: int,
-    foot_id: int,
 ) -> float:
     """
     Stage cost for hopper standing task with three terms:
@@ -729,23 +727,25 @@ def _stage_cost_hopper_stand_task(
     Args:
         data: mjx.Data (full MuJoCo physics state)
         control: 4D action torques [waist, hip, knee, ankle]
-        target_height: Target height for torso above foot (default 0.6m)
+        target_height: Target height (rootz displacement threshold)
         weight_height: Weight for height cost term
         weight_orientation: Weight for orientation cost term
         weight_velocity: Weight for velocity cost term
         weight_control: Control penalty weight
-        torso_id: Body ID for torso
-        foot_id: Body ID for foot
 
     Returns:
         Scalar cost
     """
     # 1. Height Cost: (z_t - z_target)^2
-    # Calculate height as torso_z - foot_z (following playground pattern)
-    torso_z = data.xipos[torso_id, -1]
-    foot_z = data.xipos[foot_id, -1]
-    height = torso_z - foot_z
-    height_error = (height - target_height) ** 2
+    # qpos[1] is rootz (z position displacement from initial z=1.0)
+    # When standing: rootz ≈ 0, actual height ≈ 1.0m
+    # When fallen: rootz < 0, actual height < 1.0m
+    # We want rootz to stay above some threshold (e.g., -0.4 means height ~ 0.6m)
+    rootz = data.qpos[1]
+    # Target rootz = target_height - 1.0 (convert absolute height to displacement)
+    # For target_height=0.6, target_rootz = -0.4
+    target_rootz = target_height - 1.0
+    height_error = jnp.maximum(target_rootz - rootz, 0.0) ** 2
     height_cost = weight_height * height_error
 
     # 2. Orientation Cost: (1 - cos(theta_t))^2
@@ -774,14 +774,11 @@ def _terminal_cost_hopper_stand_task(
     weight_height: float,
     weight_orientation: float,
     weight_velocity: float,
-    torso_id: int,
-    foot_id: int,
 ) -> float:
     """Terminal cost: same as stage cost without control penalty."""
-    torso_z = data.xipos[torso_id, -1]
-    foot_z = data.xipos[foot_id, -1]
-    height = torso_z - foot_z
-    height_error = (height - target_height) ** 2
+    rootz = data.qpos[1]
+    target_rootz = target_height - 1.0
+    height_error = jnp.maximum(target_rootz - rootz, 0.0) ** 2
     height_cost = weight_height * height_error
 
     rooty = data.qpos[2]
@@ -1377,6 +1374,7 @@ def init_cost(config, dynamics_model):
 
     elif cost_type == "hopper_stand_task":
         # Hopper standing task cost using mjx.Data directly
+        # Uses qpos[1] (rootz) directly - no xipos needed
         params = config["cost_fn_params"]
         target_height = params.get("target_height", 0.6)
         weight_height = params.get("weight_height", 10.0)
@@ -1384,17 +1382,11 @@ def init_cost(config, dynamics_model):
         weight_velocity = params.get("weight_velocity", 1.0)
         weight_control = params.get("weight_control", 0.1)
 
-        # Get body IDs from loaded environment
-        from mujoco_playground import registry
-        env = registry.load('HopperStand')
-        torso_id = env.mj_model.body("torso").id
-        foot_id = env.mj_model.body("foot").id
-
         # Vectorize stage cost over the horizon
         stage_cost_vmap = jax.vmap(
             lambda d, u, cp: _stage_cost_hopper_stand_task(
                 d, u, target_height, weight_height, weight_orientation,
-                weight_velocity, weight_control, torso_id, foot_id
+                weight_velocity, weight_control
             ),
             in_axes=(0, 0, None),
         )
@@ -1414,7 +1406,7 @@ def init_cost(config, dynamics_model):
             final_data = jax.tree.map(lambda x: x[-1], data_sequence)
             terminal = _terminal_cost_hopper_stand_task(
                 final_data, target_height, weight_height, weight_orientation,
-                weight_velocity, torso_id, foot_id
+                weight_velocity
             )
 
             return jnp.sum(stage_costs) + terminal
