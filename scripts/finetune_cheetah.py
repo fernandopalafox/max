@@ -90,6 +90,7 @@ def plot_state_components(buffers, buffer_idx, config):
 
 
 def main(config):
+    t0 = time.time()
     wandb.config.update(config, allow_val_change=True)
     key = jax.random.key(config["seed"])
 
@@ -98,37 +99,50 @@ def main(config):
     plot_run = config.get("plot_run", True)
 
     # Initialize cheetah environment
+    print(f"[{time.time()-t0:.2f}s] Initializing environment...")
     env_params = EnvParams(**config["env_params"])
     reset_fn, step_fn, get_obs_fn = make_cheetah_env(env_params)
+    print(f"[{time.time()-t0:.2f}s] Environment initialized")
 
     # Initialize learned dynamics model
+    print(f"[{time.time()-t0:.2f}s] Initializing dynamics model...")
     normalizer, norm_params = init_normalizer(config)
     key, model_key = jax.random.split(key)
     dynamics_model, init_params = init_dynamics(
         model_key, config, normalizer, norm_params
     )
+    print(f"[{time.time()-t0:.2f}s] Dynamics model initialized")
 
     # Initialize dynamics trainer
+    print(f"[{time.time()-t0:.2f}s] Initializing trainer...")
     key, trainer_key = jax.random.split(key)
     trainer, train_state = init_trainer(
         config, dynamics_model, init_params, trainer_key
     )
+    print(f"[{time.time()-t0:.2f}s] Trainer initialized")
 
     # Count trainable parameters
     num_params = sum(x.size for x in jax.tree_util.tree_leaves(train_state.params))
     wandb.config.update({"num_params": num_params})
 
     # Initialize evaluator
+    print(f"[{time.time()-t0:.2f}s] Initializing evaluator...")
     evaluator = init_evaluator(config)
+    print(f"[{time.time()-t0:.2f}s] Evaluator initialized")
 
     # Initialize cost function (uses learned model for rollouts)
+    print(f"[{time.time()-t0:.2f}s] Initializing cost function...")
     cost_fn = init_cost(config, dynamics_model)
+    print(f"[{time.time()-t0:.2f}s] Cost function initialized")
 
     # Initialize planner
+    print(f"[{time.time()-t0:.2f}s] Initializing planner...")
     key, planner_key = jax.random.split(key)
     planner, planner_state = init_planner(config, cost_fn, planner_key)
+    print(f"[{time.time()-t0:.2f}s] Planner initialized")
 
     # Initialize buffer
+    print(f"[{time.time()-t0:.2f}s] Initializing buffers...")
     buffers = init_jax_buffers(
         config["num_agents"],
         config["buffer_size"],
@@ -136,6 +150,7 @@ def main(config):
         config["dim_action"],
     )
     buffer_idx = 0
+    print(f"[{time.time()-t0:.2f}s] Buffers initialized")
 
     # Fixed target velocity from config
     target_velocity = config["cost_fn_params"]["target_velocity"]
@@ -160,7 +175,9 @@ def main(config):
         initial_cov_trace_per_param = cov_trace / train_state.covariance.shape[0]
 
     # Initial evaluation before training
+    print(f"[{time.time()-t0:.2f}s] Running initial evaluation...")
     eval_results = evaluator.evaluate(train_state.params)
+    print(f"[{time.time()-t0:.2f}s] Initial evaluation complete")
     # Log only scalar metrics (ignore trajectory/actions/goal_state)
     initial_metrics = {
         k: v for k, v in eval_results.items()
@@ -173,16 +190,29 @@ def main(config):
     full_states_for_animation = []
 
     # Main training loop
+    print(f"[{time.time()-t0:.2f}s] Starting main loop...")
     key, reset_key = jax.random.split(key)
     mjx_data = reset_fn(reset_key)
     current_obs = get_obs_fn(mjx_data).squeeze()  # 17D observation
+    print(f"[{time.time()-t0:.2f}s] First reset done, entering loop")
 
+    # Timing accumulators for loop
+    t_planner = 0.0
+    t_step = 0.0
+    t_train = 0.0
+    t_eval = 0.0
+    last_report = time.time()
+
+    total_accumulated_loss = 0.0
     for step in range(1, config["total_steps"] + 1):
+        step_start = time.time()
+
         # Store full 18D state for animation before stepping
         full_state = jnp.concatenate([mjx_data.qpos, mjx_data.qvel])
         full_states_for_animation.append(np.array(full_state))
 
         # Compute actions using planner with learned model
+        _t0 = time.time()
         cost_params = {
             "dyn_params": train_state.params,
             "params_cov_model": train_state.covariance,
@@ -193,11 +223,16 @@ def main(config):
 
         actions, planner_state = planner.solve(planner_state, current_obs, cost_params)
         action = actions[0][None, :]  # Add agent dimension
+        dt_planner = time.time() - _t0
+        t_planner += dt_planner
 
         # Step environment with MJX ground truth
+        _t0 = time.time()
         mjx_data, next_obs, rewards, terminated, truncated, info = step_fn(
             mjx_data, episode_length, action
         )
+        dt_step = time.time() - _t0
+        t_step += dt_step
         next_obs = next_obs.squeeze()  # 17D
         done = terminated or truncated
         episode_length += 1
@@ -207,6 +242,7 @@ def main(config):
             episode_reward_components[info_key] += float(info[info_key])
 
         # Update buffer with 17D observations
+        _t0 = time.time()
         buffers = update_buffer_dynamic(
             buffers,
             buffer_idx,
@@ -217,23 +253,29 @@ def main(config):
             jnp.zeros_like(rewards),  # dummy log_pi
             float(done),
         )
+        dt_buffer = time.time() - _t0
         buffer_idx += 1
 
         current_obs = next_obs
 
         # Log step metrics
+        _t0 = time.time()
         velocity_error = (info["forward_vel"] - target_velocity) ** 2
         wandb.log({
             "step/forward_vel": float(info["forward_vel"]),
             "step/target_velocity": target_velocity,
             "step/velocity_error": float(velocity_error),
         }, step=step)
+        dt_wandb = time.time() - _t0
 
         # Reset environment if done
+        dt_reset = 0.0
         if done:
+            _t0 = time.time()
             key, reset_key = jax.random.split(key)
             mjx_data = reset_fn(reset_key)
             current_obs = get_obs_fn(mjx_data).squeeze()
+            dt_reset = time.time() - _t0
 
             print(f"Episode finished at step {step}.")
 
@@ -250,7 +292,9 @@ def main(config):
 
         # Train model
         # buffer_idx >= 2 to ensure we have at least one full transition
+        dt_train = 0.0
         if step % config["train_model_freq"] == 0 and buffer_idx >= 2:
+            _t0 = time.time()
             train_data = {
                 "states": buffers["states"][0, buffer_idx - 2 : buffer_idx - 1, :],
                 "actions": buffers["actions"][0, buffer_idx - 2 : buffer_idx - 1, :],
@@ -266,9 +310,13 @@ def main(config):
             t_train += dt_train
 
         # Evaluate model
+        dt_eval = 0.0
         if step % config["eval_freq"] == 0:
+            _t0 = time.time()
             # Run rollout evaluation (returns metrics + trajectory)
             eval_results = evaluator.evaluate(train_state.params)
+            dt_eval = time.time() - _t0
+            t_eval += dt_eval
 
             # Log only scalar metrics (ignore trajectory/actions/goal_state)
             metrics_to_log = {
@@ -287,6 +335,9 @@ def main(config):
 
             wandb.log(metrics_to_log, step=step)
 
+        step_total = time.time() - step_start
+        print(f"[Step {step}] total={step_total:.3f}s | planner={dt_planner:.3f}s, env_step={dt_step:.3f}s, buffer={dt_buffer:.3f}s, wandb={dt_wandb:.3f}s, reset={dt_reset:.3f}s, train={dt_train:.3f}s, eval={dt_eval:.3f}s")
+
         # Handle Buffer Overflow
         if buffer_idx >= config["buffer_size"]:
             buffers = init_jax_buffers(
@@ -296,6 +347,14 @@ def main(config):
                 config["dim_action"],
             )
             buffer_idx = 0
+
+    # Final timing summary
+    print(f"\n=== TIMING SUMMARY ===")
+    print(f"Total planner time: {t_planner:.2f}s")
+    print(f"Total step time: {t_step:.2f}s")
+    print(f"Total train time: {t_train:.2f}s")
+    print(f"Total eval time: {t_eval:.2f}s")
+    print(f"======================\n")
 
     # Save model parameters
     if save_dir:
