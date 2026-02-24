@@ -63,11 +63,6 @@ class EnvParams:
     # Specific to cheetah
     cheetah_mass_scale: float = 1.0  # Multiplier for body masses (default 14kg total)
 
-    # Specific to swimmer
-    swimmer_mass_scale: float = 1.0  # Multiplier for body masses
-
-    # Specific to hopper
-    hopper_mass_scale: float = 1.0  # Multiplier for body masses
 
 
 
@@ -1296,173 +1291,6 @@ def make_cheetah_env(params: EnvParams):
     return reset_fn, step_fn, get_obs_fn
 
 
-def make_swimmer_env(params: EnvParams):
-    """
-    Factory function that wraps mujoco_playground SwimmerSwimmer6 environment.
-
-    Internal state: mjx.Data (full MuJoCo physics state)
-    Observation: 16D = [qpos (8D), qvel (8D)] - full robot state
-    Action: 5D torques in [-1, 1]
-    Forward velocity = data.qvel[0]
-    """
-    from mujoco_playground import registry
-    from mujoco_playground._src import mjx_env
-    from mujoco import mjx
-
-    # Load environment and extract models (closed over)
-    env = registry.load('SwimmerSwimmer6')
-    n_substeps = env.n_substeps
-
-    # Apply mass scaling if specified
-    if params.swimmer_mass_scale != 1.0:
-        mj_model = env.mj_model
-        mj_model.body_mass[:] = mj_model.body_mass * params.swimmer_mass_scale
-        mjx_model = mjx.put_model(mj_model)
-    else:
-        mjx_model = env.mjx_model
-
-    @jax.jit
-    def reset_fn(key: jax.random.PRNGKey) -> mjx.Data:
-        """Resets the swimmer environment and returns mjx.Data directly."""
-        key = jax.random.key(0)
-        env_state = env.reset(key)
-        return env_state.data
-
-    @jax.jit
-    def step_fn(
-        data: mjx.Data,
-        step_count: int,
-        action: jnp.ndarray,
-    ):
-        """Steps the swimmer environment forward using mjx.Data directly."""
-        # Direct physics step
-        next_data = mjx_env.step(mjx_model, data, action.squeeze(), n_substeps)
-
-        # Get observation
-        obs = get_obs_fn(next_data)
-
-        # Reward is forward velocity (x-direction)
-        reward = next_data.qvel[0]
-        rewards = jnp.array([reward])
-
-        # Check termination (NaN in state)
-        done = jnp.isnan(next_data.qpos).any() | jnp.isnan(next_data.qvel).any()
-        terminated = done
-
-        # Truncation based on max steps
-        truncated = step_count >= params.max_episode_steps
-
-        info = {
-            "forward_vel": next_data.qvel[0],
-        }
-
-        return next_data, obs, rewards, terminated, truncated, info
-
-    @jax.jit
-    def get_obs_fn(data: mjx.Data) -> jnp.ndarray:
-        """Returns 16D observation: [qpos, qvel] from mjx.Data.
-
-        For 6-link swimmer: qpos has 8 elements, qvel has 8 elements.
-        Observation = qpos (8D) + qvel (8D) = 16D
-        """
-        obs = jnp.concatenate([data.qpos, data.qvel])
-        return obs[None, :]  # Add agent dimension
-
-    return reset_fn, step_fn, get_obs_fn
-
-
-def make_hopper_env(params: EnvParams):
-    """
-    Factory function that wraps mujoco_playground HopperStand environment.
-
-    Internal state: mjx.Data (full MuJoCo physics state)
-    Observation: 15D = [qpos[1:] (6D), qvel (7D), touch (2D)]
-    Action: 4D torques in [-1, 1] for [waist, hip, knee, ankle]
-    """
-    from mujoco_playground import registry
-    from mujoco_playground._src import mjx_env
-    from mujoco import mjx
-    import mujoco
-
-    # Load environment and extract models (closed over)
-    env = registry.load('HopperStand')
-    n_substeps = env.n_substeps
-
-    # Get body IDs for height calculation
-    torso_id = env.mj_model.body("torso").id
-    foot_id = env.mj_model.body("foot").id
-
-    # Apply mass scaling if specified
-    if params.hopper_mass_scale != 1.0:
-        mj_model = env.mj_model
-        mj_model.body_mass[:] = mj_model.body_mass * params.hopper_mass_scale
-        mjx_model = mjx.put_model(mj_model)
-    else:
-        mjx_model = env.mjx_model
-        mj_model = env.mj_model
-
-    @jax.jit
-    def reset_fn(key: jax.random.PRNGKey) -> mjx.Data:
-        """Resets the hopper environment and returns mjx.Data directly."""
-        env_state = env.reset(key)
-        return env_state.data
-
-    @jax.jit
-    def step_fn(
-        data: mjx.Data,
-        step_count: int,
-        action: jnp.ndarray,
-    ):
-        """Steps the hopper environment forward using mjx.Data directly."""
-        # Direct physics step
-        next_data = mjx_env.step(mjx_model, data, action.squeeze(), n_substeps)
-
-        # Get observation (15D with touch sensors)
-        obs = get_obs_fn(next_data)
-
-        # Compute height-based reward for standing
-        torso_z = next_data.xipos[torso_id, -1]
-        foot_z = next_data.xipos[foot_id, -1]
-        height = torso_z - foot_z
-        reward = jnp.where(height >= 0.6, 1.0, 0.0)
-        rewards = jnp.array([reward])
-
-        # Check termination (NaN in state)
-        done = jnp.isnan(next_data.qpos).any() | jnp.isnan(next_data.qvel).any()
-        terminated = done
-
-        # Truncation based on max steps
-        truncated = step_count >= params.max_episode_steps
-
-        info = {
-            "height": height,
-        }
-
-        return next_data, obs, rewards, terminated, truncated, info
-
-    def _get_touch(data: mjx.Data) -> jnp.ndarray:
-        """Get touch sensor data (log-scaled)."""
-        toe = mjx_env.get_sensor_data(mj_model, data, "touch_toe")
-        heel = mjx_env.get_sensor_data(mj_model, data, "touch_heel")
-        touch = jnp.hstack([toe, heel])
-        return jnp.log1p(touch)
-
-    @jax.jit
-    def get_obs_fn(data: mjx.Data) -> jnp.ndarray:
-        """Returns 15D observation: [qpos[1:], qvel, touch] from mjx.Data.
-
-        Observation breakdown:
-        - qpos[1:]: [rootz, rooty, waist, hip, knee, ankle] (6D)
-        - qvel: [vel_rootx, vel_rootz, vel_rooty, vel_waist, vel_hip, vel_knee, vel_ankle] (7D)
-        - touch: [log1p(toe), log1p(heel)] (2D)
-        """
-        touch = _get_touch(data)
-        obs = jnp.concatenate([data.qpos[1:], data.qvel, touch])
-        return obs[None, :]  # Add agent dimension
-
-    return reset_fn, step_fn, get_obs_fn
-
-
 def init_env(config: Dict[str, Any]):
     """
     Initialize environment functions based on configuration.
@@ -1522,9 +1350,5 @@ def init_env(config: Dict[str, Any]):
         return make_planar_drone_wind_env(params)
     elif env_name == "cheetah":
         return make_cheetah_env(params)
-    elif env_name == "swimmer":
-        return make_swimmer_env(params)
-    elif env_name == "hopper":
-        return make_hopper_env(params)
     else:
         raise ValueError(f"Unknown environment name: '{env_name}'")
