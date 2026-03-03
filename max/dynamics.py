@@ -2013,26 +2013,29 @@ def create_cheetah_resnet(
     from mujoco_playground import registry
     from mujoco_playground._src import mjx_env
     from mujoco import mjx
+    import mujoco
 
     # Load environment and extract models
     env = registry.load('CheetahRun')
     n_substeps = env.n_substeps
+    mj_model = env.mj_model
 
-    # Apply mass scaling if specified
+    # Physics Speed Optimizations
+    mj_model.opt.iterations = 4
+    mj_model.opt.ls_iterations = 4
+
     dyn_params = config["dynamics_params"]
     mass_scale = dyn_params.get("cheetah_mass_scale", 1.0)
+    
     if mass_scale != 1.0:
-        import mujoco
-        mj_model = env.mj_model
-        # Scale both mass and inertia (inertia scales linearly with mass for uniform density)
         mj_model.body_mass[:] *= mass_scale
         mj_model.body_inertia[:] *= mass_scale
-        # Recalculate dependent constants (invweight, actuator_acc0, etc.)
-        mujoco.mj_setConst(mj_model)
-        mjx_model = mjx.put_model(mj_model)
+        mj_data = mujoco.MjData(mj_model)
+        mujoco.mj_setConst(mj_model, mj_data)
         print(f"🐆 Applied cheetah mass scale: {mass_scale}")
-    else:
-        mjx_model = env.mjx_model
+
+    # Transfer optimized model to MJX
+    mjx_model = mjx.put_model(mj_model)
 
     # Extract config parameters
     dim_obs = 17  # qpos[1:] (8) + qvel (9)
@@ -2166,26 +2169,29 @@ def create_cheetah_resnet_last_layer(
     from mujoco_playground import registry
     from mujoco_playground._src import mjx_env
     from mujoco import mjx
+    import mujoco
 
     # Load environment and extract models
     env = registry.load('CheetahRun')
     n_substeps = env.n_substeps
+    mj_model = env.mj_model
 
-    # Apply mass scaling if specified
+    # Physics Speed Optimizations
+    mj_model.opt.iterations = 4
+    mj_model.opt.ls_iterations = 4
+
     dyn_params = config["dynamics_params"]
     mass_scale = dyn_params.get("cheetah_mass_scale", 1.0)
+
     if mass_scale != 1.0:
-        import mujoco
-        mj_model = env.mj_model
-        # Scale both mass and inertia (inertia scales linearly with mass for uniform density)
         mj_model.body_mass[:] *= mass_scale
         mj_model.body_inertia[:] *= mass_scale
-        # Recalculate dependent constants (invweight, actuator_acc0, etc.)
-        mujoco.mj_setConst(mj_model)
-        mjx_model = mjx.put_model(mj_model)
+        mj_data = mujoco.MjData(mj_model)
+        mujoco.mj_setConst(mj_model, mj_data)
         print(f"🐆 Applied cheetah mass scale: {mass_scale}")
-    else:
-        mjx_model = env.mjx_model
+
+    # Transfer optimized model to MJX
+    mjx_model = mjx.put_model(mj_model)
 
     # Extract config parameters
     dim_obs = 17
@@ -2354,26 +2360,29 @@ def create_cheetah_resnet_lora_xs(
     from mujoco_playground import registry
     from mujoco_playground._src import mjx_env
     from mujoco import mjx
+    import mujoco
 
     # Load environment and extract models
     env = registry.load('CheetahRun')
     n_substeps = env.n_substeps
+    mj_model = env.mj_model
 
-    # Apply mass scaling if specified
+    # Physics Speed Optimizations
+    mj_model.opt.iterations = 4
+    mj_model.opt.ls_iterations = 4
+
     dyn_params = config["dynamics_params"]
     mass_scale = dyn_params.get("cheetah_mass_scale", 1.0)
+
     if mass_scale != 1.0:
-        import mujoco
-        mj_model = env.mj_model
-        # Scale both mass and inertia (inertia scales linearly with mass for uniform density)
         mj_model.body_mass[:] *= mass_scale
         mj_model.body_inertia[:] *= mass_scale
-        # Recalculate dependent constants (invweight, actuator_acc0, etc.)
-        mujoco.mj_setConst(mj_model)
-        mjx_model = mjx.put_model(mj_model)
+        mj_data = mujoco.MjData(mj_model)
+        mujoco.mj_setConst(mj_model, mj_data)
         print(f"🐆 Applied cheetah mass scale: {mass_scale}")
-    else:
-        mjx_model = env.mjx_model
+
+    # Transfer optimized model to MJX
+    mjx_model = mjx.put_model(mj_model)
 
     # Extract config parameters
     dim_obs = 17
