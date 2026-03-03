@@ -2506,6 +2506,140 @@ def create_cheetah_ground_truth(
     return model, params
 
 
+def create_latent_dynamics(
+    key: jax.Array,
+    config: dict,
+    normalizer: Normalizer,
+    normalizer_params: Optional[jnp.ndarray] = None,
+) -> tuple[NamedTuple, dict]:
+    """
+    TD-MPC2-inspired latent dynamics model: encoder -> dynamics MLP -> decoder.
+
+    Architecture:
+      - Encoder:   NormedLinear blocks (Dense->LayerNorm->Mish), final layer uses SimNorm
+      - Dynamics:  NormedLinear blocks (Dense->LayerNorm->Mish), final layer uses SimNorm
+      - Decoder:   NormedLinear blocks (Dense->LayerNorm->Mish), final layer is plain Dense
+
+    SimNorm projects the latent into L simplices of dimension V via softmax.
+    NormedLinear = Dense -> LayerNorm -> Mish.
+
+    pred_one_step: normalizes obs -> encodes -> dynamics -> decodes -> raw obs.
+
+    config["dynamics_params"]:
+        - encoder_features:   list[int], e.g. [256, 512]  (last entry = latent_dim)
+        - dynamics_features:  list[int], e.g. [512, 512, 512] (last entry = latent_dim)
+        - decoder_features:   list[int], e.g. [512, 256]
+        - simnorm_dim_v:      int, simplex dimension V (latent_dim must be divisible by V)
+        - simnorm_tau:        float, softmax temperature (default 1.0)
+        - pretrained_params_path: optional path to load pretrained params
+    """
+    dim_state = config["dim_state"]
+    dim_action = config["dim_action"]
+    dyn_params = config["dynamics_params"]
+    encoder_features = dyn_params["encoder_features"]
+    dynamics_features = dyn_params["dynamics_features"]
+    decoder_features = dyn_params["decoder_features"]
+    simnorm_dim_v = dyn_params["simnorm_dim_v"]
+    simnorm_tau = dyn_params.get("simnorm_tau", 1.0)
+
+    latent_dim = encoder_features[-1]
+    assert latent_dim % simnorm_dim_v == 0, (
+        f"latent_dim={latent_dim} must be divisible by simnorm_dim_v={simnorm_dim_v}"
+    )
+    assert dynamics_features[-1] == latent_dim, (
+        f"dynamics output dim ({dynamics_features[-1]}) must equal latent_dim ({latent_dim})"
+    )
+
+    def _mish(x):
+        return x * jnp.tanh(jax.nn.softplus(x))
+
+    def _simnorm(x):
+        shape = x.shape
+        L = shape[-1] // simnorm_dim_v
+        x = x.reshape(*shape[:-1], L, simnorm_dim_v)
+        x = jax.nn.softmax(x / simnorm_tau, axis=-1)
+        return x.reshape(shape)
+
+    class _Encoder(nn.Module):
+        @nn.compact
+        def __call__(self, x):
+            for feat in encoder_features[:-1]:
+                x = nn.Dense(feat)(x)
+                x = nn.LayerNorm()(x)
+                x = _mish(x)
+            x = nn.Dense(encoder_features[-1])(x)
+            x = nn.LayerNorm()(x)
+            return _simnorm(x)
+
+    class _DynamicsNet(nn.Module):
+        @nn.compact
+        def __call__(self, x):
+            for feat in dynamics_features[:-1]:
+                x = nn.Dense(feat)(x)
+                x = nn.LayerNorm()(x)
+                x = _mish(x)
+            x = nn.Dense(dynamics_features[-1])(x)
+            x = nn.LayerNorm()(x)
+            return _simnorm(x)
+
+    class _Decoder(nn.Module):
+        @nn.compact
+        def __call__(self, z):
+            x = z
+            for feat in decoder_features:
+                x = nn.Dense(feat)(x)
+                x = nn.LayerNorm()(x)
+                x = _mish(x)
+            return nn.Dense(dim_state)(x)
+
+    encoder_net = _Encoder()
+    dynamics_net = _DynamicsNet()
+    decoder_net = _Decoder()
+
+    dummy_norm_state = jnp.ones((dim_state,))
+    dummy_action = jnp.ones((dim_action,))
+    dummy_z = jnp.ones((latent_dim,))
+
+    pretrained_path = dyn_params.get("pretrained_params_path")
+    if pretrained_path:
+        with open(pretrained_path, "rb") as f:
+            pretrained = pickle.load(f)
+        model_params = pretrained["model"]
+        print(f"📦 Loaded pretrained latent_dynamics weights from {pretrained_path}")
+    else:
+        key, k1, k2, k3 = jax.random.split(key, 4)
+        encoder_params = encoder_net.init(k1, dummy_norm_state)
+        dynamics_params = dynamics_net.init(
+            k2, jnp.concatenate([dummy_z, dummy_action], axis=-1)
+        )
+        decoder_params = decoder_net.init(k3, dummy_z)
+        model_params = {
+            "encoder": encoder_params,
+            "dynamics": dynamics_params,
+            "decoder": decoder_params,
+        }
+
+    params = {"model": model_params, "normalizer": normalizer_params}
+
+    @jax.jit
+    def pred_one_step(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Encode state -> latent, predict next latent, decode to obs space."""
+        norm_params = params["normalizer"]
+        model_p = params["model"]
+        norm_state = normalizer.normalize(norm_params["state"], state)
+        norm_action = normalizer.normalize(norm_params["action"], action)
+        z = encoder_net.apply(model_p["encoder"], norm_state)
+        z_next = dynamics_net.apply(
+            model_p["dynamics"], jnp.concatenate([z, norm_action], axis=-1)
+        )
+        norm_next_state = decoder_net.apply(model_p["decoder"], z_next)
+        return normalizer.unnormalize(norm_params["state"], norm_next_state)
+
+    return DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=None), params
+
+
 def init_dynamics(
     key: jax.Array,
     config: Any,
@@ -2605,6 +2739,11 @@ def init_dynamics(
 
     elif dynamics_type == "cheetah_resnet_lora_xs":
         model, params = create_cheetah_resnet_lora_xs(
+            key, config, normalizer, normalizer_params
+        )
+
+    elif dynamics_type == "latent_dynamics":
+        model, params = create_latent_dynamics(
             key, config, normalizer, normalizer_params
         )
 
