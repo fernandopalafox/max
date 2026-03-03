@@ -1240,8 +1240,14 @@ def make_cheetah_env(params: EnvParams):
 
     # Apply mass scaling if specified
     if params.cheetah_mass_scale != 1.0:
+        import mujoco
         mj_model = env.mj_model
-        mj_model.body_mass[:] = mj_model.body_mass * params.cheetah_mass_scale
+        # Scale both mass and inertia (inertia scales linearly with mass for uniform density)
+        mj_model.body_mass[:] *= params.cheetah_mass_scale
+        mj_model.body_inertia[:] *= params.cheetah_mass_scale
+        # Recalculate dependent constants (invweight, actuator_acc0, etc.)
+        mj_data = mujoco.MjData(mj_model)
+        mujoco.mj_setConst(mj_model, mj_data)
         mjx_model = mjx.put_model(mj_model)
     else:
         mjx_model = env.mjx_model
