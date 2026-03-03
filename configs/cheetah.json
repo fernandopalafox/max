@@ -100,11 +100,14 @@
     "dim_state": 17,
     "dim_action": 6,
 
-    "dynamics": "cheetah_resnet",
+    "dynamics": "latent_dynamics",
     "dynamics_params": {
-      "nn_features": [256,256,256,64],
-      "ensemble_size": 1,
-      "cheetah_mass_scale": 2.0
+      "encoder_features": [256, 512],
+      "dynamics_features": [512, 512, 512],
+      "decoder_features": [512, 256],
+      "simnorm_dim_v": 8,
+      "simnorm_tau": 1.0,
+      "pretrained_params_path": null
     },
 
     "trainer": "gd",
