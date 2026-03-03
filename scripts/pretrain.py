@@ -74,15 +74,16 @@ def main(config):
     print(f"Trainable parameters: {num_params:,}")
     wandb.config.update({"num_params": num_params})
 
-    # JIT'd test loss function
+    # JIT'd test loss function - use pred_one_step for correct residual training
     @jax.jit
     def compute_loss(params, data):
-        vmap_pred = jax.vmap(dynamics_model.pred_norm_delta, in_axes=(None, 0, 0))
+        vmap_pred = jax.vmap(dynamics_model.pred_one_step, in_axes=(None, 0, 0))
         pred = vmap_pred(params, data["states"], data["actions"])
-        true_deltas = data["next_states"] - data["states"]
+        # Normalize both prediction and target for stable training
         vmap_norm = jax.vmap(normalizer.normalize, in_axes=(None, 0))
-        true_norm = vmap_norm(norm_params["delta"], true_deltas)
-        return jnp.mean((pred - true_norm) ** 2)
+        pred_norm = vmap_norm(norm_params["state"], pred)
+        target_norm = vmap_norm(norm_params["state"], data["next_states"])
+        return jnp.mean((pred_norm - target_norm) ** 2)
 
     batch_size = config["batch_size"]
     num_epochs = config["num_epochs"]
