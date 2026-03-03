@@ -79,11 +79,7 @@ def main(config):
     def compute_loss(params, data):
         vmap_pred = jax.vmap(dynamics_model.pred_one_step, in_axes=(None, 0, 0))
         pred = vmap_pred(params, data["states"], data["actions"])
-        # Normalize both prediction and target for stable training
-        vmap_norm = jax.vmap(normalizer.normalize, in_axes=(None, 0))
-        pred_norm = vmap_norm(norm_params["state"], pred)
-        target_norm = vmap_norm(norm_params["state"], data["next_states"])
-        return jnp.mean((pred_norm - target_norm) ** 2)
+        return jnp.mean((pred - data["next_states"]) ** 2)
 
     batch_size = config["batch_size"]
     num_epochs = config["num_epochs"]
