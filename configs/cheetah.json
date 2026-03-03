@@ -90,7 +90,7 @@
   "pretraining": {
     "seed": 42,
     "wandb_project": "cheetah_pretraining",
-    "data_path": "./data/cheetah_data/cheetah_buffer_300k.pkl",
+    "data_path": "./data/cheetah_data/cheetah_run_tdmpc2.pkl",
     "save_path": "./data/pretrained_models/cheetah",
 
     "num_epochs": 500,
