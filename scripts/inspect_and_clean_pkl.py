@@ -248,6 +248,9 @@ def main():
                         help="Threshold for state diagnostics display only.")
     parser.add_argument("--plot", action="store_true",
                         help="Save a diagnostic PNG alongside the input file.")
+    parser.add_argument("--fraction", type=float, default=1.0,
+                        help="Fraction of clean episodes to keep (0-1). "
+                             "Randomly samples episodes after cleaning.")
     args = parser.parse_args()
 
     with open(args.input, "rb") as f:
@@ -301,6 +304,24 @@ def main():
         actions = actions[keep]
         rewards = rewards[keep]
         dones   = dones[keep]
+
+    # --- Subsample episodes if requested ---
+    if args.fraction < 1.0:
+        ep_starts, ep_ends, _ = _parse_episodes(dones)
+        n_eps = len(ep_starts)
+        n_keep = max(1, int(n_eps * args.fraction))
+        rng = np.random.default_rng(42)
+        keep_eps = np.sort(rng.choice(n_eps, size=n_keep, replace=False))
+        # Build mask for rows belonging to kept episodes
+        keep_mask = np.zeros(len(states), dtype=bool)
+        for i in keep_eps:
+            keep_mask[ep_starts[i]:ep_ends[i] + 1] = True
+        states = states[keep_mask]
+        actions = actions[keep_mask]
+        rewards = rewards[keep_mask]
+        dones = dones[keep_mask]
+        print(f"\nSubsampled {n_keep:,}/{n_eps:,} episodes ({args.fraction*100:.1f}%)")
+        print(f"  Remaining transitions: {len(states):,}")
 
     # --- Post-clean diagnostics ---
     print("\n=== After cleaning ===")
