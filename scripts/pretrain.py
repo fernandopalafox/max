@@ -14,7 +14,6 @@ from max.normalizers import init_normalizer
 from max.dynamics import init_dynamics
 from max.dynamics_trainers import init_trainer
 
-
 def main(config):
     # Create unique run directory with timestamp
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -30,25 +29,26 @@ def main(config):
 
     key = jax.random.key(config["seed"])
 
-    # Load data
+    # Load data — keep as numpy on CPU, only transfer batches to GPU
     with open(config["data_path"], "rb") as f:
         raw_data = pickle.load(f)
 
-    states = jnp.array(raw_data["states"][0])  # (N, dim_state)
-    actions = jnp.array(raw_data["actions"][0])  # (N, dim_action)
+    states = np.array(raw_data["states"][0])   # (N, dim_state), CPU
+    actions = np.array(raw_data["actions"][0]) # (N, dim_action), CPU
     dones = raw_data["dones"]
 
     # Create transitions (skip episode boundaries)
     valid_idx = np.where(dones[:-1] == 0)[0]
     states = states[valid_idx]
     actions = actions[valid_idx]
-    next_states = jnp.array(raw_data["states"][0])[valid_idx + 1]
+    next_states = np.array(raw_data["states"][0])[valid_idx + 1]  # single pass, CPU
+    del raw_data  # free raw buffer memory
     n_samples = len(states)
 
     # Train/test split
     n_train = int(n_samples * config["train_split"])
     key, shuffle_key = jax.random.split(key)
-    perm = jax.random.permutation(shuffle_key, n_samples)
+    perm = np.array(jax.random.permutation(shuffle_key, n_samples))
     train_idx, test_idx = perm[:n_train], perm[n_train:]
 
     train_data = {
@@ -74,12 +74,27 @@ def main(config):
     print(f"Trainable parameters: {num_params:,}")
     wandb.config.update({"num_params": num_params})
 
-    # JIT'd test loss function - use pred_one_step for correct residual training
+    # JIT'd loss function over a single batch (GPU)
     @jax.jit
-    def compute_loss(params, data):
+    def compute_loss(params, states, actions, next_states):
         vmap_pred = jax.vmap(dynamics_model.pred_one_step, in_axes=(None, 0, 0))
-        pred = vmap_pred(params, data["states"], data["actions"])
-        return jnp.mean((pred - data["next_states"]) ** 2)
+        pred = vmap_pred(params, states, actions)
+        return jnp.mean((pred - next_states) ** 2)
+
+    def compute_loss_batched(params, data, batch_size):
+        """Compute loss over data in CPU numpy, transferring one batch at a time."""
+        n = len(data["states"])
+        losses = []
+        for i in range(0, n, batch_size):
+            sl = slice(i, i + batch_size)
+            loss = compute_loss(
+                params,
+                jnp.array(data["states"][sl]),
+                jnp.array(data["actions"][sl]),
+                jnp.array(data["next_states"][sl]),
+            )
+            losses.append(float(loss))
+        return np.mean(losses)
 
     batch_size = config["batch_size"]
     num_epochs = config["num_epochs"]
@@ -96,20 +111,21 @@ def main(config):
     print(f"Training: {n_train} samples, Testing: {n_samples - n_train} samples")
 
     for epoch in range(num_epochs):
-        # Shuffle training data
+        # Shuffle training data on CPU
         key, shuffle_key = jax.random.split(key)
-        perm = jax.random.permutation(shuffle_key, n_train)
+        perm = np.array(jax.random.permutation(shuffle_key, n_train))
         shuffled = {k: v[perm] for k, v in train_data.items()}
 
-        # Train over batches
+        # Train over batches — only transfer each mini-batch to GPU
         epoch_losses = []
         for i in range(0, n_train, batch_size):
-            batch = {k: v[i : i + batch_size] for k, v in shuffled.items()}
+            sl = slice(i, i + batch_size)
+            batch = {k: jnp.array(v[sl]) for k, v in shuffled.items()}
             train_state, loss = trainer.train(train_state, batch)
             epoch_losses.append(float(loss))
 
         train_loss = np.mean(epoch_losses)
-        test_loss = float(compute_loss(train_state.params, test_data))
+        test_loss = compute_loss_batched(train_state.params, test_data, batch_size)
         train_losses.append(train_loss)
         test_losses.append(test_loss)
 
