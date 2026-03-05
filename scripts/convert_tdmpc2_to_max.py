@@ -7,7 +7,7 @@ from pathlib import Path
 import gc
 
 
-def convert_tdmpc2_task(input_dir, output_path, task_id, episode_length=501):
+def convert_tdmpc2_task(input_dir, output_path, task_id, dim_state=None):
     chunk_files = sorted(Path(input_dir).glob("chunk_*.pt"))
 
     all_states, all_actions, all_rewards, all_dones = [], [], [], []
@@ -30,7 +30,7 @@ def convert_tdmpc2_task(input_dir, output_path, task_id, episode_length=501):
         action = data['action'][mask].numpy()
         reward = data['reward'][mask].numpy()
 
-        n_eps = obs.shape[0]
+        n_eps, episode_length = obs.shape[0], obs.shape[1]
         n_trans = n_eps * episode_length
 
         # Flatten episodes to transitions
@@ -59,6 +59,10 @@ def convert_tdmpc2_task(input_dir, output_path, task_id, episode_length=501):
     actions = np.concatenate(all_actions)[np.newaxis].astype(np.float32)
     rewards = np.concatenate(all_rewards)[np.newaxis].astype(np.float32)
     dones = np.concatenate(all_dones).astype(np.float32)
+
+    # Slice zero-padded dims if requested
+    if dim_state is not None:
+        states = states[:, :, :dim_state]
 
     output = {
         'states': states,
@@ -99,10 +103,11 @@ if __name__ == "__main__":
         help="Task ID to extract (3=cheetah-run). See TDMPC2 TASK_SET for IDs."
     )
     parser.add_argument(
-        "--episode-length",
+        "--dim-state",
         type=int,
-        default=501,
-        help="Episode length in TDMPC2 data (default: 501 for mt30)"
+        default=None,
+        help="Slice states to this many dimensions (removes zero-padding). "
+             "E.g. 17 for cheetah-run in TDMPC2 mt30.",
     )
     args = parser.parse_args()
-    convert_tdmpc2_task(args.input_dir, args.output, args.task_id, args.episode_length)
+    convert_tdmpc2_task(args.input_dir, args.output, args.task_id, args.dim_state)
