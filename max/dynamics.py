@@ -2622,10 +2622,10 @@ def create_latent_dynamics(
     params = {"model": model_params, "normalizer": normalizer_params}
 
     @jax.jit
-    def pred_one_step(
+    def pred_norm_delta(
         params: Any, state: jnp.ndarray, action: jnp.ndarray
     ) -> jnp.ndarray:
-        """Encode state -> latent, predict next latent, decode to obs space."""
+        """Returns normalized observation-space delta (decoder output)."""
         norm_params = params["normalizer"]
         model_p = params["model"]
         norm_state = normalizer.normalize(norm_params["state"], state)
@@ -2634,10 +2634,18 @@ def create_latent_dynamics(
         z_next = dynamics_net.apply(
             model_p["dynamics"], jnp.concatenate([z, norm_action], axis=-1)
         )
-        norm_next_state = decoder_net.apply(model_p["decoder"], z_next)
-        return normalizer.unnormalize(norm_params["state"], norm_next_state)
+        return decoder_net.apply(model_p["decoder"], z_next)
 
-    return DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=None), params
+    @jax.jit
+    def pred_one_step(
+        params: Any, state: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Predicts the absolute next state using a residual."""
+        norm_delta = pred_norm_delta(params, state, action)
+        delta = normalizer.unnormalize(params["normalizer"]["delta"], norm_delta)
+        return state + delta
+
+    return DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=pred_norm_delta), params
 
 
 def init_dynamics(

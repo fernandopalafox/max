@@ -91,19 +91,24 @@ def create_gradient_descent_trainer(
     opt_state = optimizer.init(init_params)
     train_state = TrainState(params=init_params, opt_state=opt_state)
 
-    vmap_pred_one_step = jax.vmap(
-        dynamics_model.pred_one_step, in_axes=(None, 0, 0)
+    vmap_pred_norm_delta = jax.vmap(
+        dynamics_model.pred_norm_delta, in_axes=(None, 0, 0)
     )
+    normalizer = STANDARD_NORMALIZER
+    vmap_normalize = jax.vmap(normalizer.normalize, in_axes=(None, 0))
+
     @jax.jit
     def loss_fn(params: Any, data: dict) -> float:
-        """Computes Mean Squared Error loss in raw state space (pred_one_step handles normalization internally)"""
+        """Computes Mean Squared Error loss in normalized delta space."""
         states, actions, true_next_states = (
             data["states"],
             data["actions"],
             data["next_states"],
         )
-        pred_next_states = vmap_pred_one_step(params, states, actions)
-        return jnp.mean((pred_next_states - true_next_states) ** 2)
+        pred_norm_delta = vmap_pred_norm_delta(params, states, actions)
+        target_delta = true_next_states - states
+        target_norm_delta = vmap_normalize(params["normalizer"]["delta"], target_delta)
+        return jnp.mean((pred_norm_delta - target_norm_delta) ** 2)
 
     @jax.jit
     def train_step(
