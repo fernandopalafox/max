@@ -33,34 +33,49 @@ def main(config):
     with open(config["data_path"], "rb") as f:
         raw_data = pickle.load(f)
 
-    states = np.array(raw_data["states"][0])   # (N, dim_state), CPU
-    actions = np.array(raw_data["actions"][0]) # (N, dim_action), CPU
-    dones = raw_data["dones"]
-
-    # Create transitions (skip episode boundaries)
-    valid_idx = np.where(dones[:-1] == 0)[0]
-    states = states[valid_idx]
-    actions = actions[valid_idx]
-    next_states = np.array(raw_data["states"][0])[valid_idx + 1]  # single pass, CPU
+    raw_states = np.array(raw_data["states"][0])   # (N, dim_state), CPU
+    raw_actions = np.array(raw_data["actions"][0]) # (N, dim_action), CPU
+    raw_dones = raw_data["dones"]
     del raw_data  # free raw buffer memory
-    n_samples = len(states)
 
-    # Train/test split
-    n_train = int(n_samples * config["train_split"])
-    key, shuffle_key = jax.random.split(key)
-    perm = np.array(jax.random.permutation(shuffle_key, n_samples))
-    train_idx, test_idx = perm[:n_train], perm[n_train:]
+    # Extract full episodes using dones boundaries
+    episode_ends = np.where(raw_dones == 1)[0]
+    episode_boundaries = np.concatenate([[0], episode_ends + 1])
+    episodes = []
+    for start, end in zip(episode_boundaries[:-1], episode_boundaries[1:]):
+        if end - start > 1:  # skip degenerate episodes
+            episodes.append({
+                "states": raw_states[start:end],    # (T+1, dim_s)
+                "actions": raw_actions[start:end-1], # (T, dim_a)
+            })
 
-    train_data = {
-        "states": states[train_idx],
-        "actions": actions[train_idx],
-        "next_states": next_states[train_idx],
-    }
-    test_data = {
-        "states": states[test_idx],
-        "actions": actions[test_idx],
-        "next_states": next_states[test_idx],
-    }
+    # Episode-level shuffle + split
+    key, ep_key = jax.random.split(key)
+    ep_perm = np.array(jax.random.permutation(ep_key, len(episodes)))
+    n_train_ep = int(len(episodes) * config["train_split"])
+    train_eps = [episodes[i] for i in ep_perm[:n_train_ep]]
+    test_eps  = [episodes[i] for i in ep_perm[n_train_ep:]]
+
+    # Flatten episodes into transitions
+    def flatten_episodes(eps):
+        s, a, ns = [], [], []
+        for ep in eps:
+            s.append(ep["states"][:-1])
+            a.append(ep["actions"])
+            ns.append(ep["states"][1:])
+        return {"states": np.concatenate(s), "actions": np.concatenate(a), "next_states": np.concatenate(ns)}
+
+    train_data = flatten_episodes(train_eps)
+    test_data  = flatten_episodes(test_eps)
+
+    # Pick visualization episodes (one from each split)
+    key, vis_key = jax.random.split(key)
+    vis_train_ep = train_eps[int(jax.random.randint(vis_key, (), 0, len(train_eps)))]
+    key, vis_key = jax.random.split(key)
+    vis_test_ep  = test_eps[int(jax.random.randint(vis_key, (), 0, len(test_eps)))]
+
+    n_train = len(train_data["states"])
+    n_samples = n_train + len(test_data["states"])
 
     # Init model and trainer
     normalizer, norm_params = init_normalizer(config)
@@ -74,12 +89,54 @@ def main(config):
     print(f"Trainable parameters: {num_params:,}")
     wandb.config.update({"num_params": num_params})
 
+    # Autoregressive rollout
+    max_rollout_steps = config.get("eval_rollout_steps", 200)
+
+    def autoregressive_rollout(params, init_state, actions):
+        """Runs model autoregressively. actions: (T, dim_a), returns (T+1, dim_s)."""
+        states = [jnp.array(init_state)]
+        for action in actions[:max_rollout_steps]:
+            next_state = dynamics_model.pred_one_step(params, states[-1], jnp.array(action))
+            states.append(next_state)
+        return np.array(jax.device_get(jnp.stack(states)))
+
+    state_norm = config.get("normalization_params", {}).get("state", {})
+    state_ylims = list(zip(state_norm.get("min", []), state_norm.get("max", []))) or None
+
+    def plot_episode_comparison(true_states, pred_states, title, state_labels=None):
+        T, dim = true_states.shape
+        ncols = 4
+        nrows = (dim + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 2.5))
+        axes = axes.flatten()
+        for d in range(dim):
+            ax = axes[d]
+            ax.plot(true_states[:, d], label="true", lw=1.5)
+            ax.plot(pred_states[:, d], label="model", lw=1.5, linestyle="--")
+            if state_ylims and d < len(state_ylims):
+                ax.set_ylim(state_ylims[d])
+            label = state_labels[d] if state_labels and d < len(state_labels) else f"dim {d}"
+            ax.set_title(label, fontsize=8)
+            ax.tick_params(labelsize=6)
+            if d == 0:
+                ax.legend(fontsize=7)
+        for d in range(dim, len(axes)):
+            axes[d].set_visible(False)
+        fig.suptitle(title, fontsize=10)
+        fig.tight_layout()
+        return fig
+
     # JIT'd loss function over a single batch (GPU)
+    # Compute loss in normalized delta space
+    vmap_pred_norm_delta = jax.vmap(dynamics_model.pred_norm_delta, in_axes=(None, 0, 0))
+    vmap_normalize = jax.vmap(normalizer.normalize, in_axes=(None, 0))
+
     @jax.jit
     def compute_loss(params, states, actions, next_states):
-        vmap_pred = jax.vmap(dynamics_model.pred_one_step, in_axes=(None, 0, 0))
-        pred = vmap_pred(params, states, actions)
-        return jnp.mean((pred - next_states) ** 2)
+        pred_norm_delta = vmap_pred_norm_delta(params, states, actions)
+        target_delta = next_states - states
+        target_norm_delta = vmap_normalize(norm_params["delta"], target_delta)
+        return jnp.mean((pred_norm_delta - target_norm_delta) ** 2)
 
     def compute_loss_batched(params, data, batch_size):
         """Compute loss over data in CPU numpy, transferring one batch at a time."""
@@ -108,50 +165,74 @@ def main(config):
         os.makedirs(checkpoint_dir, exist_ok=True)
         print(f"Checkpointing every {checkpoint_freq} epochs to {checkpoint_dir}")
 
+    eval_plot_freq = config.get("eval_plot_freq", 20)
     print(f"Training: {n_train} samples, Testing: {n_samples - n_train} samples")
 
-    for epoch in range(num_epochs):
-        # Shuffle training data on CPU
-        key, shuffle_key = jax.random.split(key)
-        perm = np.array(jax.random.permutation(shuffle_key, n_train))
-        shuffled = {k: v[perm] for k, v in train_data.items()}
+    def run_eval_plots(step):
+        for ep, tag in [(vis_train_ep, "train_episode"), (vis_test_ep, "test_episode")]:
+            T = min(len(ep["actions"]), max_rollout_steps)
+            true_states = ep["states"][:T+1]
+            pred_states = autoregressive_rollout(train_state.params, ep["states"][0], ep["actions"])
+            pred_states = pred_states[:T+1]
+            fig = plot_episode_comparison(true_states, pred_states,
+                                          title=f"Epoch {step} — {tag}",
+                                          state_labels=config.get("state_labels"))
+            wandb.log({f"eval/{tag}": wandb.Image(fig)}, step=step)
+            plt.close(fig)
 
-        # Train over batches — only transfer each mini-batch to GPU
-        epoch_losses = []
-        for i in range(0, n_train, batch_size):
-            sl = slice(i, i + batch_size)
-            batch = {k: jnp.array(v[sl]) for k, v in shuffled.items()}
-            train_state, loss = trainer.train(train_state, batch)
-            epoch_losses.append(float(loss))
+    train_loss0 = compute_loss_batched(train_state.params, train_data, batch_size)
+    test_loss0 = compute_loss_batched(train_state.params, test_data, batch_size)
+    wandb.log({"losses/train": train_loss0, "losses/test": test_loss0}, step=0)
+    run_eval_plots(step=0)
 
-        train_loss = np.mean(epoch_losses)
-        test_loss = compute_loss_batched(train_state.params, test_data, batch_size)
-        train_losses.append(train_loss)
-        test_losses.append(test_loss)
+    try:
+        for epoch in range(num_epochs):
+            # Shuffle training data on CPU
+            key, shuffle_key = jax.random.split(key)
+            perm = np.array(jax.random.permutation(shuffle_key, n_train))
+            shuffled = {k: v[perm] for k, v in train_data.items()}
 
-        wandb.log({"train/loss": train_loss, "test/loss": test_loss}, step=epoch)
+            # Train over batches — only transfer each mini-batch to GPU
+            epoch_losses = []
+            for i in range(0, n_train, batch_size):
+                sl = slice(i, i + batch_size)
+                batch = {k: jnp.array(v[sl]) for k, v in shuffled.items()}
+                train_state, loss = trainer.train(train_state, batch)
+                epoch_losses.append(float(loss))
 
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch+1}/{num_epochs}: train={train_loss:.6f}, test={test_loss:.6f}")
+            train_loss = np.mean(epoch_losses)
+            test_loss = compute_loss_batched(train_state.params, test_data, batch_size)
+            train_losses.append(train_loss)
+            test_losses.append(test_loss)
 
-        # Save checkpoint
-        if checkpoint_enabled and (epoch + 1) % checkpoint_freq == 0:
-            ckpt_path = os.path.join(checkpoint_dir, f"epoch_{epoch+1}.pkl")
-            with open(ckpt_path, "wb") as f:
-                pickle.dump(jax.device_get(train_state.params), f)
-            print(f"Checkpoint saved: {ckpt_path}")
+            epochs_so_far = list(range(len(train_losses)))
+        wandb.log({
+            "losses/train": train_loss,
+            "losses/test": test_loss,
+            "losses/combined": wandb.plot.line_series(
+                xs=epochs_so_far,
+                ys=[train_losses, test_losses],
+                keys=["train", "test"],
+                title="Train vs Test Loss",
+                xname="epoch",
+            ),
+        }, step=epoch)
 
-    # Plot losses
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(train_losses, label="Train")
-    ax.plot(test_losses, label="Test")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Loss (MSE)")
-    ax.legend()
-    ax.set_title("Pretraining Loss")
-    ax.grid(True, alpha=0.3)
-    wandb.log({"loss_curves": wandb.Image(fig)})
-    plt.close(fig)
+            if (epoch + 1) % eval_plot_freq == 0:
+                run_eval_plots(step=epoch + 1)
+
+            if (epoch + 1) % 10 == 0:
+                print(f"Epoch {epoch+1}/{num_epochs}: train={train_loss:.6f}, test={test_loss:.6f}")
+
+            # Save checkpoint
+            if checkpoint_enabled and (epoch + 1) % checkpoint_freq == 0:
+                ckpt_path = os.path.join(checkpoint_dir, f"epoch_{epoch+1}.pkl")
+                with open(ckpt_path, "wb") as f:
+                    pickle.dump(jax.device_get(train_state.params), f)
+                print(f"Checkpoint saved: {ckpt_path}")
+
+    except KeyboardInterrupt:
+        print(f"\nInterrupted at epoch {epoch+1}. Saving model...")
 
     # Save model with descriptive name: {dynamics}_{data_source}.pkl
     params_np = jax.device_get(train_state.params)
