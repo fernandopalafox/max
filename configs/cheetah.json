@@ -135,13 +135,13 @@
     "cost_type": "cheetah_velocity_tracking_learned_info",
     "planner_type": "icem",
     "planner_params": {
-      "horizon": 25,
-      "batch_size": 200,
-      "max_iter": 1,
-      "elit_frac": 0.05,
+      "horizon": 200,
+      "batch_size": 500,
+      "max_iter": 5,
+      "elit_frac": 0.1,
       "learning_rate": 0.9,
       "colored_noise_beta": 0.25,
-      "initial_variance_val": 0.25,
+      "initial_variance_val": 0.5,
       "dim_control": 6,
       "action_low": [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
       "action_high": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
