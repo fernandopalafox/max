@@ -206,17 +206,17 @@ def main(config):
             test_losses.append(test_loss)
 
             epochs_so_far = list(range(len(train_losses)))
-        wandb.log({
-            "losses/train": train_loss,
-            "losses/test": test_loss,
-            "losses/combined": wandb.plot.line_series(
-                xs=epochs_so_far,
-                ys=[train_losses, test_losses],
-                keys=["train", "test"],
-                title="Train vs Test Loss",
-                xname="epoch",
-            ),
-        }, step=epoch)
+            wandb.log({
+                "losses/train": train_loss,
+                "losses/test": test_loss,
+                "losses/combined": wandb.plot.line_series(
+                    xs=epochs_so_far,
+                    ys=[train_losses, test_losses],
+                    keys=["train", "test"],
+                    title="Train vs Test Loss",
+                    xname="epoch",
+                ),
+            }, step=epoch)
 
             if (epoch + 1) % eval_plot_freq == 0:
                 run_eval_plots(step=epoch + 1)
@@ -237,7 +237,7 @@ def main(config):
     # Save model with descriptive name: {dynamics}_{data_source}.pkl
     params_np = jax.device_get(train_state.params)
     data_name = os.path.basename(config["data_path"]).replace("_buffer.pkl", "")
-    model_name = f"{config['dynamics']}_{data_name}.pkl"
+    model_name = f"{config['dynamics']}_{data_name}"
     model_path = os.path.join(run_dir, model_name)
     with open(model_path, "wb") as f:
         pickle.dump(params_np, f)
