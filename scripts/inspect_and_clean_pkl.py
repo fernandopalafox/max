@@ -323,7 +323,7 @@ def main():
                         help="Augment with zero-action rollouts")
     parser.add_argument("--augment-ratio", type=float, default=0.2,
                         help="Fraction of transitions to add (e.g., 0.2 = add 20%%)")
-    parser.add_argument("--augment-rollout-len", type=int, default=30,
+    parser.add_argument("--augment-rollout-len", type=int, default=100,
                         help="Steps per zero-action rollout")
     args = parser.parse_args()
 
