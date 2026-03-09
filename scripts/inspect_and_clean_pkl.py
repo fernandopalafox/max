@@ -21,6 +21,8 @@ import argparse
 import pickle
 import numpy as np
 from pathlib import Path
+import jax
+import jax.numpy as jnp
 
 
 def diagnose(name, arr, threshold=None):
@@ -234,6 +236,72 @@ def plot_diagnostics(dones, bad_rows, save_prefix):
 # ============================================================
 
 
+def generate_zero_action_data(num_transitions, dim_state, dataset_states, rollout_len=20):
+    """Generate transitions with zero actions using MJX cheetah env.
+
+    dim_state: 17 for TDMPC2 format (qpos[1:] + qvel), 18 for full (qpos + qvel)
+    dataset_states: existing states to sample init conditions from (50% of rollouts)
+    """
+    from max.environments import make_cheetah_env, EnvParams
+    from mujoco import mjx
+
+    env_params = EnvParams(cheetah_n_substeps=2, max_episode_steps=5000)
+    reset_fn, step_fn, get_obs_fn = make_cheetah_env(env_params)
+
+    # Get template data and mjx_model for state injection
+    from mujoco_playground import registry
+    env = registry.load('CheetahRun')
+    mjx_model = env.mjx_model
+
+    states_list, actions_list, rewards_list, dones_list = [], [], [], []
+    rng = np.random.default_rng(42)
+    key = jax.random.PRNGKey(0)
+    collected = 0
+    rollout_idx = 0
+
+    while collected < num_transitions:
+        key, reset_key = jax.random.split(key)
+        data = reset_fn(reset_key)  # Always reset first to get valid template
+
+        # 50% chance: init from random dataset state instead of reset
+        if rollout_idx % 2 == 1:
+            idx = rng.integers(len(dataset_states))
+            src_state = dataset_states[idx]
+            if dim_state == 17:
+                qpos = jnp.concatenate([jnp.zeros(1), jnp.array(src_state[:8])])
+                qvel = jnp.array(src_state[8:])
+            else:
+                qpos = jnp.array(src_state[:9])
+                qvel = jnp.array(src_state[9:])
+            data = data.replace(qpos=qpos, qvel=qvel)
+            data = mjx.forward(mjx_model, data)
+
+        zero_action = jnp.zeros((1, 6))
+        rollout_idx += 1
+
+        for step in range(rollout_len):
+            if dim_state == 17:
+                state = jnp.concatenate([data.qpos[1:], data.qvel])
+            else:
+                state = jnp.concatenate([data.qpos, data.qvel])
+
+            data, obs, rewards, terminated, truncated, info = step_fn(data, step, zero_action)
+
+            states_list.append(np.array(state))
+            actions_list.append(np.zeros(6))
+            rewards_list.append(float(rewards[0]))
+
+            done = (step == rollout_len - 1)
+            dones_list.append(1.0 if done else 0.0)
+            collected += 1
+
+            if collected >= num_transitions:
+                break
+
+    return (np.stack(states_list), np.stack(actions_list),
+            np.array(rewards_list), np.array(dones_list))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Inspect and clean MAX pkl file")
     parser.add_argument("--input", required=True, help="Input pkl file")
@@ -251,6 +319,12 @@ def main():
     parser.add_argument("--fraction", type=float, default=1.0,
                         help="Fraction of clean episodes to keep (0-1). "
                              "Randomly samples episodes after cleaning.")
+    parser.add_argument("--augment", action="store_true",
+                        help="Augment with zero-action rollouts")
+    parser.add_argument("--augment-ratio", type=float, default=0.2,
+                        help="Fraction of transitions to add (e.g., 0.2 = add 20%%)")
+    parser.add_argument("--augment-rollout-len", type=int, default=30,
+                        help="Steps per zero-action rollout")
     args = parser.parse_args()
 
     with open(args.input, "rb") as f:
@@ -322,6 +396,20 @@ def main():
         dones = dones[keep_mask]
         print(f"\nSubsampled {n_keep:,}/{n_eps:,} episodes ({args.fraction*100:.1f}%)")
         print(f"  Remaining transitions: {len(states):,}")
+
+    # --- Augment with zero-action rollouts ---
+    if args.augment:
+        dim_state = states.shape[1]
+        n_to_add = int(len(states) * args.augment_ratio)
+        print(f"\n=== Augmenting with {n_to_add:,} zero-action transitions ({dim_state}D states) ===")
+        print(f"  (50% from reset, 50% from random dataset states)")
+        aug_states, aug_actions, aug_rewards, aug_dones = generate_zero_action_data(
+            n_to_add, dim_state, states, args.augment_rollout_len)
+        states = np.concatenate([states, aug_states])
+        actions = np.concatenate([actions, aug_actions])
+        rewards = np.concatenate([rewards, aug_rewards])
+        dones = np.concatenate([dones, aug_dones])
+        print(f"  Total transitions after augmentation: {len(states):,}")
 
     # --- Post-clean diagnostics ---
     print("\n=== After cleaning ===")
