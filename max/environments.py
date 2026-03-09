@@ -62,6 +62,7 @@ class EnvParams:
 
     # Specific to cheetah
     cheetah_mass_scale: float = 1.0  # Multiplier for body masses (default 14kg total)
+    cheetah_n_substeps: int = 0      # 0 = use env default; set to 2 to match TDMPC2 50Hz
 
 
 
@@ -1236,7 +1237,7 @@ def make_cheetah_env(params: EnvParams):
 
     # Load environment and extract models (closed over)
     env = registry.load('CheetahRun')
-    n_substeps = env.n_substeps
+    n_substeps = params.cheetah_n_substeps if params.cheetah_n_substeps > 0 else env.n_substeps
 
     # Apply mass scaling if specified
     if params.cheetah_mass_scale != 1.0:
