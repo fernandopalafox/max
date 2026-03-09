@@ -469,7 +469,8 @@ def _stage_cost_cheetah_velocity_tracking(
     forward_vel = data.qvel[0]
 
     # Velocity tracking error
-    velocity_error = (forward_vel - target_velocity) ** 2
+    # velocity_error = (forward_vel - target_velocity) ** 2
+    velocity_error = -forward_vel  
 
     # Control penalty
     control_cost = weight_control * jnp.sum(control ** 2)
@@ -490,7 +491,8 @@ def _terminal_cost_cheetah_velocity_tracking(
 ) -> float:
     """Terminal cost: velocity tracking error only."""
     forward_vel = data.qvel[0]
-    return (forward_vel - target_velocity) ** 2
+    # return (forward_vel - target_velocity) ** 2
+    return -forward_vel
 
 
 def _rollout_cheetah(init_data, controls, cost_params, pred_fn):
