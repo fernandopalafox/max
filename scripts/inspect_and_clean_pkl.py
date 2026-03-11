@@ -236,6 +236,40 @@ def plot_diagnostics(dones, bad_rows, save_prefix):
 # ============================================================
 
 
+def plot_state_distributions(states, save_path, title_suffix=""):
+    """Plot per-dimension histograms of state distributions."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    dim_state = states.shape[1]
+    n_cols = min(dim_state, 6)
+    n_rows = (dim_state + n_cols - 1) // n_cols
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 3 * n_rows))
+    axes = np.atleast_2d(axes).flatten()
+
+    fig.suptitle(f"State Distributions {title_suffix}\n(n={len(states):,})",
+                 fontsize=12, fontweight="bold")
+
+    for d in range(dim_state):
+        ax = axes[d]
+        ax.hist(states[:, d], bins=50, alpha=0.7, color="steelblue", edgecolor="black")
+        ax.axvline(np.median(states[:, d]), color="red", linestyle="--",
+                   linewidth=1, label=f"med={np.median(states[:, d]):.2f}")
+        ax.set_title(f"dim {d}")
+        ax.legend(fontsize=8)
+
+    # Hide unused axes
+    for i in range(dim_state, len(axes)):
+        axes[i].axis("off")
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[PLOT] State distribution saved -> {save_path}")
+
+
 def generate_zero_action_data(num_transitions, dim_state, dataset_states, rollout_len=20):
     """Generate transitions with zero actions using MJX cheetah env.
 
@@ -264,17 +298,17 @@ def generate_zero_action_data(num_transitions, dim_state, dataset_states, rollou
         data = reset_fn(reset_key)  # Always reset first to get valid template
 
         # 50% chance: init from random dataset state instead of reset
-        if rollout_idx % 2 == 1:
-            idx = rng.integers(len(dataset_states))
-            src_state = dataset_states[idx]
-            if dim_state == 17:
-                qpos = jnp.concatenate([jnp.zeros(1), jnp.array(src_state[:8])])
-                qvel = jnp.array(src_state[8:])
-            else:
-                qpos = jnp.array(src_state[:9])
-                qvel = jnp.array(src_state[9:])
-            data = data.replace(qpos=qpos, qvel=qvel)
-            data = mjx.forward(mjx_model, data)
+        # if rollout_idx % 2 == 1:
+        #     idx = rng.integers(len(dataset_states))
+        #     src_state = dataset_states[idx]
+        #     if dim_state == 17:
+        #         qpos = jnp.concatenate([jnp.zeros(1), jnp.array(src_state[:8])])
+        #         qvel = jnp.array(src_state[8:])
+        #     else:
+        #         qpos = jnp.array(src_state[:9])
+        #         qvel = jnp.array(src_state[9:])
+        #     data = data.replace(qpos=qpos, qvel=qvel)
+        #     data = mjx.forward(mjx_model, data)
 
         zero_action = jnp.zeros((1, 6))
         rollout_idx += 1
@@ -397,6 +431,12 @@ def main():
         print(f"\nSubsampled {n_keep:,}/{n_eps:,} episodes ({args.fraction*100:.1f}%)")
         print(f"  Remaining transitions: {len(states):,}")
 
+    # --- Plot state distributions before augmentation ---
+    if args.plot and args.augment:
+        save_prefix = str(Path(args.input).with_suffix(""))
+        plot_state_distributions(states, f"{save_prefix}_states_before_aug.png",
+                                 "(before augmentation)")
+
     # --- Augment with zero-action rollouts ---
     if args.augment:
         dim_state = states.shape[1]
@@ -410,6 +450,11 @@ def main():
         rewards = np.concatenate([rewards, aug_rewards])
         dones = np.concatenate([dones, aug_dones])
         print(f"  Total transitions after augmentation: {len(states):,}")
+
+    # --- Plot state distributions after augmentation ---
+    if args.plot and args.augment:
+        plot_state_distributions(states, f"{save_prefix}_states_after_aug.png",
+                                 "(after augmentation)")
 
     # --- Post-clean diagnostics ---
     print("\n=== After cleaning ===")
