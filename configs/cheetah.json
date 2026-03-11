@@ -22,9 +22,11 @@
       "pretrained_params_path": null
     },
 
-    "trainer": "gd",
+    "trainer": "latent_gd",
     "trainer_params": {
-      "learning_rate": 1e-4
+      "learning_rate": 1e-4,
+      "multistep_horizon": 5,
+      "temporal_coefficient": 0.5
     },
 
     "checkpoint_enabled": true,

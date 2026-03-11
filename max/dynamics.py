@@ -12,7 +12,10 @@ from max.normalizers import Normalizer, init_normalizer
 class DynamicsModel(NamedTuple):
     pred_one_step: Callable[[Any, jnp.ndarray, jnp.ndarray], jnp.ndarray]
     pred_norm_delta: Callable[[Any, jnp.ndarray, jnp.ndarray], jnp.ndarray]
-    pred_one_step_with_info: Callable[[Any, jnp.ndarray, jnp.ndarray], tuple] = None
+    pred_one_step_with_info: Optional[Callable[[Any, jnp.ndarray, jnp.ndarray], tuple]] = None
+    encode: Optional[Callable[[Any, jnp.ndarray], jnp.ndarray]] = None
+    infer_dynamics: Optional[Callable[[Any, jnp.ndarray, jnp.ndarray], jnp.ndarray]] = None
+    decode: Optional[Callable[[Any, jnp.ndarray], jnp.ndarray]] = None
 
 
 def create_mlp_resnet(
@@ -2622,30 +2625,52 @@ def create_latent_dynamics(
     params = {"model": model_params, "normalizer": normalizer_params}
 
     @jax.jit
+    def encode(params: Any, norm_state: jnp.ndarray) -> jnp.ndarray:
+        return encoder_net.apply(params["model"]["encoder"], norm_state)
+
+    @jax.jit
+    def infer_dynamics(params: Any, z: jnp.ndarray, norm_action: jnp.ndarray) -> jnp.ndarray:
+        return dynamics_net.apply(
+            params["model"]["dynamics"],
+            jnp.concatenate([z, norm_action], axis=-1)
+        )
+
+    @jax.jit
+    def decode(params: Any, z: jnp.ndarray) -> jnp.ndarray:
+        return decoder_net.apply(params["model"]["decoder"], z)
+
+    @jax.jit
     def pred_norm_delta(
         params: Any, state: jnp.ndarray, action: jnp.ndarray
     ) -> jnp.ndarray:
         """Returns normalized observation-space delta (decoder output)."""
         norm_params = params["normalizer"]
-        model_p = params["model"]
         norm_state = normalizer.normalize(norm_params["state"], state)
         norm_action = normalizer.normalize(norm_params["action"], action)
-        z = encoder_net.apply(model_p["encoder"], norm_state)
-        z_next = dynamics_net.apply(
-            model_p["dynamics"], jnp.concatenate([z, norm_action], axis=-1)
-        )
-        return decoder_net.apply(model_p["decoder"], z_next)
+        z = encode(params, norm_state)
+        z_next = infer_dynamics(params, z, norm_action)
+        return decode(params, z_next)
 
     @jax.jit
     def pred_one_step(
         params: Any, state: jnp.ndarray, action: jnp.ndarray
     ) -> jnp.ndarray:
-        """Predicts the absolute next state using a residual."""
-        norm_delta = pred_norm_delta(params, state, action)
-        delta = normalizer.unnormalize(params["normalizer"]["delta"], norm_delta)
-        return state + delta
+        """Predicts the absolute next state."""
+        norm_params = params["normalizer"]
+        norm_state = normalizer.normalize(norm_params["state"], state)
+        norm_action = normalizer.normalize(norm_params["action"], action)
+        z = encode(params, norm_state)
+        z_next = infer_dynamics(params, z, norm_action)
+        norm_next_state = decode(params, z_next)
+        return normalizer.unnormalize(norm_params["state"], norm_next_state)
 
-    return DynamicsModel(pred_one_step=pred_one_step, pred_norm_delta=pred_norm_delta), params
+    return DynamicsModel(
+        pred_one_step=pred_one_step,
+        pred_norm_delta=pred_norm_delta,
+        encode=encode,
+        infer_dynamics=infer_dynamics,
+        decode=decode,
+    ), params
 
 
 def init_dynamics(

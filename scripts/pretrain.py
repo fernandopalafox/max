@@ -56,17 +56,40 @@ def main(config):
     train_eps = [episodes[i] for i in ep_perm[:n_train_ep]]
     test_eps  = [episodes[i] for i in ep_perm[n_train_ep:]]
 
-    # Flatten episodes into transitions
+    # Flatten episodes into transitions (or sequential windows for multi-step)
+    multistep_horizon = config.get("trainer_params", {}).get("multistep_horizon", 1)
+
     def flatten_episodes(eps):
         s, a, ns = [], [], []
         for ep in eps:
             s.append(ep["states"][:-1])
             a.append(ep["actions"])
             ns.append(ep["states"][1:])
-        return {"states": np.concatenate(s), "actions": np.concatenate(a), "next_states": np.concatenate(ns)}
+        return {
+            "states": np.concatenate(s),
+            "actions": np.concatenate(a),
+            "next_states": np.concatenate(ns),
+        }
 
-    train_data = flatten_episodes(train_eps)
-    test_data  = flatten_episodes(test_eps)
+    def flatten_episodes_multistep(eps, horizon):
+        """Create sequential windows of length horizon from episodes."""
+        all_states, all_actions = [], []
+        for ep in eps:
+            T = len(ep["actions"])
+            for t in range(T - horizon + 1):
+                all_states.append(ep["states"][t : t + horizon + 1])
+                all_actions.append(ep["actions"][t : t + horizon])
+        return {
+            "states": np.stack(all_states),   # (N, H+1, dim_s)
+            "actions": np.stack(all_actions), # (N, H, dim_a)
+        }
+
+    if multistep_horizon == 1:
+        train_data = flatten_episodes(train_eps)
+        test_data = flatten_episodes(test_eps)
+    else:
+        train_data = flatten_episodes_multistep(train_eps, multistep_horizon)
+        test_data = flatten_episodes_multistep(test_eps, multistep_horizon)
 
     # Pick visualization episodes (one from each split)
     key, vis_key = jax.random.split(key)
@@ -128,15 +151,95 @@ def main(config):
 
     # JIT'd loss function over a single batch (GPU)
     # Compute loss in normalized delta space
-    vmap_pred_norm_delta = jax.vmap(dynamics_model.pred_norm_delta, in_axes=(None, 0, 0))
+    vmap_pred_norm_delta = jax.vmap(
+        dynamics_model.pred_norm_delta, in_axes=(None, 0, 0)
+    )
     vmap_normalize = jax.vmap(normalizer.normalize, in_axes=(None, 0))
 
-    @jax.jit
-    def compute_loss(params, states, actions, next_states):
-        pred_norm_delta = vmap_pred_norm_delta(params, states, actions)
-        target_delta = next_states - states
-        target_norm_delta = vmap_normalize(norm_params["delta"], target_delta)
-        return jnp.mean((pred_norm_delta - target_norm_delta) ** 2)
+    trainer_type = config.get("trainer", "gd")
+
+    if trainer_type == "latent_gd":
+        temporal_coefficient = config.get("trainer_params", {}).get("temporal_coefficient", 0.5)
+
+        def rollout_one_latent(params, init_state, action_seq, true_states):
+            H = action_seq.shape[0]
+            norm_true_states = jax.vmap(normalizer.normalize, in_axes=(None, 0))(
+                norm_params["state"], true_states
+            )
+            target_zs = jax.vmap(dynamics_model.encode, in_axes=(None, 0))(
+                params, norm_true_states
+            )
+            norm_init = normalizer.normalize(norm_params["state"], init_state)
+            z0 = dynamics_model.encode(params, norm_init)
+
+            def step(z, t_action):
+                t, action = t_action
+                norm_action = normalizer.normalize(norm_params["action"], action)
+                z_next = dynamics_model.infer_dynamics(params, z, norm_action)
+                return z_next, (t, z_next)
+
+            _, (timesteps, pred_zs) = jax.lax.scan(
+                step, z0, (jnp.arange(H), action_seq)
+            )
+            weights = temporal_coefficient ** (timesteps + 1)
+
+            sg_target_zs = jax.lax.stop_gradient(target_zs[1:])
+            consistency_errs = jnp.mean((pred_zs - sg_target_zs) ** 2, axis=-1)
+            consistency_loss = jnp.sum(weights * consistency_errs) / jnp.sum(weights)
+
+            sg_pred_zs = jax.lax.stop_gradient(pred_zs)
+            pred_norm_next_states = jax.vmap(dynamics_model.decode, in_axes=(None, 0))(
+                params, sg_pred_zs
+            )
+            decoder_errs = jnp.mean((pred_norm_next_states - norm_true_states[1:]) ** 2, axis=-1)
+            decoder_loss = jnp.sum(weights * decoder_errs) / jnp.sum(weights)
+
+            return consistency_loss + decoder_loss
+
+        vmap_rollout_latent = jax.vmap(rollout_one_latent, in_axes=(None, 0, 0, 0))
+
+        @jax.jit
+        def compute_loss(params, data):
+            states = data["states"]    # (batch, H+1, dim_s)
+            actions = data["actions"]  # (batch, H, dim_a)
+            init_states = states[:, 0]
+            losses = vmap_rollout_latent(params, init_states, actions, states)
+            return jnp.mean(losses)
+
+    elif multistep_horizon == 1:
+        @jax.jit
+        def compute_loss(params, data):
+            states, actions, next_states = (
+                data["states"], data["actions"], data["next_states"]
+            )
+            pred_norm_delta = vmap_pred_norm_delta(params, states, actions)
+            target_delta = next_states - states
+            target_norm_delta = vmap_normalize(norm_params["delta"], target_delta)
+            return jnp.mean((pred_norm_delta - target_norm_delta) ** 2)
+    else:
+        def rollout_one(params, init_state, action_seq, true_states):
+            """Autoregressive rollout for single sample, returns MSE."""
+            def step(state, action):
+                next_state = dynamics_model.pred_one_step(params, state, action)
+                return next_state, next_state
+
+            _, pred_states = jax.lax.scan(step, init_state, action_seq)
+            all_states = jnp.concatenate([init_state[None], pred_states], axis=0)
+            pred_deltas = all_states[1:] - all_states[:-1]
+            true_deltas = true_states[1:] - true_states[:-1]
+            pred_norm = vmap_normalize(norm_params["delta"], pred_deltas)
+            true_norm = vmap_normalize(norm_params["delta"], true_deltas)
+            return jnp.mean((pred_norm - true_norm) ** 2)
+
+        vmap_rollout = jax.vmap(rollout_one, in_axes=(None, 0, 0, 0))
+
+        @jax.jit
+        def compute_loss(params, data):
+            states = data["states"]    # (batch, H+1, dim_s)
+            actions = data["actions"]  # (batch, H, dim_a)
+            init_states = states[:, 0]
+            losses = vmap_rollout(params, init_states, actions, states)
+            return jnp.mean(losses)
 
     def compute_loss_batched(params, data, batch_size):
         """Compute loss over data in CPU numpy, transferring one batch at a time."""
@@ -144,12 +247,8 @@ def main(config):
         losses = []
         for i in range(0, n, batch_size):
             sl = slice(i, i + batch_size)
-            loss = compute_loss(
-                params,
-                jnp.array(data["states"][sl]),
-                jnp.array(data["actions"][sl]),
-                jnp.array(data["next_states"][sl]),
-            )
+            batch = {k: jnp.array(v[sl]) for k, v in data.items()}
+            loss = compute_loss(params, batch)
             losses.append(float(loss))
         return np.mean(losses)
 
