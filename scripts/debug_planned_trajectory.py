@@ -260,11 +260,9 @@ def run_mpc_comparison(config, data_path, episode_idx, seed_icem=False, use_gt_d
     key, planner_key = jax.random.split(key)
     planner, planner_state = init_planner(config, cost_fn, planner_key)
 
-    target_velocity = config["cost_fn_params"]["target_velocity"]
     cost_params = {
         "dyn_params": train_state.params,
         "params_cov_model": train_state.covariance,
-        "target_velocity": target_velocity,
     }
 
     # Run MPC rollout with MJX stepping
@@ -295,14 +293,12 @@ def run_mpc_comparison(config, data_path, episode_idx, seed_icem=False, use_gt_d
     print(f"\n=== Velocity Stats ===")
     print(f"  TDMPC2 GT mean vel_x: {np.mean(vel_x_gt):.2f} m/s")
     print(f"  MPC mean vel_x: {np.mean(vel_x_mpc):.2f} m/s")
-    print(f"  Target vel_x: {target_velocity:.2f} m/s")
 
     # Plot velocity comparison
     fig, ax = plt.subplots(figsize=(10, 5))
     timesteps = np.arange(len(vel_x_gt)) * 0.01
     ax.plot(timesteps, vel_x_gt, label="TDMPC2 Ground Truth", linewidth=2)
     ax.plot(timesteps[:len(vel_x_mpc)], vel_x_mpc, label=label, linewidth=2, linestyle="--")
-    ax.axhline(target_velocity, color="red", linestyle=":", label=f"Target ({target_velocity:.1f} m/s)")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Velocity (m/s)")
     ax.set_title("Forward Velocity: TDMPC2 vs iCEM MPC")
@@ -385,11 +381,9 @@ def run_prediction_drift_test(config):
     key, planner_key = jax.random.split(key)
     planner, planner_state = init_planner(config, cost_fn, planner_key)
 
-    target_velocity = config["cost_fn_params"]["target_velocity"]
     cost_params = {
         "dyn_params": train_state.params,
         "params_cov_model": train_state.covariance,
-        "target_velocity": target_velocity,
     }
 
     # Reset MJX to get initial state
@@ -452,7 +446,6 @@ def run_prediction_drift_test(config):
     print(f"\n  vel_x comparison:")
     print(f"    Predicted mean: {vel_x_pred.mean():.2f} m/s")
     print(f"    Actual mean:    {vel_x_actual.mean():.2f} m/s")
-    print(f"    Target:         {target_velocity:.2f} m/s")
 
     # === Plotting ===
     timesteps = np.arange(horizon + 1) * 0.02  # dt = 0.02s
@@ -463,7 +456,6 @@ def run_prediction_drift_test(config):
     ax = axes[0, 0]
     ax.plot(timesteps, vel_x_pred, label="Learned Model (iCEM's belief)", linewidth=2)
     ax.plot(timesteps, vel_x_actual, label="MJX Simulator (reality)", linewidth=2, linestyle="--")
-    ax.axhline(target_velocity, color="red", linestyle=":", label=f"Target ({target_velocity:.1f} m/s)")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("vel_x (m/s)")
     ax.set_title("Forward Velocity: Predicted vs Actual")
@@ -545,11 +537,9 @@ def run_multi_episode_analysis(config, data_path, num_episodes):
     key, planner_key = jax.random.split(key)
     planner, planner_state = init_planner(config, cost_fn, planner_key)
 
-    target_velocity = config["cost_fn_params"]["target_velocity"]
     cost_params = {
         "dyn_params": train_state.params,
         "params_cov_model": train_state.covariance,
-        "target_velocity": target_velocity,
     }
 
     horizon = config["planner_params"]["horizon"]
@@ -666,11 +656,9 @@ def main(config, tdmpc2_episode=None, data_path=None, compare_icem=False, seed_i
             key, planner_key = jax.random.split(key)
             planner, planner_state = init_planner(config, cost_fn, planner_key)
 
-            target_velocity = config["cost_fn_params"]["target_velocity"]
             cost_params = {
                 "dyn_params": train_state.params,
                 "params_cov_model": train_state.covariance,
-                "target_velocity": target_velocity,
             }
 
             key, planner_key = jax.random.split(key)
@@ -718,15 +706,12 @@ def main(config, tdmpc2_episode=None, data_path=None, compare_icem=False, seed_i
         planner, planner_state = init_planner(config, cost_fn, planner_key)
 
         # Set up cost params
-        target_velocity = config["cost_fn_params"]["target_velocity"]
         cost_params = {
             "dyn_params": train_state.params,
             "params_cov_model": train_state.covariance,
-            "target_velocity": target_velocity,
         }
 
         # Compute full action trajectory using iCEM
-        print(f"Planning trajectory (target velocity: {target_velocity} m/s)...")
         key, planner_key = jax.random.split(key)
         planner_state = planner_state.replace(key=planner_key)
         actions, planner_state = planner.solve(planner_state, init_obs, cost_params)
@@ -842,19 +827,15 @@ def main(config, tdmpc2_episode=None, data_path=None, compare_icem=False, seed_i
         })
     else:
         # Original iCEM mode
-        target_velocity = config["cost_fn_params"]["target_velocity"]
         print("\nPredicted trajectory stats:")
         print(f"  Initial vel_x: {vel_x_pred[0]:.2f} m/s")
         print(f"  Final vel_x: {vel_x_pred[-1]:.2f} m/s")
         print(f"  Mean vel_x: {np.mean(vel_x_pred):.2f} m/s")
-        print(f"  Target vel: {target_velocity:.2f} m/s")
 
         # Plot velocity
         fig, ax = plt.subplots(figsize=(10, 5))
         timesteps = np.arange(len(vel_x_pred)) * 0.01
         ax.plot(timesteps, vel_x_pred, label="Predicted vel_x", linewidth=2)
-        ax.axhline(target_velocity, color="red", linestyle="--",
-                   label=f"Target ({target_velocity:.1f} m/s)")
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Velocity (m/s)")
         ax.set_title("Predicted Forward Velocity (Learned Model)")
