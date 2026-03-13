@@ -5,7 +5,7 @@
     "data_path": "./data/cheetah_data/cheetah_run_tdmpc2_clean_small_aug.pkl",
     "save_path": "./data/pretrained_models/cheetah",
 
-    "num_epochs": 264,
+    "num_epochs": 1000,
     "batch_size": 256,
     "train_split": 0.8,
 
@@ -14,8 +14,8 @@
 
     "dynamics": "latent_dynamics",
     "dynamics_params": {
-      "encoder_features": [256, 512],
-      "dynamics_features": [512, 512, 512],
+      "encoder_features": [256, 128],
+      "dynamics_features": [512, 512, 128],
       "decoder_features": [512, 256],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
@@ -62,40 +62,41 @@
     "plot_eval": true,
     "env_name": "cheetah",
     "num_agents": 1,
-    "total_steps": 50,
+    "total_steps": 1000,
     "dim_state": 17,
     "dim_action": 6,
-    "train_model_freq": 1001,
+    "train_model_freq": 1,
     "train_policy_freq": 1,
     "normalize_freq": 1000000,
-    "eval_freq": 10,
+    "eval_freq": 500,
     "buffer_size": 5000,
 
     "evaluator_type": "rollout",
     "evaluator_params": {
       "seed": 123,
-      "max_steps": 300,
+      "max_steps": 150,
       "num_episodes": 2,
-      "eval_cost_types": ["cheetah_velocity_tracking_learned"],
+      "eval_cost_types": ["cheetah_velocity_learned"],
       "env_params": {},
       "dynamics_params": {},
       "planner_params": {},
-      "cost_type": "cheetah_velocity_tracking_learned",
+      "cost_type": "cheetah_velocity_learned",
       "cost_fn_params": {
-        "target_velocity": 2.5,
         "weight_control": 0.1,
         "heading_penalty_factor": 10.0
       }
     },
 
-    "dynamics": "latent_dynamics",
+    "dynamics": "latent_dynamics_lora",
     "dynamics_params": {
-      "encoder_features": [256, 512],
-      "dynamics_features": [512, 512, 512],
+      "encoder_features": [256, 128],
+      "dynamics_features": [512, 512, 128],
       "decoder_features": [512, 256],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
-      "pretrained_params_path": "./data/pretrained_models/cheetah/20260309_171349/latent_dynamics_cheetah_run_tdmpc2_clean_small_aug.pkl"
+      "svd_rank": 16,
+      "r_init_std": 1e-5,
+      "pretrained_params_path": "./data/pretrained_models/cheetah/20260311_180621/latent_dynamics_cheetah_run_tdmpc2_clean_small_aug.pkl"
     },
 
     "env_params": {
@@ -105,11 +106,17 @@
       "cheetah_n_substeps": 2
     },
 
-    "trainer": "gd",
+    "trainer": "latent_gd",
     "trainer_params": {
-      "learning_rate": 10.0,
-      "init_cov_scale": 10.0,
-      "jitter": 0.0
+      "learning_rate": 3e-4,
+      "temporal_coefficient": 0.5
+    },
+
+    "sampler": {
+      "type": "trajectory_batch",
+      "batch_size": 256,
+      "horizon": 3,
+      "min_buffer_size": 259
     },
 
     "normalization": { "method": "static" },
@@ -134,12 +141,12 @@
       "vel_fthigh", "vel_fshin", "vel_ffoot"
     ],
 
-    "cost_type": "cheetah_velocity_tracking_learned_info",
+    "cost_type": "cheetah_velocity_learned_info",
     "planner_type": "icem",
     "planner_params": {
-      "horizon": 200,
+      "horizon": 30,
       "batch_size": 500,
-      "max_iter": 5,
+      "max_iter": 1,
       "elit_frac": 0.1,
       "learning_rate": 0.9,
       "colored_noise_beta": 0.25,
@@ -150,10 +157,10 @@
     },
 
     "cost_fn_params": {
-      "target_velocity": 2.5,
       "weight_control": 0.1,
       "heading_penalty_factor": 10.0,
       "weight_info": 0.0,
+      "info_steps": 30,
       "meas_noise_diag": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01,
                           0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
     }

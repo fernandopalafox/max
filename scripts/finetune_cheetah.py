@@ -18,6 +18,7 @@ from max.buffers import init_jax_buffers, update_buffer_dynamic
 from max.environments import make_cheetah_env, EnvParams
 from max.dynamics import init_dynamics
 from max.dynamics_trainers import init_trainer
+from max.samplers import init_sampler
 from max.dynamics_evaluators import init_evaluator
 from max.planners import init_planner
 from max.costs import init_cost
@@ -31,8 +32,8 @@ import json
 from collect_data_cheetah import create_cheetah_xy_animation
 
 
-def plot_cheetah_velocity(buffers, buffer_idx, config, target_velocity):
-    """Plot forward velocity and target velocity over time."""
+def plot_cheetah_velocity(buffers, buffer_idx, config):
+    """Plot forward velocity over time."""
     # Extract states (agent 0, valid timesteps only)
     states = np.array(buffers["states"][0, :buffer_idx, :])
 
@@ -44,15 +45,35 @@ def plot_cheetah_velocity(buffers, buffer_idx, config, target_velocity):
 
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(time, forward_vel, label="Forward Velocity", color="blue", linewidth=2)
-    ax.axhline(target_velocity, color="red", linestyle="--", label=f"Target ({target_velocity:.2f} m/s)")
 
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Velocity (m/s)")
-    ax.set_title("Cheetah Forward Velocity Tracking")
+    ax.set_title("Cheetah Forward Velocity")
     ax.legend(loc="best")
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
 
+    return fig
+
+
+def plot_action_trajectory(buffers, buffer_idx, config):
+    """Plot applied actions over time."""
+    actions = np.array(buffers["actions"][0, :buffer_idx, :])  # (T, dim_action)
+    dt = 0.01
+    time_axis = np.arange(buffer_idx) * dt
+    dim_action = actions.shape[1]
+
+    fig, axes = plt.subplots(dim_action, 1, figsize=(12, 2 * dim_action), sharex=True)
+    if dim_action == 1:
+        axes = [axes]
+    for i, ax in enumerate(axes):
+        ax.plot(time_axis, actions[:, i], lw=1.5)
+        ax.set_ylabel(f"a{i}")
+        ax.set_ylim(-1.05, 1.05)
+        ax.grid(True, alpha=0.3)
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle("Applied Actions", fontsize=10)
+    plt.tight_layout()
     return fig
 
 
@@ -121,6 +142,11 @@ def main(config):
     )
     print(f"[{time.time()-t0:.2f}s] Trainer initialized")
 
+    # Initialize sampler
+    print(f"[{time.time()-t0:.2f}s] Initializing sampler...")
+    sampler = init_sampler(config["sampler"])
+    print(f"[{time.time()-t0:.2f}s] Sampler initialized")
+
     # Count trainable parameters
     num_params = sum(x.size for x in jax.tree_util.tree_leaves(train_state.params))
     wandb.config.update({"num_params": num_params})
@@ -152,13 +178,7 @@ def main(config):
     buffer_idx = 0
     print(f"[{time.time()-t0:.2f}s] Buffers initialized")
 
-    # Fixed target velocity from config
-    target_velocity = config["cost_fn_params"]["target_velocity"]
-
-    print(
-        f"Starting cheetah finetuning for {config['total_steps']} steps "
-        f"(target velocity: {target_velocity} m/s)"
-    )
+    print(f"Starting cheetah finetuning for {config['total_steps']} steps")
 
     episode_length = 0
 
@@ -216,7 +236,6 @@ def main(config):
         cost_params = {
             "dyn_params": train_state.params,
             "params_cov_model": train_state.covariance,
-            "target_velocity": target_velocity,
         }
         key, planner_key = jax.random.split(key)
         planner_state = planner_state.replace(key=planner_key)
@@ -260,11 +279,8 @@ def main(config):
 
         # Log step metrics
         _t0 = time.time()
-        velocity_error = (info["forward_vel"] - target_velocity) ** 2
         wandb.log({
             "step/forward_vel": float(info["forward_vel"]),
-            "step/target_velocity": target_velocity,
-            "step/velocity_error": float(velocity_error),
         }, step=step)
         dt_wandb = time.time() - _t0
 
@@ -291,21 +307,18 @@ def main(config):
                 episode_reward_components[info_key] = 0.0
 
         # Train model
-        # buffer_idx >= 2 to ensure we have at least one full transition
         dt_train = 0.0
-        if step % config["train_model_freq"] == 0 and buffer_idx >= 2:
+        if step % config["train_model_freq"] == 0:
             _t0 = time.time()
-            train_data = {
-                "states": buffers["states"][0, buffer_idx - 2 : buffer_idx - 1, :],
-                "actions": buffers["actions"][0, buffer_idx - 2 : buffer_idx - 1, :],
-                "next_states": buffers["states"][0, buffer_idx - 1 : buffer_idx, :],
-            }
-            train_state, loss = trainer.train(train_state, train_data, step=step)
-            total_accumulated_loss += float(loss)
-            wandb.log({
-                "train/model_loss": float(loss),
-                "train/total_accumulated_loss": total_accumulated_loss
-            }, step=step)
+            key, sample_key = jax.random.split(key)
+            train_data = sampler.sample(sample_key, buffers, buffer_idx)
+            if train_data is not None:
+                train_state, loss = trainer.train(train_state, train_data, step=step)
+                total_accumulated_loss += float(loss)
+                wandb.log({
+                    "train/model_loss": float(loss),
+                    "train/total_accumulated_loss": total_accumulated_loss
+                }, step=step)
             dt_train = time.time() - _t0
             t_train += dt_train
 
@@ -377,7 +390,7 @@ def main(config):
     # Plot and log trajectory
     if plot_run and buffer_idx > 0:
         print("\nGenerating velocity plot...")
-        fig = plot_cheetah_velocity(buffers, buffer_idx, config, target_velocity)
+        fig = plot_cheetah_velocity(buffers, buffer_idx, config)
         wandb.log({"trajectory/velocity_plot": wandb.Image(fig)}, step=config["total_steps"])
         plt.close(fig)
         print("Velocity plot logged to wandb.")
@@ -389,6 +402,12 @@ def main(config):
         )
         plt.close(fig)
         print("State components plot logged to wandb.")
+
+        print("Generating action trajectory plot...")
+        fig = plot_action_trajectory(buffers, buffer_idx, config)
+        wandb.log({"trajectory/actions": wandb.Image(fig)}, step=config["total_steps"])
+        plt.close(fig)
+        print("Action trajectory plot logged to wandb.")
 
         # Generate animation from full 18D states
         if len(full_states_for_animation) > 0:
