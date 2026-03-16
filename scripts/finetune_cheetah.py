@@ -181,12 +181,7 @@ def main(config):
     print(f"Starting cheetah finetuning for {config['total_steps']} steps")
 
     episode_length = 0
-
-    # Reward component accumulators
-    reward_component_keys_to_avg = ["forward_vel"]
-    episode_reward_components = {
-        info_key: 0.0 for info_key in reward_component_keys_to_avg
-    }
+    episode_total_reward = 0.0
 
     # Initial covariance tracking
     initial_cov_trace_per_param = None
@@ -205,6 +200,14 @@ def main(config):
     }
     initial_metrics["eval/cov_trace_delta"] = 0.0
     wandb.log(initial_metrics, step=0)
+
+    if plot_eval and "trajectory" in eval_results:
+        print(f"[{time.time()-t0:.2f}s] Generating initial eval animation...")
+        traj = eval_results["trajectory"]
+        full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
+        gif_path = create_cheetah_xy_animation(full_states)
+        wandb.log({"eval/animation": wandb.Video(gif_path, fps=20, format="gif")}, step=0)
+        print(f"[{time.time()-t0:.2f}s] Initial eval animation logged.")
 
     # Track 18D states for animation (includes rootx)
     full_states_for_animation = []
@@ -247,7 +250,7 @@ def main(config):
 
         # Step environment with MJX ground truth
         _t0 = time.time()
-        mjx_data, next_obs, rewards, terminated, truncated, info = step_fn(
+        mjx_data, next_obs, rewards, terminated, truncated, _ = step_fn(
             mjx_data, episode_length, action
         )
         dt_step = time.time() - _t0
@@ -255,10 +258,7 @@ def main(config):
         next_obs = next_obs.squeeze()  # 17D
         done = terminated or truncated
         episode_length += 1
-
-        # Track rewards
-        for info_key in reward_component_keys_to_avg:
-            episode_reward_components[info_key] += float(info[info_key])
+        episode_total_reward += float(rewards[0])
 
         # Update buffer with 17D observations
         _t0 = time.time()
@@ -277,12 +277,7 @@ def main(config):
 
         current_obs = next_obs
 
-        # Log step metrics
-        _t0 = time.time()
-        wandb.log({
-            "step/forward_vel": float(info["forward_vel"]),
-        }, step=step)
-        dt_wandb = time.time() - _t0
+        dt_wandb = 0.0
 
         # Reset environment if done
         dt_reset = 0.0
@@ -296,15 +291,12 @@ def main(config):
             print(f"Episode finished at step {step}.")
 
             # Log and reset episode stats
-            episode_log = {"episode/length": episode_length}
-            if episode_length > 0:
-                for info_key in reward_component_keys_to_avg:
-                    avg_val = episode_reward_components[info_key] / episode_length
-                    episode_log[f"rewards/{info_key}"] = float(avg_val)
-            wandb.log(episode_log, step=step)
+            wandb.log({
+                "episode/length": episode_length,
+                "rewards/episode_reward": episode_total_reward,
+            }, step=step)
             episode_length = 0
-            for info_key in episode_reward_components:
-                episode_reward_components[info_key] = 0.0
+            episode_total_reward = 0.0
 
         # Train model
         dt_train = 0.0
