@@ -16,7 +16,7 @@ from max.environments import init_env
 from max.dynamics import init_dynamics
 from max.dynamics_trainers import init_trainer
 from max.planners import init_planner
-from max.rewards import init_cost
+from max.rewards import init_reward
 import argparse
 import os
 import pickle
@@ -546,10 +546,10 @@ def main(config, save_dir):
         config, dynamics_model, init_params, trainer_key
     )
 
-    cost_fn = init_cost(config, dynamics_model)
+    reward_fn = init_reward(config, dynamics_model)
 
     key, planner_key = jax.random.split(key)
-    planner, planner_state = init_planner(config, cost_fn, planner_key)
+    planner, planner_state = init_planner(config, reward_fn, planner_key)
 
     # Create JIT-compiled episode collection function
     dim_obs = config.get("dim_obs", 17)

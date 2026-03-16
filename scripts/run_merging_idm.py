@@ -12,7 +12,7 @@ from max.dynamics import init_dynamics
 from max.dynamics_trainers import init_trainer
 from max.dynamics_evaluators import DynamicsEvaluator
 from max.planners import init_planner
-from max.rewards import init_cost
+from max.rewards import init_reward
 import argparse
 import copy
 import os
@@ -288,7 +288,7 @@ def main(config, save_dir):
     }
 
     # Initialize cost function
-    cost_fn = init_cost(config, dynamics_model)
+    reward_fn = init_reward(config, dynamics_model)
 
     # Initialize planner
     key, planner_key = jax.random.split(key)
