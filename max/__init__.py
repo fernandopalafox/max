@@ -2,45 +2,25 @@
 MAX: A JAX-based Reinforcement Learning Library
 ================================================
 
-A modular library for model-based and model-free reinforcement learning
-with first-class support for multi-agent systems.
+A modular library for model-based reinforcement learning
+with first-class support for the HalfCheetah environment.
 
 Core Modules:
-- environments: Multi-agent tracking and pursuit-evasion environments
+- environments: Cheetah environment wrapper
 - dynamics: Learned dynamics models (MLP, PETS)
-- policies: Actor-critic policies and model-based planners
-- policy_trainers: PPO and IPPO training algorithms
 - trainers: Dynamics model training (GD, EKF, PETS)
 - normalizers: State/action/reward normalization
 - buffers: JAX-based replay buffers
 - planners: Model-based planning (CEM, iCEM)
-- policy_evaluators: Policy evaluation utilities
 - evaluation: Dynamics model evaluation
 - estimators: EKF and state estimation
-- solvers: LQR and other control solvers
 """
 
 __version__ = "0.1.0"
 
 # Core components
-from max.environments import init_env, make_env, make_pursuit_evasion_env
-from max.dynamics import (
-    DynamicsModel,
-    create_mlp_resnet,
-    create_analytical_pendulum,
-)
-from max.policies import (
-    Policy,
-    PolicyState,
-    init_policy,
-    create_actor_critic_policy,
-)
-from max.policy_trainers import (
-    PolicyTrainer,
-    PolicyTrainState,
-    init_policy_trainer,
-    create_ippo_policy_trainer,
-)
+from max.environments import init_env
+from max.dynamics import DynamicsModel
 from max.dynamics_trainers import (
     Trainer,
     TrainState,
@@ -56,7 +36,6 @@ from max.normalizers import (
 )
 from max.buffers import init_jax_buffers, update_buffer_dynamic
 from max.planners import Planner, PlannerState, init_planner
-from max.policy_evaluators import evaluate_policy
 from max.dynamics_evaluators import init_evaluator
 
 __all__ = [
@@ -64,23 +43,8 @@ __all__ = [
     "__version__",
     # Environments
     "init_env",
-    "make_env",
-    "make_pursuit_evasion_env",
     # Dynamics
     "DynamicsModel",
-    "create_mlp_resnet",
-    "create_analytical_pendulum",
-    # Policies
-    "Policy",
-    "PolicyState",
-    "init_policy",
-    "create_actor_critic_policy",
-    # Policy Trainers
-    "PolicyTrainer",
-    "PolicyTrainState",
-    "init_policy_trainer",
-    "create_ppo_policy_trainer",
-    "create_ippo_policy_trainer",
     # Trainers
     "Trainer",
     "TrainState",
@@ -100,6 +64,5 @@ __all__ = [
     "PlannerState",
     "init_planner",
     # Evaluation
-    "evaluate_policy",
-    "DynamicsEvaluator",
+    "init_evaluator",
 ]

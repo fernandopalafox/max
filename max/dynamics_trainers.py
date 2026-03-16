@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from typing import Callable, Any, NamedTuple, Optional
-from max.dynamics import DynamicsModel, PETSDynamicsModel
+from max.dynamics import DynamicsModel
 from flax import struct
 from flax.traverse_util import path_aware_map
 import jax.flatten_util
@@ -60,10 +60,6 @@ def init_trainer(
     elif trainer_type == "ekf_efficient":
         trainer, train_state = create_EKF_efficient_trainer(
             config, dynamics_model, init_params
-        )
-    elif trainer_type == "pets":
-        trainer, train_state = create_probabilistic_ensemble_trainer(
-            config, dynamics_model, init_params, key
         )
     else:
         raise ValueError(f"Unknown trainer type: {trainer_type}")
@@ -517,114 +513,3 @@ def create_EKF_efficient_trainer(
 
     return Trainer(train_fn=train_fn), train_state
 
-
-def create_probabilistic_ensemble_trainer(
-    config: Any,
-    dynamics_model: PETSDynamicsModel,
-    init_params: Any,
-    key: jax.Array,
-) -> tuple[Trainer, TrainState]:
-    """
-    Creates a trainer for the Probabilistic Ensemble (PE) model.
-
-    This trainer uses:
-    1. Bootstrapping to create unique datasets for each model in the ensemble.
-    2. Gaussian Negative Log-Likelihood loss to train the probabilistic outputs.
-    """
-    trainer_params = config.get("trainer_params", {})
-    learning_rate = trainer_params.get("learning_rate", 1e-3)
-    ensemble_size = config["dynamics_params"]["ensemble_size"]
-
-    partition_optimizers = {
-        "model": optax.adam(learning_rate),
-        "normalizer": optax.set_to_zero(),
-    }
-    mask = path_aware_map(lambda path, _: path[0], init_params)
-    optimizer = optax.multi_transform(partition_optimizers, mask)
-    opt_state = optimizer.init(init_params)
-    train_state = TrainState(params=init_params, opt_state=opt_state, key=key)
-
-    vmap_pred_dist = jax.vmap(
-        dynamics_model.pred_norm_delta_dist, in_axes=(None, 0, 0)
-    )
-    normalizer = STANDARD_NORMALIZER
-    vmap_normalize = jax.vmap(normalizer.normalize, in_axes=(None, 0))
-
-    def loss_fn(model_params: Any, static_params: Any, data: dict) -> float:
-        """
-        Computes the Gaussian NLL loss for a SINGLE model.
-        """
-        params = {
-            "model": model_params,
-            "normalizer": static_params["normalizer"],
-        }
-
-        states, actions, true_next_states = (
-            data["states"],
-            data["actions"],
-            data["next_states"],
-        )
-        pred_means, pred_log_vars = vmap_pred_dist(params, states, actions)
-        true_deltas = true_next_states - states
-        norm_params = params["normalizer"]
-        true_norm_deltas = vmap_normalize(norm_params["delta"], true_deltas)
-        inv_vars = jnp.exp(-pred_log_vars)
-        mse_term = jnp.sum(
-            jnp.square(pred_means - true_norm_deltas) * inv_vars, axis=-1
-        )
-        log_det_term = jnp.sum(pred_log_vars, axis=-1)
-        loss = jnp.mean(mse_term + log_det_term)
-        return loss
-
-    grad_fn = jax.value_and_grad(loss_fn, argnums=0)
-    vmap_grad_fn = jax.vmap(
-        grad_fn,
-        in_axes=(0, None, {"states": 0, "actions": 0, "next_states": 0}),
-    )
-
-    @jax.jit
-    def train_step(
-        train_state: TrainState, bootstrapped_data: dict
-    ) -> tuple[TrainState, float]:
-        """Performs a single gradient descent update for the entire ensemble."""
-        model_params = train_state.params["model"]
-        static_params = {"normalizer": train_state.params["normalizer"]}
-
-        losses, model_grads = vmap_grad_fn(
-            model_params, static_params, bootstrapped_data
-        )
-
-        grads = {
-            "model": model_grads,
-            "normalizer": train_state.params["normalizer"],
-        }
-
-        updates, new_opt_state = optimizer.update(
-            grads, train_state.opt_state, train_state.params
-        )
-        new_params = optax.apply_updates(train_state.params, updates)
-        new_train_state = train_state.replace(
-            params=new_params, opt_state=new_opt_state
-        )
-
-        total_loss = jnp.mean(losses)
-        return new_train_state, total_loss
-
-    def train_fn(
-        train_state: TrainState, data: dict, **kwargs
-    ) -> tuple[TrainState, float]:
-        """The public training function that handles bootstrapping."""
-        key, bootstrap_key = jax.random.split(train_state.key)
-        batch_size = data["states"].shape[0]
-
-        bootstrap_indices = jax.random.randint(
-            bootstrap_key,
-            shape=(ensemble_size, batch_size),
-            minval=0,
-            maxval=batch_size,
-        )
-        bootstrapped_data = jax.tree_map(lambda x: x[bootstrap_indices], data)
-        new_train_state, loss = train_step(train_state, bootstrapped_data)
-        return new_train_state.replace(key=key), loss
-
-    return Trainer(train_fn=train_fn), train_state

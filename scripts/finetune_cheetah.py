@@ -29,8 +29,7 @@ import os
 import pickle
 import json
 
-# Import animation function from data collection script
-from collect_data_cheetah import create_cheetah_xy_animation
+from max.visualizers import create_cheetah_xy_animation
 
 
 def plot_cheetah_velocity(buffers, buffer_idx, config):
