@@ -27,12 +27,19 @@ def init_sampler(config: dict) -> Sampler:
 
 
 def _create_latest_sampler() -> Sampler:
-    """Single-transition sampler for EKF-style trainers. Key is unused."""
+    """Single-transition sampler for EKF-style trainers. Key is unused.
+
+    Skips transitions at episode boundaries (done=True at the source step)
+    to avoid feeding cross-episode (s, a, s') tuples to the trainer.
+    """
 
     def sample_fn(key, buffer, buffer_idx):
         if buffer_idx < 2:
             return None
         prev = buffer_idx - 2
+        # Don't use a transition that crosses an episode boundary
+        if buffer["dones"][prev] == 1.0:
+            return None
         return {
             "states":      buffer["states"][0, prev:prev+1, :],
             "actions":     buffer["actions"][0, prev:prev+1, :],
