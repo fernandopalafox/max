@@ -118,6 +118,7 @@ def main(config):
     # Read settings from config
     save_dir = config.get("save_dir", None)
     plot_run = config.get("plot_run", True)
+    plot_eval = config.get("plot_eval", False)
 
     # Initialize cheetah environment
     print(f"[{time.time()-t0:.2f}s] Initializing environment...")
@@ -411,17 +412,16 @@ def main(config):
             }, step=config["total_steps"])
             print("Animation logged to wandb.")
 
-    # Generate final animation from the last evaluation's trajectory
-    if plot_run and "trajectory" in eval_results:
-        print("\nGenerating final evaluation animation...")
-        traj = eval_results["trajectory"]
-        # Unpack qpos and qvel from mjx.Data trajectory (scan stacks as arrays)
-        full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
-        eval_gif_path = create_cheetah_xy_animation(full_states)
-        wandb.log({
-            "eval/final_animation": wandb.Video(eval_gif_path, fps=20, format="gif")
-        }, step=config["total_steps"])
-        print("Evaluation animation logged to wandb.")
+    if plot_eval:
+        print(f"\n[{time.time()-t0:.2f}s] Running final evaluation...")
+        final_eval_results = evaluator.evaluate(train_state.params)
+        print(f"[{time.time()-t0:.2f}s] Final evaluation complete.")
+        if "trajectory" in final_eval_results:
+            traj = final_eval_results["trajectory"]
+            full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
+            gif_path = create_cheetah_xy_animation(full_states)
+            wandb.log({"eval/animation": wandb.Video(gif_path, fps=20, format="gif")}, step=config["total_steps"])
+            print("Final eval animation logged to wandb.")
 
     print("Run complete.")
     return total_accumulated_loss
