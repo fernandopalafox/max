@@ -1272,8 +1272,9 @@ def make_cheetah_env(params: EnvParams):
         # Get observation
         obs = get_obs_fn(next_data)
 
-        # Reward is forward velocity
-        reward = next_data.qvel[0]
+        # Reward matches dm_control cheetah-run: tolerance(speed, bounds=(10, inf), margin=10)
+        # Linearly ramps 0→1 over [0, 10 m/s], clamped at [0, 1]
+        reward = jnp.clip(next_data.qvel[0] / 10.0, 0.0, 1.0)
         rewards = jnp.array([reward])
 
         # Check termination (NaN in state)
