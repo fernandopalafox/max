@@ -78,7 +78,12 @@
       "num_episodes": 2,
       "env_params": {},
       "dynamics_params": {},
-      "planner_params": {}
+      "planner_params": {},
+      "reward_type": "cheetah_velocity_learned",
+      "reward_fn_params": {
+        "weight_control": 0.1,
+        "heading_penalty_factor": 10.0
+      }
     },
 
     "dynamics": "latent_dynamics_lora",
