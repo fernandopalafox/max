@@ -17,7 +17,7 @@ from max.normalizers import init_normalizer
 from max.environments import init_env
 from max.dynamics import init_dynamics
 from max.planners import init_planner
-from max.costs import init_cost
+from max.rewards import init_reward
 
 
 class Evaluator(NamedTuple):
@@ -125,11 +125,11 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
     planner_config["planner_params"] = _resolve_evaluator_config(config, "planner_params")
     planner_config["planner_type"] = _resolve_evaluator_field(config, "planner_type")
 
-    planning_cost_config = {**config}
-    planning_cost_config["cost_fn_params"] = _resolve_evaluator_config(config, "cost_fn_params")
-    planning_cost_config["cost_type"] = _resolve_evaluator_field(config, "cost_type")
+    planning_reward_config = {**config}
+    planning_reward_config["reward_fn_params"] = _resolve_evaluator_config(config, "reward_fn_params")
+    planning_reward_config["reward_type"] = _resolve_evaluator_field(config, "reward_type")
 
-    eval_cost_types = evaluator_params.get("eval_cost_types", ["goal_cost"])
+    eval_reward_types = evaluator_params.get("eval_reward_types", ["goal_cost"])
 
     seed = evaluator_params.get("seed", config.get("seed", 42))
     key = jax.random.key(seed)
@@ -143,34 +143,34 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
     key, model_key = jax.random.split(key)
     dynamics_model, _ = init_dynamics(model_key, dynamics_config, normalizer, norm_params)
 
-    print("  📦 Initializing planning cost function...")
-    planning_cost_fn = init_cost(planning_cost_config, dynamics_model)
+    print("  📦 Initializing planning reward function...")
+    planning_reward_fn = init_reward(planning_reward_config, dynamics_model)
 
     print("  📦 Initializing planner...")
     key, planner_key = jax.random.split(key)
-    planner, init_planner_state = init_planner(planner_config, planning_cost_fn, planner_key)
+    planner, init_planner_state = init_planner(planner_config, planning_reward_fn, planner_key)
 
-    print("  📦 Initializing evaluation cost function(s)...")
-    stage_cost_fn_list = []
-    stage_cost_types = []
-    terminal_cost_fn_list = []
-    terminal_cost_types = []
+    print("  📦 Initializing evaluation reward function(s)...")
+    stage_reward_fn_list = []
+    stage_reward_types = []
+    terminal_reward_fn_list = []
+    terminal_reward_types = []
 
-    for cost_type in eval_cost_types:
-        eval_cost_config = {**config}
-        eval_cost_config["cost_fn_params"] = _resolve_evaluator_config(config, "cost_fn_params")
-        eval_cost_config["cost_type"] = cost_type
-        cost_fn = init_cost(eval_cost_config, dynamics_model)
+    for reward_type in eval_reward_types:
+        eval_reward_config = {**config}
+        eval_reward_config["reward_fn_params"] = _resolve_evaluator_config(config, "reward_fn_params")
+        eval_reward_config["reward_type"] = reward_type
+        reward_fn = init_reward(eval_reward_config, dynamics_model)
 
-        if "terminal" in cost_type.lower():
-            terminal_cost_fn_list.append(cost_fn)
-            terminal_cost_types.append(cost_type)
+        if "terminal" in reward_type.lower():
+            terminal_reward_fn_list.append(reward_fn)
+            terminal_reward_types.append(reward_type)
         else:
-            stage_cost_fn_list.append(cost_fn)
-            stage_cost_types.append(cost_type)
+            stage_reward_fn_list.append(reward_fn)
+            stage_reward_types.append(reward_type)
 
-    num_stage_costs = len(stage_cost_fn_list)
-    num_terminal_costs = len(terminal_cost_fn_list)
+    num_stage_rewards = len(stage_reward_fn_list)
+    num_terminal_rewards = len(terminal_reward_fn_list)
 
     max_steps = evaluator_params.get(
         "max_steps",
@@ -179,14 +179,14 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
     num_episodes = evaluator_params.get("num_episodes", 1)
 
     # Resolve goal_state and target_velocity from evaluator_params first, then top-level
-    eval_cost_fn_params = _resolve_evaluator_config(config, "cost_fn_params")
+    eval_reward_fn_params = _resolve_evaluator_config(config, "reward_fn_params")
     goal_state = jnp.array(
-        eval_cost_fn_params.get(
+        eval_reward_fn_params.get(
             "goal_state",
             jnp.zeros(config.get("dim_state", 6))
         )
     )
-    target_velocity = eval_cost_fn_params.get("target_velocity", 0.0)
+    target_velocity = eval_reward_fn_params.get("target_velocity", 0.0)
 
     def _scan_step(carry, step_idx):
         env_state, planner_state, cost_params = carry
@@ -198,18 +198,18 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
         actions, new_planner_state = planner.solve(planner_state, state_array, cost_params)
         action = actions[0]
 
-        if num_stage_costs > 0:
-            step_costs = jnp.array([
-                cost_fn(state_array, action[None, :], cost_params)
-                for cost_fn in stage_cost_fn_list
+        if num_stage_rewards > 0:
+            step_rewards = jnp.array([
+                reward_fn(state_array, action[None, :], cost_params)
+                for reward_fn in stage_reward_fn_list
             ])
         else:
-            step_costs = jnp.array([])
+            step_rewards = jnp.array([])
 
         new_env_state, _, _, _, _, _ = step_fn(env_state, step_idx, action[None, :])
 
         # Return env_state (not state_array) so trajectory contains full state info
-        return (new_env_state, new_planner_state, cost_params), (step_costs, env_state, action)
+        return (new_env_state, new_planner_state, cost_params), (step_rewards, env_state, action)
 
     @jax.jit
     def _run_episode_jitted(dyn_params: dict, reset_key: jax.Array, planner_key: jax.Array):
@@ -224,7 +224,7 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
         }
 
         init_carry = (env_state, planner_state, cost_params)
-        (final_env_state, _, _), (all_step_costs, all_env_states, all_actions) = jax.lax.scan(
+        (final_env_state, _, _), (all_step_rewards, all_env_states, all_actions) = jax.lax.scan(
             _scan_step, init_carry, jnp.arange(max_steps)
         )
 
@@ -237,23 +237,23 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
             all_env_states, final_env_state
         )
 
-        if num_stage_costs > 0:
-            accumulated_stage_costs = jnp.sum(all_step_costs, axis=0)
+        if num_stage_rewards > 0:
+            accumulated_stage_rewards = jnp.sum(all_step_rewards, axis=0)
         else:
-            accumulated_stage_costs = jnp.array([])
+            accumulated_stage_rewards = jnp.array([])
 
-        if num_terminal_costs > 0:
-            terminal_costs = jnp.array([
-                cost_fn(final_state, jnp.zeros((1, config.get("dim_control", 2))), cost_params)
-                for cost_fn in terminal_cost_fn_list
+        if num_terminal_rewards > 0:
+            terminal_rewards = jnp.array([
+                reward_fn(final_state, jnp.zeros((1, config.get("dim_control", 2))), cost_params)
+                for reward_fn in terminal_reward_fn_list
             ])
         else:
-            terminal_costs = jnp.array([])
+            terminal_rewards = jnp.array([])
 
-        costs = jnp.concatenate([accumulated_stage_costs, terminal_costs])
-        return costs, all_env_states_with_final, all_actions
+        rewards = jnp.concatenate([accumulated_stage_rewards, terminal_rewards])
+        return rewards, all_env_states_with_final, all_actions
 
-    all_cost_types = stage_cost_types + terminal_cost_types
+    all_reward_types = stage_reward_types + terminal_reward_types
 
     # Create vmapped version for multi-episode evaluation
     @jax.jit
@@ -271,11 +271,11 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
         if num_episodes == 1:
             # Backwards compatible: single episode, same behavior as before
             reset_key, planner_key = jax.random.split(key, 2)
-            costs, trajectory, actions = _run_episode_jitted(dyn_params, reset_key, planner_key)
+            rewards, trajectory, actions = _run_episode_jitted(dyn_params, reset_key, planner_key)
 
             results = {}
-            for i, cost_type in enumerate(all_cost_types):
-                results[f"eval/{cost_type}"] = float(costs[i])
+            for i, reward_type in enumerate(all_reward_types):
+                results[f"eval/{reward_type}"] = float(rewards[i])
 
             results["trajectory"] = jax.device_get(trajectory)
             results["actions"] = jax.device_get(actions)
@@ -289,16 +289,16 @@ def create_rollout_evaluator(config: dict) -> Evaluator:
             # all_costs: (num_episodes, num_cost_types)
             # all_trajectories: pytree with leading dim num_episodes
             # all_actions: (num_episodes, max_steps, dim_control)
-            all_costs, all_trajectories, all_actions = _run_episodes_vmapped(
+            all_rewards, all_trajectories, all_actions = _run_episodes_vmapped(
                 dyn_params, reset_keys, planner_keys
             )
 
-            # Average costs across episodes
-            mean_costs = jnp.mean(all_costs, axis=0)
+            # Average rewards across episodes
+            mean_rewards = jnp.mean(all_rewards, axis=0)
 
             results = {}
-            for i, cost_type in enumerate(all_cost_types):
-                results[f"eval/{cost_type}"] = float(mean_costs[i])
+            for i, reward_type in enumerate(all_reward_types):
+                results[f"eval/{reward_type}"] = float(mean_rewards[i])
 
             # Return stacked trajectories with shape (num_episodes, max_steps+1, ...)
             results["trajectory"] = jax.device_get(all_trajectories)

@@ -15,7 +15,7 @@ from max.dynamics import init_dynamics
 from max.dynamics_trainers import init_trainer
 from max.dynamics_evaluators import init_evaluator
 from max.planners import init_planner
-from max.costs import init_cost
+from max.rewards import init_cost
 import argparse
 import copy
 import os

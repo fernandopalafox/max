@@ -1,7 +1,7 @@
 """
-Minimal functional cost abstractions for max library.
+Minimal functional reward abstractions for max library.
 
-Provides factory functions that return JIT-compiled closures for common cost patterns.
+Provides factory functions that return JIT-compiled closures for common reward patterns.
 Follows the max library philosophy: pure functions, closures, and NamedTuples.
 """
 
@@ -136,12 +136,12 @@ def make_task_aware_info_term(
 
 
 
-def _stage_cost_info_gathering(
+def _stage_reward_info_gathering(
     state, control, cost_params, weight_control, weight_info, info_term_fn
 ):
     """
-    Private helper for info gathering stage cost.
-    Matches stage_cost in run_dogfight.py
+    Private helper for info gathering stage reward.
+    reward = dist_sq - control_cost + weight_info*info - origin_cost
     """
     # Hardcoded indices for pursuit-evasion
     p_evader = state[0:2]
@@ -150,26 +150,25 @@ def _stage_cost_info_gathering(
     dist_sq = jnp.sum((p_evader - p_pursuer) ** 2)
     control_cost = weight_control * jnp.sum(control**2)
 
-    # Exploration bonus (subtracted because planners minimize cost)
-    # Passed params match the structure in run_lqr.py
-    exploration_term = -weight_info * info_term_fn(
+    # Information gathering bonus
+    exploration_term = weight_info * info_term_fn(
         state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
     )
 
     # Penalize distance from origin
     origin_cost = 1.0 * jnp.sum(p_evader**2)
 
-    return -dist_sq + control_cost + exploration_term + origin_cost
+    return dist_sq - control_cost + exploration_term - origin_cost
 
 
-def _terminal_cost_pursuit_evasion(state):
+def _terminal_reward_pursuit_evasion(state):
     """
-    Private helper for pursuit-evasion terminal cost.
+    Private helper for pursuit-evasion terminal reward.
     """
     p_evader = state[0:2]
     p_pursuer = state[4:6]
     dist_sq = jnp.sum((p_evader - p_pursuer) ** 2)
-    return -dist_sq
+    return dist_sq
 
 
 def _rollout(init_state, controls, cost_params, pred_fn):
@@ -189,11 +188,11 @@ def _rollout(init_state, controls, cost_params, pred_fn):
     return jnp.concatenate([init_state[jnp.newaxis, :], states], axis=0)
 
 
-def _stage_cost_linear_tracking(
+def _stage_reward_linear_tracking(
     state, control, cost_params, weight_control, weight_info, info_term_fn
 ):
     """
-    Stage cost for linear tracking: tracking error + control penalty - info bonus.
+    Stage reward for linear tracking: -tracking_error - control_penalty + info_bonus.
 
     Args:
         state: Current state (4,)
@@ -204,7 +203,7 @@ def _stage_cost_linear_tracking(
         info_term_fn: Information term function
 
     Returns:
-        Stage cost scalar
+        Stage reward scalar
     """
     goal_state = cost_params["goal_state"]
 
@@ -216,26 +215,26 @@ def _stage_cost_linear_tracking(
 
     # Information gathering bonus
     if info_term_fn is not None:
-        exploration_term = -weight_info * info_term_fn(
+        exploration_term = weight_info * info_term_fn(
             state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
         )
     else:
         exploration_term = 0.0
 
-    return tracking_error + control_cost + exploration_term
+    return -tracking_error - control_cost + exploration_term
 
 
-def _terminal_cost_linear_tracking(state, cost_params):
-    """Terminal cost: squared distance to target."""
+def _terminal_reward_linear_tracking(state, cost_params):
+    """Terminal reward: negative squared distance to target."""
     goal_state = cost_params["goal_state"]
-    return jnp.sum((state - goal_state) ** 2)
+    return -jnp.sum((state - goal_state) ** 2)
 
 
-def _stage_cost_pendulum_swing_up(
+def _stage_reward_pendulum_swing_up(
     state, control, cost_params, weight_control, weight_info, info_term_fn
 ):
     """
-    Stage cost for pendulum swing-up: goal at phi=pi with zero velocity.
+    Stage reward for pendulum swing-up: goal at phi=pi with zero velocity.
 
     Args:
         state: [phi, phi_dot]
@@ -246,7 +245,7 @@ def _stage_cost_pendulum_swing_up(
         info_term_fn: Information term function (can be None)
 
     Returns:
-        Stage cost scalar
+        Stage reward scalar
     """
     phi, phi_dot = state[0], state[1]
 
@@ -259,24 +258,24 @@ def _stage_cost_pendulum_swing_up(
     # Information gathering bonus (optional)
     exploration_term = 0.0
     if info_term_fn is not None:
-        exploration_term = -weight_info * info_term_fn(
+        exploration_term = weight_info * info_term_fn(
             state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
         )
 
-    return goal_cost + control_cost + exploration_term
+    return -goal_cost - control_cost + exploration_term
 
 
-def _terminal_cost_pendulum_swing_up(state):
-    """Terminal cost: emphasize reaching inverted position."""
+def _terminal_reward_pendulum_swing_up(state):
+    """Terminal reward: emphasize reaching inverted position."""
     phi, phi_dot = state[0], state[1]
-    return (phi - jnp.pi) ** 2 + 0.1 * phi_dot ** 2
+    return -((phi - jnp.pi) ** 2 + 0.1 * phi_dot ** 2)
 
 
-def _stage_cost_drone_state_tracking_w_info(
+def _stage_reward_drone_state_tracking_w_info(
     state, control, cost_params, state_weights, weight_control, weight_info, weight_ground, info_term_fn
 ):
     """
-    Stage cost for drone state tracking: weighted state error + control penalty  + ground penalty - info bonus.
+    Stage reward for drone state tracking: -weighted_error - control - ground + info.
 
     Args:
         state: [p_x, p_y, phi, v_x, v_y, phi_dot] (6,)
@@ -289,7 +288,7 @@ def _stage_cost_drone_state_tracking_w_info(
         info_term_fn: Information term function (can be None)
 
     Returns:
-        Stage cost scalar
+        Stage reward scalar
     """
     goal_state = cost_params["goal_state"]
 
@@ -304,19 +303,19 @@ def _stage_cost_drone_state_tracking_w_info(
 
     # Information gathering bonus
     if info_term_fn is not None:
-        exploration_term = -weight_info * info_term_fn(
+        exploration_term = weight_info * info_term_fn(
             state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
         )
     else:
         exploration_term = 0.0
 
-    return state_error + control_cost + ground_penalty + exploration_term
+    return -state_error - control_cost - ground_penalty + exploration_term
 
-def _stage_cost_drone_state_tracking(
+def _stage_reward_drone_state_tracking(
     state, control, goal_state, state_weights, weight_control, weight_ground
 ):
     """
-    Stage cost for drone state tracking: weighted state error + control penalty.
+    Stage reward for drone state tracking: -weighted_error - control - ground.
 
     Args:
         state: [p_x, p_y, phi, v_x, v_y, phi_dot] (6,)
@@ -325,8 +324,8 @@ def _stage_cost_drone_state_tracking(
         state_weights: Weights for each state dimension (6,)
         weight_control: Control penalty weight
 
-    Returns:    
-        Stage cost scalar
+    Returns:
+        Stage reward scalar
     """
     # Weighted state tracking error
     state_error = jnp.sum(state_weights * (state - goal_state) ** 2)
@@ -337,23 +336,22 @@ def _stage_cost_drone_state_tracking(
     # Ground penalty (y=0)
     ground_penalty = weight_ground * jnp.exp(-5.0 * state[1])
 
-    return state_error + control_cost + ground_penalty
+    return -state_error - control_cost - ground_penalty
 
 
-def _terminal_cost_drone_state_tracking(state, cost_params, state_weights):
-    """Terminal cost: weighted squared state error to goal."""
+def _terminal_reward_drone_state_tracking(state, cost_params, state_weights):
+    """Terminal reward: negative weighted squared state error to goal."""
     goal_state = cost_params["goal_state"]
-    return jnp.sum(state_weights * (state - goal_state) ** 2)
+    return -jnp.sum(state_weights * (state - goal_state) ** 2)
 
 
-def _stage_cost_merging_idm(
+def _stage_reward_merging_idm(
     state, control, cost_params,
     Q_diag, q_I, p_y_target, v_g, L, lane_width,
     weight_control, weight_info, info_term_fn,
 ):
     """
-    Stage cost for merging IDM (1 vehicle): quadratic tracking
-    + indicator penalties + info gathering.
+    Stage reward for merging IDM (1 vehicle): -tracking - ctrl - indicator + info.
     """
     # Goal: [0, p_y_target, v_g, 0, 0, 0]
     goal = jnp.zeros(6).at[1].set(p_y_target).at[2].set(v_g)
@@ -395,23 +393,23 @@ def _stage_cost_merging_idm(
     # Information gathering term
     exploration_term = 0.0
     if info_term_fn is not None:
-        exploration_term = -weight_info * info_term_fn(
+        exploration_term = weight_info * info_term_fn(
             state, control,
             cost_params["dyn_params"],
             cost_params["params_cov_model"],
         )
 
     return (
-        tracking_cost + control_cost
-        + indicator_cost + exploration_term
+        -tracking_cost - control_cost
+        - indicator_cost + exploration_term
     )
 
 
-def _terminal_cost_merging_idm(
+def _terminal_reward_merging_idm(
     state, Qf_diag, q_I, p_y_target, v_g, L, lane_width,
 ):
     """
-    Terminal cost for merging IDM (1 vehicle).
+    Terminal reward for merging IDM (1 vehicle).
     """
     goal = jnp.zeros(6).at[1].set(p_y_target).at[2].set(v_g)
     err = state - goal
@@ -440,19 +438,19 @@ def _terminal_cost_merging_idm(
 
     indicator_cost = q_I * (collision + road + invalid)
 
-    return terminal_tracking + indicator_cost
+    return -terminal_tracking - indicator_cost
 
 
-def _stage_cost_cheetah_velocity_tracking(
+def _stage_reward_cheetah_velocity_tracking(
     data,  # mjx.Data
     control: jnp.ndarray,
     weight_control: float,
     heading_penalty_factor: float,
 ) -> float:
     """
-    Stage cost for cheetah velocity maximization with flip penalty.
+    Stage reward for cheetah velocity maximization with flip penalty.
 
-    Cost = -forward_vel + weight_control * ||u||^2 + flip_penalty
+    Reward = forward_vel - weight_control * ||u||^2 - flip_penalty
 
     Args:
         data: mjx.Data (full MuJoCo physics state)
@@ -461,13 +459,10 @@ def _stage_cost_cheetah_velocity_tracking(
         heading_penalty_factor: Penalty for flipping (applied when |root_angle| > pi/2)
 
     Returns:
-        Scalar cost
+        Scalar reward
     """
     # Forward velocity is qvel[0] from mjx.Data
     forward_vel = data.qvel[0]
-
-    # Velocity tracking error
-    velocity_error = -forward_vel
 
     # Control penalty
     control_cost = weight_control * jnp.sum(control ** 2)
@@ -479,15 +474,15 @@ def _stage_cost_cheetah_velocity_tracking(
         (root_angle < -jnp.pi / 2).astype(jnp.float32)
     )
 
-    return velocity_error + control_cost + flip_penalty
+    return forward_vel - control_cost - flip_penalty
 
 
-def _terminal_cost_cheetah_velocity_tracking(
+def _terminal_reward_cheetah_velocity_tracking(
     data,  # mjx.Data
 ) -> float:
-    """Terminal cost: negative forward velocity."""
+    """Terminal reward: forward velocity."""
     forward_vel = data.qvel[0]
-    return -forward_vel
+    return forward_vel
 
 
 def _rollout_cheetah(init_data, controls, cost_params, pred_fn):
@@ -508,27 +503,24 @@ def _rollout_cheetah(init_data, controls, cost_params, pred_fn):
     return data_sequence
 
 
-def _stage_cost_cheetah_velocity_learned(
+def _stage_reward_cheetah_velocity_learned(
     state: jnp.ndarray,  # 17D state vector
     control: jnp.ndarray,
     weight_control: float,
     heading_penalty_factor: float,
 ) -> float:
     """
-    Stage cost for cheetah velocity maximization using 17D state vector.
+    Stage reward for cheetah velocity maximization using 17D state vector.
 
     17D state layout:
     - [0:8]: positions (rootz, rooty, bthigh, bshin, bfoot, fthigh, fshin, ffoot)
     - [8:17]: velocities (vel_x, vel_z, vel_y, vel_bthigh, vel_bshin, vel_bfoot,
                           vel_fthigh, vel_fshin, vel_ffoot)
 
-    Cost = -forward_vel + weight_control * ||u||^2 + flip_penalty
+    Reward = forward_vel - weight_control * ||u||^2 - flip_penalty
     """
     # Forward velocity is vel_x at index 8
     forward_vel = state[8]
-
-    # Maximize forward velocity
-    velocity_error = -forward_vel
 
     # Control penalty
     control_cost = weight_control * jnp.sum(control ** 2)
@@ -541,18 +533,18 @@ def _stage_cost_cheetah_velocity_learned(
         (root_angle < -jnp.pi / 2).astype(jnp.float32)
     )
 
-    return velocity_error + control_cost + flip_penalty
+    return forward_vel - control_cost - flip_penalty
 
 
-def _terminal_cost_cheetah_velocity_learned(
+def _terminal_reward_cheetah_velocity_learned(
     state: jnp.ndarray,  # 17D state vector
 ) -> float:
-    """Terminal cost: negative forward velocity."""
+    """Terminal reward: forward velocity."""
     forward_vel = state[8]  # vel_x at index 8
-    return -forward_vel
+    return forward_vel
 
 
-def _stage_cost_cheetah_velocity_learned_w_info(
+def _stage_reward_cheetah_velocity_learned_w_info(
     state: jnp.ndarray,
     control: jnp.ndarray,
     cost_params: dict,
@@ -562,7 +554,7 @@ def _stage_cost_cheetah_velocity_learned_w_info(
     info_term_fn,
 ) -> float:
     """
-    Stage cost for cheetah velocity maximization with info gathering bonus.
+    Stage reward for cheetah velocity maximization with info gathering bonus.
 
     17D state layout:
     - [0:8]: positions (rootz, rooty, bthigh, bshin, bfoot, fthigh, fshin, ffoot)
@@ -571,7 +563,6 @@ def _stage_cost_cheetah_velocity_learned_w_info(
     """
     # Forward velocity is vel_x at index 8
     forward_vel = state[8]
-    velocity_error = -forward_vel
 
     # Control penalty
     control_cost = weight_control * jnp.sum(control ** 2)
@@ -586,19 +577,19 @@ def _stage_cost_cheetah_velocity_learned_w_info(
     # Info gathering bonus
     exploration_term = 0.0
     if info_term_fn is not None:
-        exploration_term = -weight_info * info_term_fn(
+        exploration_term = weight_info * info_term_fn(
             state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
         )
 
-    return velocity_error + control_cost + flip_penalty + exploration_term
+    return forward_vel - control_cost - flip_penalty + exploration_term
 
 
-# --- Evaluation cost helpers ---
+# --- Evaluation reward helpers ---
 
 
-def _eval_goal_cost(state, control, cost_params, state_weights, weight_control):
+def _eval_goal_reward(state, control, cost_params, state_weights, weight_control):
     """
-    Single-step goal tracking cost (no rollout).
+    Single-step goal tracking reward (no rollout).
 
     Args:
         state: Current state
@@ -608,51 +599,51 @@ def _eval_goal_cost(state, control, cost_params, state_weights, weight_control):
         weight_control: Control penalty weight
 
     Returns:
-        Scalar cost for this step
+        Scalar reward for this step
     """
     goal_state = cost_params["goal_state"]
     state_error = jnp.sum(state_weights * (state - goal_state) ** 2)
     control_cost = weight_control * jnp.sum(control ** 2)
-    return state_error + control_cost
+    return -state_error - control_cost
 
 
-def _eval_terminal_goal_cost(state, cost_params):
+def _eval_terminal_goal_reward(state, cost_params):
     """
-    Terminal distance from goal (position only).
+    Terminal distance from goal (position only), negated.
 
     Args:
         state: Final state
         cost_params: Dict containing 'goal_state'
 
     Returns:
-        Euclidean distance from goal position
+        Negative euclidean distance from goal position
     """
     goal_state = cost_params["goal_state"]
     position = state[:2]
     goal_position = goal_state[:2]
-    return jnp.sqrt(jnp.sum((position - goal_position) ** 2))
+    return -jnp.sqrt(jnp.sum((position - goal_position) ** 2))
 
 
 # --- Main factory function ---
 
 
-def init_cost(config, dynamics_model):
+def init_reward(config, dynamics_model):
     """
-    Initializes cost function based on configuration.
+    Initializes reward function based on configuration.
 
     Args:
-        config: Configuration dictionary containing cost_fn_params.
+        config: Configuration dictionary containing reward_fn_params.
         dynamics_model: Object with .pred_one_step method.
 
     Returns:
-        Cost function with signature (init_state, controls, cost_params) -> scalar
+        Reward function with signature (init_state, controls, cost_params) -> scalar
     """
-    cost_type = config.get("cost_type", "info_gathering")
-    print(f"🚀 Initializing cost function: {cost_type.upper()}")
+    reward_type = config.get("reward_type", "info_gathering")
+    print(f"🚀 Initializing reward function: {reward_type.upper()}")
 
-    if cost_type == "info_gathering":
+    if reward_type == "info_gathering":
         # Extract params
-        params = config["cost_fn_params"]
+        params = config["reward_fn_params"]
         weight_jerk = params["weight_jerk"]
         weight_control = params["weight_control"]
         weight_info = params["weight_info"]
@@ -663,45 +654,43 @@ def init_cost(config, dynamics_model):
             dynamics_model.pred_one_step, meas_noise_diag
         )
 
-        # Vectorize stage cost over the horizon
-        stage_cost_vmap = jax.vmap(
-            lambda s, u, cp: _stage_cost_info_gathering(
+        # Vectorize stage reward over the horizon
+        stage_reward_vmap = jax.vmap(
+            lambda s, u, cp: _stage_reward_info_gathering(
                 s, u, cp, weight_control, weight_info, info_term_fn
             ),
             in_axes=(0, 0, None),
         )
 
         @jax.jit
-        def cost_fn(init_state, controls, cost_params):
+        def reward_fn(init_state, controls, cost_params):
             """
-            Calculates total trajectory cost.
-            Matches traj_cost in run_dogfight.py
+            Calculates total trajectory reward.
             """
             # 1. Rollout trajectory
             states = _rollout(
                 init_state, controls, cost_params, dynamics_model.pred_one_step
             )
 
-            # 2. Calculate stage costs (on states 0 to T-1)
-            stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
+            # 2. Calculate stage rewards (on states 0 to T-1)
+            stage_rewards = stage_reward_vmap(states[:-1], controls, cost_params)
 
-            # 3. Calculate terminal cost (on state T)
-            terminal = _terminal_cost_pursuit_evasion(states[-1])
+            # 3. Calculate terminal reward (on state T)
+            terminal_reward = _terminal_reward_pursuit_evasion(states[-1])
 
-            # 4. Calculate Jerk Cost (on controls)
-            jerk = 0.0
+            # 4. Calculate Jerk penalty (on controls)
+            jerk_penalty = 0.0
             if weight_jerk > 0:
                 control_diffs = jnp.diff(controls, axis=0)
-                # Sum over dimensions, then sum over time
-                jerk = weight_jerk * jnp.sum(control_diffs**2)
+                jerk_penalty = weight_jerk * jnp.sum(control_diffs**2)
 
-            return jnp.sum(stage_costs) + terminal + jerk
+            return jnp.sum(stage_rewards) + terminal_reward - jerk_penalty
 
-        return cost_fn
+        return reward_fn
 
-    elif cost_type == "linear_tracking_info":
+    elif reward_type == "linear_tracking_info":
         # Extract params
-        params = config["cost_fn_params"]
+        params = config["reward_fn_params"]
         weight_jerk = params["weight_jerk"]
         weight_control = params["weight_control"]
         weight_info = params["weight_info"]
@@ -714,43 +703,43 @@ def init_cost(config, dynamics_model):
                 dynamics_model.pred_one_step, meas_noise_diag
             )
 
-        # Vectorize stage cost over the horizon
-        stage_cost_vmap = jax.vmap(
-            lambda s, u, cp: _stage_cost_linear_tracking(
+        # Vectorize stage reward over the horizon
+        stage_reward_vmap = jax.vmap(
+            lambda s, u, cp: _stage_reward_linear_tracking(
                 s, u, cp, weight_control, weight_info, info_term_fn
             ),
             in_axes=(0, 0, None),
         )
 
         @jax.jit
-        def cost_fn(init_state, controls, cost_params):
+        def reward_fn(init_state, controls, cost_params):
             """
-            Calculates total trajectory cost for linear tracking.
+            Calculates total trajectory reward for linear tracking.
             """
             # 1. Rollout trajectory
             states = _rollout(
                 init_state, controls, cost_params, dynamics_model.pred_one_step
             )
 
-            # 2. Calculate stage costs (on states 0 to T-1)
-            stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
+            # 2. Calculate stage rewards (on states 0 to T-1)
+            stage_rewards = stage_reward_vmap(states[:-1], controls, cost_params)
 
-            # 3. Calculate terminal cost (on state T)
-            terminal = _terminal_cost_linear_tracking(states[-1], cost_params)
+            # 3. Calculate terminal reward (on state T)
+            terminal_reward = _terminal_reward_linear_tracking(states[-1], cost_params)
 
-            # 4. Calculate Jerk Cost (on controls)
-            jerk = 0.0
+            # 4. Calculate Jerk penalty (on controls)
+            jerk_penalty = 0.0
             if weight_jerk > 0:
                 control_diffs = jnp.diff(controls, axis=0)
-                jerk = weight_jerk * jnp.sum(control_diffs**2)
+                jerk_penalty = weight_jerk * jnp.sum(control_diffs**2)
 
-            return jnp.sum(stage_costs) + terminal + jerk
+            return jnp.sum(stage_rewards) + terminal_reward - jerk_penalty
 
-        return cost_fn
+        return reward_fn
 
-    elif cost_type == "pendulum_swing_up_info":
+    elif reward_type == "pendulum_swing_up_info":
         # Extract params
-        params = config["cost_fn_params"]
+        params = config["reward_fn_params"]
         weight_jerk = params.get("weight_jerk", 0.0)
         weight_control = params["weight_control"]
         weight_info = params["weight_info"]
@@ -763,42 +752,42 @@ def init_cost(config, dynamics_model):
                 dynamics_model.pred_one_step, meas_noise_diag
             )
 
-        # Vectorize stage cost over the horizon
-        stage_cost_vmap = jax.vmap(
-            lambda s, u, cp: _stage_cost_pendulum_swing_up(
+        # Vectorize stage reward over the horizon
+        stage_reward_vmap = jax.vmap(
+            lambda s, u, cp: _stage_reward_pendulum_swing_up(
                 s, u, cp, weight_control, weight_info, info_term_fn
             ),
             in_axes=(0, 0, None),
         )
 
         @jax.jit
-        def cost_fn(init_state, controls, cost_params):
+        def reward_fn(init_state, controls, cost_params):
             """
-            Calculates total trajectory cost for pendulum swing-up.
+            Calculates total trajectory reward for pendulum swing-up.
             """
             # 1. Rollout trajectory
             states = _rollout(
                 init_state, controls, cost_params, dynamics_model.pred_one_step
             )
 
-            # 2. Calculate stage costs (on states 0 to T-1)
-            stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
+            # 2. Calculate stage rewards (on states 0 to T-1)
+            stage_rewards = stage_reward_vmap(states[:-1], controls, cost_params)
 
-            # 3. Calculate terminal cost (on state T)
-            terminal = _terminal_cost_pendulum_swing_up(states[-1])
+            # 3. Calculate terminal reward (on state T)
+            terminal_reward = _terminal_reward_pendulum_swing_up(states[-1])
 
-            # 4. Calculate Jerk Cost (on controls)
-            jerk = 0.0
+            # 4. Calculate Jerk penalty (on controls)
+            jerk_penalty = 0.0
             if weight_jerk > 0:
                 control_diffs = jnp.diff(controls, axis=0)
-                jerk = weight_jerk * jnp.sum(control_diffs ** 2)
+                jerk_penalty = weight_jerk * jnp.sum(control_diffs ** 2)
 
-            return jnp.sum(stage_costs) + terminal + jerk
+            return jnp.sum(stage_rewards) + terminal_reward - jerk_penalty
 
-        return cost_fn
+        return reward_fn
 
-    elif cost_type == "merging_idm_info":
-        params_cfg = config["cost_fn_params"]
+    elif reward_type == "merging_idm_info":
+        params_cfg = config["reward_fn_params"]
         weight_jerk = params_cfg.get("weight_jerk", 0.0)
         weight_control = params_cfg["weight_control"]
         weight_info = params_cfg["weight_info"]
@@ -828,8 +817,8 @@ def init_cost(config, dynamics_model):
                 dynamics_model.pred_one_step, meas_noise_diag
             )
 
-        stage_cost_vmap = jax.vmap(
-            lambda s, u, cp: _stage_cost_merging_idm(
+        stage_reward_vmap = jax.vmap(
+            lambda s, u, cp: _stage_reward_merging_idm(
                 s, u, cp,
                 Q_diag, q_I, p_y_target, v_g,
                 L_cost, lane_width,
@@ -839,35 +828,35 @@ def init_cost(config, dynamics_model):
         )
 
         @jax.jit
-        def cost_fn(init_state, controls, cost_params):
+        def reward_fn(init_state, controls, cost_params):
             states = _rollout(
                 init_state, controls, cost_params,
                 dynamics_model.pred_one_step,
             )
-            stage_costs = stage_cost_vmap(
+            stage_rewards = stage_reward_vmap(
                 states[:-1], controls, cost_params,
             )
-            terminal = _terminal_cost_merging_idm(
+            terminal_reward = _terminal_reward_merging_idm(
                 states[-1], Qf_diag, q_I,
                 p_y_target, v_g, L_cost, lane_width,
             )
 
-            jerk = 0.0
+            jerk_penalty = 0.0
             if weight_jerk > 0:
                 control_diffs = jnp.diff(controls, axis=0)
-                jerk = weight_jerk * jnp.sum(
+                jerk_penalty = weight_jerk * jnp.sum(
                     control_diffs**2
                 )
 
             return (
-                jnp.sum(stage_costs) + terminal + jerk
+                jnp.sum(stage_rewards) + terminal_reward - jerk_penalty
             )
 
-        return cost_fn
+        return reward_fn
 
-    elif cost_type == "drone_state_tracking_info":
+    elif reward_type == "drone_state_tracking_info":
         # Extract params
-        params = config["cost_fn_params"]
+        params = config["reward_fn_params"]
         weight_jerk = params.get("weight_jerk", 0.0)
         weight_control = params["weight_control"]
         weight_info = params["weight_info"]
@@ -882,44 +871,44 @@ def init_cost(config, dynamics_model):
                 dynamics_model.pred_one_step, meas_noise_diag
             )
 
-        # Vectorize stage cost over the horizon
+        # Vectorize stage reward over the horizon
         # Note: goal_state is now passed via cost_params at runtime
-        stage_cost_vmap = jax.vmap(
-            lambda s, u, cp: _stage_cost_drone_state_tracking_w_info(
+        stage_reward_vmap = jax.vmap(
+            lambda s, u, cp: _stage_reward_drone_state_tracking_w_info(
                 s, u, cp, state_weights, weight_control, weight_info, weight_ground, info_term_fn
             ),
             in_axes=(0, 0, None),
         )
 
         @jax.jit
-        def cost_fn(init_state, controls, cost_params):
+        def reward_fn(init_state, controls, cost_params):
             """
-            Calculates total trajectory cost for drone state tracking.
+            Calculates total trajectory reward for drone state tracking.
             """
             # 1. Rollout trajectory
             states = _rollout(
                 init_state, controls, cost_params, dynamics_model.pred_one_step
             )
 
-            # 2. Calculate stage costs (on states 0 to T-1)
-            stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
+            # 2. Calculate stage rewards (on states 0 to T-1)
+            stage_rewards = stage_reward_vmap(states[:-1], controls, cost_params)
 
-            # 3. Calculate terminal cost (on state T)
-            terminal = _terminal_cost_drone_state_tracking(states[-1], cost_params, state_weights)
+            # 3. Calculate terminal reward (on state T)
+            terminal_reward = _terminal_reward_drone_state_tracking(states[-1], cost_params, state_weights)
 
-            # 4. Calculate Jerk Cost (on controls)
-            jerk = 0.0
+            # 4. Calculate Jerk penalty (on controls)
+            jerk_penalty = 0.0
             if weight_jerk > 0:
                 control_diffs = jnp.diff(controls, axis=0)
-                jerk = weight_jerk * jnp.sum(control_diffs ** 2)
+                jerk_penalty = weight_jerk * jnp.sum(control_diffs ** 2)
 
-            return jnp.sum(stage_costs) + terminal + jerk
+            return jnp.sum(stage_rewards) + terminal_reward - jerk_penalty
 
-        return cost_fn
-    
-    elif cost_type == "drone_state_tracking_info_task_aware":
+        return reward_fn
+
+    elif reward_type == "drone_state_tracking_info_task_aware":
         # Extract params
-        params = config["cost_fn_params"]
+        params = config["reward_fn_params"]
         weight_jerk = params.get("weight_jerk", 0.0)
         weight_control = params["weight_control"]
         weight_info = params["weight_info"]
@@ -928,12 +917,12 @@ def init_cost(config, dynamics_model):
         state_weights = jnp.array(params["state_weights"])
         meas_noise_diag = jnp.array(params["meas_noise_diag"])
 
-        # Vectorize stage cost over the horizon
-        stage_cost_fn = lambda s, u: _stage_cost_drone_state_tracking(
+        # Vectorize stage reward over the horizon
+        stage_reward_fn = lambda s, u: _stage_reward_drone_state_tracking(
             s, u, goal_state, state_weights, weight_control, weight_ground
         )
-        stage_cost_vmap = jax.vmap(
-            stage_cost_fn,
+        stage_reward_vmap = jax.vmap(
+            stage_reward_fn,
             in_axes=(0, 0),
         )
 
@@ -942,7 +931,7 @@ def init_cost(config, dynamics_model):
         if weight_info > 0:
             info_term_fn = make_task_aware_info_term(
                 dynamics_model.pred_one_step,
-                stage_cost_fn
+                stage_reward_fn
             )
         else:
             info_term_fn = lambda s, u, dyn_p, cov: 0.0
@@ -955,103 +944,102 @@ def init_cost(config, dynamics_model):
         )
 
         @jax.jit
-        def cost_fn(init_state, controls, cost_params):
+        def reward_fn(init_state, controls, cost_params):
             """
-            Calculates total trajectory cost for drone state tracking.
+            Calculates total trajectory reward for drone state tracking.
             """
             # 1. Rollout trajectory
             states = _rollout(
                 init_state, controls, cost_params, dynamics_model.pred_one_step
             )
 
-            # 2. Calculate stage costs (on states 0 to T-1)
-            stage_costs = stage_cost_vmap(states[:-1], controls) - weight_info * info_cost_vmap(states[:-1], controls, cost_params)
+            # 2. Calculate stage rewards (on states 0 to T-1)
+            stage_rewards = stage_reward_vmap(states[:-1], controls) + weight_info * info_cost_vmap(states[:-1], controls, cost_params)
 
-            # 3. Calculate terminal cost (on state T)
-            terminal = _terminal_cost_drone_state_tracking(states[-1], goal_state, state_weights)
+            # 3. Calculate terminal reward (on state T)
+            terminal_reward = _terminal_reward_drone_state_tracking(states[-1], goal_state, state_weights)
 
-            # 4. Calculate Jerk Cost (on controls)
-            jerk = 0.0
+            # 4. Calculate Jerk penalty (on controls)
+            jerk_penalty = 0.0
             if weight_jerk > 0:
                 control_diffs = jnp.diff(controls, axis=0)
-                jerk = weight_jerk * jnp.sum(control_diffs ** 2)
+                jerk_penalty = weight_jerk * jnp.sum(control_diffs ** 2)
 
-            return jnp.sum(stage_costs) + terminal + jerk
+            return jnp.sum(stage_rewards) + terminal_reward - jerk_penalty
 
-        return cost_fn
+        return reward_fn
 
-    elif cost_type == "cheetah_velocity_tracking":
-        # Cheetah velocity tracking cost using mjx.Data directly
-        params = config["cost_fn_params"]
+    elif reward_type == "cheetah_velocity_tracking":
+        # Cheetah velocity tracking reward using mjx.Data directly
+        params = config["reward_fn_params"]
         weight_control = params["weight_control"]
         heading_penalty_factor = params.get("heading_penalty_factor", 10.0)
 
-        # Vectorize stage cost over the horizon
-        # weight_control and heading_penalty_factor are closed over
-        stage_cost_vmap = jax.vmap(
-            lambda d, u, cp: _stage_cost_cheetah_velocity_tracking(
+        # Vectorize stage reward over the horizon
+        stage_reward_vmap = jax.vmap(
+            lambda d, u, cp: _stage_reward_cheetah_velocity_tracking(
                 d, u, weight_control, heading_penalty_factor
             ),
             in_axes=(0, 0, None),
         )
 
         @jax.jit
-        def cost_fn(init_data, controls, cost_params):
-            """Total trajectory cost for cheetah velocity maximization using mjx.Data."""
+        def reward_fn(init_data, controls, cost_params):
+            """Total trajectory reward for cheetah velocity maximization using mjx.Data."""
             # 1. Rollout trajectory using dynamics (mjx.Data throughout)
             data_sequence = _rollout_cheetah(
                 init_data, controls, cost_params, dynamics_model.pred_one_step
             )
 
-            # 2. Calculate stage costs over all timesteps
-            stage_costs = stage_cost_vmap(data_sequence, controls, cost_params)
+            # 2. Calculate stage rewards over all timesteps
+            stage_rewards = stage_reward_vmap(data_sequence, controls, cost_params)
 
-            # 3. Calculate terminal cost (on final state)
+            # 3. Calculate terminal reward (on final state)
             final_data = jax.tree.map(lambda x: x[-1], data_sequence)
-            terminal = _terminal_cost_cheetah_velocity_tracking(
+            terminal_reward = _terminal_reward_cheetah_velocity_tracking(
                 final_data
             )
 
-            return jnp.sum(stage_costs) + terminal
+            return jnp.sum(stage_rewards) + terminal_reward
 
-        return cost_fn
+        return reward_fn
 
-    elif cost_type == "cheetah_velocity_learned":
+    elif reward_type == "cheetah_velocity_learned":
         # Cheetah velocity tracking for learned models (17D state vector)
-        params = config["cost_fn_params"]
+        params = config["reward_fn_params"]
         weight_control = params["weight_control"]
         heading_penalty_factor = params.get("heading_penalty_factor", 10.0)
 
-        stage_cost_vmap = jax.vmap(
-            lambda s, u, cp: _stage_cost_cheetah_velocity_learned(
+        stage_reward_vmap = jax.vmap(
+            lambda s, u, cp: _stage_reward_cheetah_velocity_learned(
                 s, u, weight_control, heading_penalty_factor
             ),
             in_axes=(0, 0, None),
         )
 
         @jax.jit
-        def cost_fn(init_state, controls, cost_params):
-            """Total trajectory cost for cheetah velocity maximization using learned model."""
+        def reward_fn(init_state, controls, cost_params):
+            """Total trajectory reward for cheetah velocity maximization using learned model."""
             # 1. Rollout trajectory using dynamics (17D state throughout)
             states = _rollout(
                 init_state, controls, cost_params, dynamics_model.pred_one_step
             )
 
-            # 2. Calculate stage costs (on states 0 to T-1)
-            stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
+            # 2. Calculate stage rewards (on states 0 to T-1)
+            stage_rewards = stage_reward_vmap(states[:-1], controls, cost_params)
 
-            # 3. Calculate terminal cost (on final state)
-            terminal = _terminal_cost_cheetah_velocity_learned(
+            # 3. Calculate terminal reward (on final state)
+            terminal_reward = _terminal_reward_cheetah_velocity_learned(
                 states[-1]
             )
 
-            return jnp.sum(stage_costs) + terminal
+            return jnp.sum(stage_rewards) + terminal_reward
 
-        return cost_fn
+        return reward_fn
 
-    elif cost_type == "cheetah_velocity_learned_info":
+    elif reward_type == "cheetah_velocity_learned_info":
         # Cheetah velocity tracking with info gathering (17D state vector)
-        params = config["cost_fn_params"]
+        params = config["reward_fn_params"]
         weight_control = params["weight_control"]
         heading_penalty_factor = params.get("heading_penalty_factor", 10.0)
         weight_info = params.get("weight_info", 0.0)
@@ -1066,7 +1054,7 @@ def init_cost(config, dynamics_model):
 
         if info_steps is None:
             @jax.jit
-            def cost_fn(init_state, controls, cost_params):
+            def reward_fn(init_state, controls, cost_params):
                 """Cheetah velocity maximization with info gathering."""
                 states = _rollout(
                     init_state, controls, cost_params, dynamics_model.pred_one_step
@@ -1074,69 +1062,69 @@ def init_cost(config, dynamics_model):
 
                 def scan_info(_, xu):
                     s, u = xu
-                    return None, _stage_cost_cheetah_velocity_learned_w_info(
+                    return None, _stage_reward_cheetah_velocity_learned_w_info(
                         s, u, cost_params, weight_control,
                         heading_penalty_factor, weight_info, info_term_fn
                     )
 
-                _, stage_costs = jax.lax.scan(scan_info, None, (states[:-1], controls))
-                terminal = _terminal_cost_cheetah_velocity_learned(states[-1])
-                return jnp.sum(stage_costs) + terminal
+                _, stage_rewards = jax.lax.scan(scan_info, None, (states[:-1], controls))
+                terminal_reward = _terminal_reward_cheetah_velocity_learned(states[-1])
+                return jnp.sum(stage_rewards) + terminal_reward
         else:
             @jax.jit
-            def cost_fn(init_state, controls, cost_params):
-                """Cheetah velocity maximization: info cost for first info_steps, cheap cost for rest."""
+            def reward_fn(init_state, controls, cost_params):
+                """Cheetah velocity maximization: info reward for first info_steps, cheap reward for rest."""
                 states = _rollout(
                     init_state, controls, cost_params, dynamics_model.pred_one_step
                 )
 
                 def scan_info(_, xu):
                     s, u = xu
-                    return None, _stage_cost_cheetah_velocity_learned_w_info(
+                    return None, _stage_reward_cheetah_velocity_learned_w_info(
                         s, u, cost_params, weight_control,
                         heading_penalty_factor, weight_info, info_term_fn
                     )
 
                 def scan_regular(_, xu):
                     s, u = xu
-                    return None, _stage_cost_cheetah_velocity_learned(
+                    return None, _stage_reward_cheetah_velocity_learned(
                         s, u, weight_control, heading_penalty_factor
                     )
 
-                _, info_costs = jax.lax.scan(
+                _, info_rewards = jax.lax.scan(
                     scan_info, None, (states[:info_steps], controls[:info_steps])
                 )
-                _, reg_costs = jax.lax.scan(
+                _, reg_rewards = jax.lax.scan(
                     scan_regular, None, (states[info_steps:-1], controls[info_steps:])
                 )
-                terminal = _terminal_cost_cheetah_velocity_learned(states[-1])
-                return jnp.sum(info_costs) + jnp.sum(reg_costs) + terminal
+                terminal_reward = _terminal_reward_cheetah_velocity_learned(states[-1])
+                return jnp.sum(info_rewards) + jnp.sum(reg_rewards) + terminal_reward
 
-        return cost_fn
+        return reward_fn
 
-    elif cost_type == "goal_cost":
-        # Single-step evaluation cost (no rollout)
-        params = config.get("cost_fn_params", {})
+    elif reward_type == "goal_cost":
+        # Single-step evaluation reward (no rollout)
+        params = config.get("reward_fn_params", {})
         state_weights = jnp.array(
             params.get("state_weights", [1.0] * config.get("dim_state", 6))
         )
         weight_control = params.get("weight_control", 0.01)
 
         @jax.jit
-        def cost_fn(init_state, controls, cost_params):
-            # For evaluation: just compute cost at current state with first control
+        def reward_fn(init_state, controls, cost_params):
+            # For evaluation: just compute reward at current state with first control
             control = controls[0] if controls.ndim > 1 else controls
-            return _eval_goal_cost(init_state, control, cost_params, state_weights, weight_control)
+            return _eval_goal_reward(init_state, control, cost_params, state_weights, weight_control)
 
-        return cost_fn
+        return reward_fn
 
-    elif cost_type == "terminal_goal_cost":
-        # Terminal distance cost (no rollout)
+    elif reward_type == "terminal_goal_cost":
+        # Terminal distance reward (no rollout)
         @jax.jit
-        def cost_fn(init_state, controls, cost_params):
-            return _eval_terminal_goal_cost(init_state, cost_params)
+        def reward_fn(init_state, controls, cost_params):
+            return _eval_terminal_goal_reward(init_state, cost_params)
 
-        return cost_fn
+        return reward_fn
 
     else:
-        raise ValueError(f"Unknown cost type: '{cost_type}'")
+        raise ValueError(f"Unknown reward type: '{reward_type}'")

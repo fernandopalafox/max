@@ -33,7 +33,7 @@ from max.environments import make_cheetah_env, EnvParams
 from max.dynamics import init_dynamics, create_cheetah_ground_truth
 from max.dynamics_trainers import init_trainer
 from max.planners import init_planner
-from max.costs import init_cost
+from max.rewards import init_reward
 
 from collect_data_cheetah import create_cheetah_xy_animation
 
@@ -256,9 +256,9 @@ def run_mpc_comparison(config, data_path, episode_idx, seed_icem=False, use_gt_d
 
     # Initialize planner
     print("Initializing planner...")
-    cost_fn = init_cost(config, dynamics_model)
+    reward_fn = init_reward(config, dynamics_model)
     key, planner_key = jax.random.split(key)
-    planner, planner_state = init_planner(config, cost_fn, planner_key)
+    planner, planner_state = init_planner(config, reward_fn, planner_key)
 
     cost_params = {
         "dyn_params": train_state.params,
@@ -377,9 +377,9 @@ def run_prediction_drift_test(config):
 
     # Initialize planner
     print("Initializing planner...")
-    cost_fn = init_cost(config, dynamics_model)
+    reward_fn = init_reward(config, dynamics_model)
     key, planner_key = jax.random.split(key)
-    planner, planner_state = init_planner(config, cost_fn, planner_key)
+    planner, planner_state = init_planner(config, reward_fn, planner_key)
 
     cost_params = {
         "dyn_params": train_state.params,
@@ -533,9 +533,9 @@ def run_multi_episode_analysis(config, data_path, num_episodes):
 
     # Initialize planner
     print("Initializing planner...")
-    cost_fn = init_cost(config, dynamics_model)
+    reward_fn = init_reward(config, dynamics_model)
     key, planner_key = jax.random.split(key)
-    planner, planner_state = init_planner(config, cost_fn, planner_key)
+    planner, planner_state = init_planner(config, reward_fn, planner_key)
 
     cost_params = {
         "dyn_params": train_state.params,
@@ -652,9 +652,9 @@ def main(config, tdmpc2_episode=None, data_path=None, compare_icem=False, seed_i
         icem_actions = None
         if compare_icem:
             print("\nRunning iCEM on initial state for comparison...")
-            cost_fn = init_cost(config, dynamics_model)
+            reward_fn = init_reward(config, dynamics_model)
             key, planner_key = jax.random.split(key)
-            planner, planner_state = init_planner(config, cost_fn, planner_key)
+            planner, planner_state = init_planner(config, reward_fn, planner_key)
 
             cost_params = {
                 "dyn_params": train_state.params,
@@ -697,13 +697,13 @@ def main(config, tdmpc2_episode=None, data_path=None, compare_icem=False, seed_i
         mjx_data = reset_fn(reset_key)
         init_obs = get_obs_fn(mjx_data).squeeze()
 
-        # Initialize cost function and planner
-        print("Initializing cost function...")
-        cost_fn = init_cost(config, dynamics_model)
+        # Initialize reward function and planner
+        print("Initializing reward function...")
+        reward_fn = init_reward(config, dynamics_model)
 
         print("Initializing planner...")
         key, planner_key = jax.random.split(key)
-        planner, planner_state = init_planner(config, cost_fn, planner_key)
+        planner, planner_state = init_planner(config, reward_fn, planner_key)
 
         # Set up cost params
         cost_params = {

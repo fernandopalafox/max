@@ -3,6 +3,7 @@
 # Enable deterministic GPU operations for debugging (set before importing JAX)
 import os
 os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
 
 import time
 
@@ -21,7 +22,7 @@ from max.dynamics_trainers import init_trainer
 from max.samplers import init_sampler
 from max.dynamics_evaluators import init_evaluator
 from max.planners import init_planner
-from max.costs import init_cost
+from max.rewards import init_reward
 import argparse
 import copy
 import os
@@ -157,15 +158,15 @@ def main(config):
     evaluator = init_evaluator(config)
     print(f"[{time.time()-t0:.2f}s] Evaluator initialized")
 
-    # Initialize cost function (uses learned model for rollouts)
-    print(f"[{time.time()-t0:.2f}s] Initializing cost function...")
-    cost_fn = init_cost(config, dynamics_model)
-    print(f"[{time.time()-t0:.2f}s] Cost function initialized")
+    # Initialize reward function (uses learned model for rollouts)
+    print(f"[{time.time()-t0:.2f}s] Initializing reward function...")
+    reward_fn = init_reward(config, dynamics_model)
+    print(f"[{time.time()-t0:.2f}s] Reward function initialized")
 
     # Initialize planner
     print(f"[{time.time()-t0:.2f}s] Initializing planner...")
     key, planner_key = jax.random.split(key)
-    planner, planner_state = init_planner(config, cost_fn, planner_key)
+    planner, planner_state = init_planner(config, reward_fn, planner_key)
     print(f"[{time.time()-t0:.2f}s] Planner initialized")
 
     # Initialize buffer
@@ -496,7 +497,7 @@ if __name__ == "__main__":
         run_name_base = args.run_name or "cheetah_finetune"
 
         if args.lambdas is None:
-            lambdas = [CONFIG["cost_fn_params"]["weight_info"]]
+            lambdas = [CONFIG["reward_fn_params"]["weight_info"]]
         else:
             lambdas = args.lambdas
 
@@ -510,7 +511,7 @@ if __name__ == "__main__":
                 print(f"--- Starting run for lam{lam_idx} (lambda={lam}), seed {seed_idx}/{args.num_seeds} ---")
                 run_config = copy.deepcopy(CONFIG)
                 run_config["seed"] = seed
-                run_config["cost_fn_params"]["weight_info"] = lam
+                run_config["reward_fn_params"]["weight_info"] = lam
 
                 # Build run name: base_lam{idx}_seed{idx}
                 run_name = run_name_base

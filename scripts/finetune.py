@@ -12,7 +12,7 @@ from max.dynamics import init_dynamics
 from max.dynamics_trainers import init_trainer
 from max.dynamics_evaluators import init_evaluator
 from max.planners import init_planner
-from max.costs import init_cost
+from max.rewards import init_reward
 import argparse
 import copy
 import os
@@ -27,7 +27,7 @@ def plot_linear_trajectory(buffers, buffer_idx, config):
 
     # Extract positions
     pos_x, pos_y = states[:, 0], states[:, 1]
-    goal = config["cost_fn_params"]["goal_state"][:2]
+    goal = config["reward_fn_params"]["goal_state"][:2]
 
     # Get normalization bounds for positions
     norm_params = config["normalization_params"]["state"]
@@ -178,12 +178,12 @@ def main(config):
         cov_trace = jnp.trace(train_state.covariance)
         initial_cov_trace_per_param = cov_trace / train_state.covariance.shape[0]
 
-    # Initialize cost function
-    cost_fn = init_cost(config, dynamics_model)
+    # Initialize reward function
+    reward_fn = init_reward(config, dynamics_model)
 
     # Initialize planner
     key, planner_key = jax.random.split(key)
-    planner, planner_state = init_planner(config, cost_fn, planner_key)
+    planner, planner_state = init_planner(config, reward_fn, planner_key)
 
     # Initialize buffer
     buffers = init_jax_buffers(
@@ -210,7 +210,7 @@ def main(config):
     key, reset_key = jax.random.split(key)
     state = reset_fn(reset_key)
     current_obs = get_obs_fn(state)
-    goal_state = np.array(config["cost_fn_params"]["goal_state"])
+    goal_state = np.array(config["reward_fn_params"]["goal_state"])
 
     for step in range(1, config["total_steps"] + 1):
 
@@ -373,7 +373,7 @@ def main(config):
         print("Final eval trajectory logged to wandb as 'final_eval_traj'")
 
     print("Run complete.")
-    return eval_results.get("eval/terminal_goal_cost")
+    return eval_results.get("eval/terminal_goal_cost")  # key unchanged; reward type name kept for backwards compat
 
 
 def run_sweep():
@@ -445,7 +445,7 @@ if __name__ == "__main__":
         run_name_base = args.run_name or "linear"
 
         if args.lambdas is None:
-            lambdas = [CONFIG["cost_fn_params"]["weight_info"]]
+            lambdas = [CONFIG["reward_fn_params"]["weight_info"]]
         else:
             lambdas = args.lambdas
 
@@ -459,7 +459,7 @@ if __name__ == "__main__":
                 print(f"--- Starting run for lam{lam_idx} (lambda={lam}), seed {seed_idx}/{args.num_seeds} ---")
                 run_config = copy.deepcopy(CONFIG)
                 run_config["seed"] = seed
-                run_config["cost_fn_params"]["weight_info"] = lam
+                run_config["reward_fn_params"]["weight_info"] = lam
 
                 # Build run name: base_lam{idx}_seed{idx}
                 run_name = run_name_base

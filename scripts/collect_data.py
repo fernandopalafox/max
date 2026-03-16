@@ -11,7 +11,7 @@ from max.environments import init_env
 from max.dynamics import init_dynamics
 from max.dynamics_trainers import init_trainer
 from max.planners import init_planner
-from max.costs import init_cost
+from max.rewards import init_cost
 import argparse
 import os
 import pickle

@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import jax.flatten_util
 import matplotlib.pyplot as plt
 from max.dynamics import create_pursuit_evader_dynamics
-from max.costs import make_info_gathering_term
+from max.rewards import make_info_gathering_term
 from max.estimators import EKFCovArgs
 
 config = {

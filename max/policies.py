@@ -8,7 +8,7 @@ from flax import struct
 
 from max.normalizers import Normalizer
 from max.dynamics import DynamicsModel
-from max.planners import Planner, PlannerState, CostFn
+from max.planners import Planner, PlannerState, RewardFn
 
 
 class Policy(NamedTuple):
@@ -228,7 +228,7 @@ def create_icem_policy(
     key: jax.Array,
     config: Any,
     dynamics_model: DynamicsModel,
-    cost_fn: CostFn,
+    cost_fn: RewardFn,
 ) -> tuple[Policy, PolicyState]:
     """Creates an ICEM planner-based policy."""
     from scripts.planners import create_icem_planner
@@ -288,7 +288,7 @@ def init_policy(
     key: jax.Array,
     config: Any,
     dynamics_model: DynamicsModel,
-    cost_fn: CostFn,
+    cost_fn: RewardFn,
     normalizer: Normalizer,
     normalizer_params: Any,
 ) -> tuple[Policy, PolicyState]:

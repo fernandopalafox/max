@@ -8,10 +8,10 @@ from flax import struct
 
 # --- Type Hinting ---
 Array = jnp.ndarray
-# A cost function takes the initial state, a sequence of controls, and cost-specific
-# parameters, and returns a scalar cost. It is responsible for rolling out the
+# A reward function takes the initial state, a sequence of controls, and reward-specific
+# parameters, and returns a scalar reward. It is responsible for rolling out the
 # trajectory using the dynamics.
-CostFn = Callable[[Array, Array, Array], float]
+RewardFn = Callable[[Array, Array, Array], float]
 
 
 # --- Unified Planner Abstraction ---
@@ -26,10 +26,10 @@ class PlannerState(struct.PyTreeNode):
 class Planner(NamedTuple):
     """
     A generic container for a planning algorithm.
-    The cost function is now part of the planner's immutable state.
+    The reward function is now part of the planner's immutable state.
     """
 
-    cost_fn: CostFn
+    reward_fn: RewardFn
     solve_fn: Callable[
         [PlannerState, Array, Array], Tuple[Array, PlannerState]
     ]
@@ -41,12 +41,12 @@ class Planner(NamedTuple):
         cost_params: dict,
     ) -> Tuple[Array, PlannerState]:
         """
-        Executes the planner's solve function for the pre-configured cost function.
+        Executes the planner's solve function for the pre-configured reward function.
 
         Args:
             state: The current state of the planner (e.g., mean, key).
             init_env_state: The initial state of the system.
-            cost_params: Parameters to be passed to the cost function.
+            cost_params: Parameters to be passed to the reward function.
 
         Returns:
             A tuple containing the best control sequence and the updated planner state.
@@ -55,23 +55,23 @@ class Planner(NamedTuple):
 
 
 def init_planner(
-    config: Any, cost_fn: CostFn, key: jax.Array
+    config: Any, reward_fn: RewardFn, key: jax.Array
 ) -> tuple[Planner, PlannerState]:
     """
     Initializes the appropriate planner based on the configuration.
-    The cost function is now a required argument for initialization.
+    The reward function is now a required argument for initialization.
     """
     planner_type = config.get("planner_type", "icem")
     print(f"🚀 Initializing planner: {planner_type.upper()}")
 
     if planner_type == "cem":
-        planner, state = create_cem_planner(config, cost_fn, key)
+        planner, state = create_cem_planner(config, reward_fn, key)
     elif planner_type == "icem":
-        planner, state = create_icem_planner(config, cost_fn, key)
+        planner, state = create_icem_planner(config, reward_fn, key)
     elif planner_type == "random":
-        planner, state = create_random_planner(config, cost_fn, key)
+        planner, state = create_random_planner(config, reward_fn, key)
     # elif planner_type == "ilqr":
-    #     planner, state = create_ilqr_planner(config, cost_fn, key) # Future extension
+    #     planner, state = create_ilqr_planner(config, reward_fn, key) # Future extension
     else:
         raise ValueError(f"Unknown planner type: {planner_type}")
 
@@ -79,10 +79,10 @@ def init_planner(
 
 
 def create_random_planner(
-    config: Any, cost_fn: CostFn, key: jax.Array
+    config: Any, reward_fn: RewardFn, key: jax.Array
 ) -> tuple[Planner, PlannerState]:
     """Creates a planner that outputs random actions."""
-    # The cost function is ignored but kept for API consistency.
+    # The reward function is ignored but kept for API consistency.
 
     # Initialize state - only the key is needed.
     initial_state = PlannerState(key=key)
@@ -97,7 +97,7 @@ def create_random_planner(
         # The init_env_state and cost_params are ignored but kept for API consistency.
         return _random_solve_internal(config, state)
 
-    return Planner(cost_fn=cost_fn, solve_fn=solve_fn), initial_state
+    return Planner(reward_fn=reward_fn, solve_fn=solve_fn), initial_state
 
 
 def _random_solve_internal(
@@ -133,7 +133,7 @@ def _random_solve_internal(
 
 
 def create_cem_planner(
-    config: Any, cost_fn: CostFn, key: jax.Array
+    config: Any, reward_fn: RewardFn, key: jax.Array
 ) -> tuple[Planner, PlannerState]:
     """Creates a Cross-Entropy Method (CEM) planner."""
     planner_params = config.get("planner_params", {})
@@ -155,14 +155,14 @@ def create_cem_planner(
     ) -> Tuple[Array, PlannerState]:
         """JIT-compiled solve function for CEM."""
         return _cem_solve_internal(
-            cost_fn, config, state, init_env_state, cost_params, initial_var
+            reward_fn, config, state, init_env_state, cost_params, initial_var
         )
 
-    return Planner(cost_fn=cost_fn, solve_fn=solve_fn), initial_state
+    return Planner(reward_fn=reward_fn, solve_fn=solve_fn), initial_state
 
 
 def _cem_solve_internal(
-    cost_fn: CostFn,
+    reward_fn: RewardFn,
     config: Any,
     state: PlannerState,
     init_env_state: Array,
@@ -182,9 +182,9 @@ def _cem_solve_internal(
 
     num_elites = int(elit_frac * batch_size)
 
-    # Vectorize the cost function
-    vmapped_cost_fn = jax.vmap(
-        lambda controls: cost_fn(
+    # Vectorize the reward function
+    vmapped_reward_fn = jax.vmap(
+        lambda controls: reward_fn(
             init_env_state, controls.reshape(horizon, dim_control), cost_params
         ),
         in_axes=0,
@@ -199,8 +199,8 @@ def _cem_solve_internal(
             subkey, mean, sampling_cov, shape=(batch_size,)
         )
 
-        costs = vmapped_cost_fn(batch)
-        _, elite_indices = jax.lax.top_k(-costs, k=num_elites)
+        rewards = vmapped_reward_fn(batch)
+        _, elite_indices = jax.lax.top_k(rewards, k=num_elites)
         elite_samples = batch[elite_indices]
 
         elite_mean = jnp.mean(elite_samples, axis=0)
@@ -226,7 +226,7 @@ def _cem_solve_internal(
 # --- iCEM Implementation ---
 
 
-def _create_icem_solve(config: Any, cost_fn: CostFn) -> Callable:
+def _create_icem_solve(config: Any, reward_fn: RewardFn) -> Callable:
     """
     Creates a JIT-compiled iCEM solve function with all parameters closed over.
     """
@@ -300,15 +300,15 @@ def _create_icem_solve(config: Any, cost_fn: CostFn) -> Callable:
         init_env_state: Array,
         cost_params: dict,
     ) -> Tuple[Array, PlannerState]:
-        # Vmapped cost depends on runtime init_env_state and cost_params
-        vmapped_cost_fn = jax.vmap(
-            lambda ctrls: cost_fn(
+        # Vmapped reward depends on runtime init_env_state and cost_params
+        vmapped_reward_fn = jax.vmap(
+            lambda ctrls: reward_fn(
                 init_env_state, ctrls.reshape(horizon, dim_control), cost_params
             )
         )
 
         def icem_iteration(carry, i):
-            mean, var, key, best_seq, best_cost, iter_elites = carry
+            mean, var, key, best_seq, best_reward, iter_elites = carry
             key, noise_key = random.split(key)
 
             noise_keys = random.split(noise_key, batch_size)
@@ -328,16 +328,16 @@ def _create_icem_solve(config: Any, cost_fn: CostFn) -> Callable:
                 samples,
             )
 
-            costs = vmapped_cost_fn(samples)
-            _, elite_indices = jax.lax.top_k(-costs, k=num_elites)
+            rewards = vmapped_reward_fn(samples)
+            _, elite_indices = jax.lax.top_k(rewards, k=num_elites)
             new_iter_elites = samples[elite_indices]
 
-            current_best_cost = costs[elite_indices[0]]
+            current_best_reward = rewards[elite_indices[0]]
             current_best_seq = new_iter_elites[0]
-            best_seq, best_cost = jax.lax.cond(
-                current_best_cost < best_cost,
-                lambda: (current_best_seq, current_best_cost),
-                lambda: (best_seq, best_cost),
+            best_seq, best_reward = jax.lax.cond(
+                current_best_reward > best_reward,
+                lambda: (current_best_seq, current_best_reward),
+                lambda: (best_seq, best_reward),
             )
 
             elite_mean = jnp.mean(new_iter_elites, axis=0)
@@ -350,7 +350,7 @@ def _create_icem_solve(config: Any, cost_fn: CostFn) -> Callable:
                 new_var,
                 key,
                 best_seq,
-                best_cost,
+                best_reward,
                 new_iter_elites,
             ), None
 
@@ -359,14 +359,14 @@ def _create_icem_solve(config: Any, cost_fn: CostFn) -> Callable:
             initial_var,
             state.key,
             state.mean,
-            jnp.inf,
+            -jnp.inf,
             jnp.zeros((num_elites, unrolled_dim)),
         )
         final_carry, _ = jax.lax.scan(
             icem_iteration, init_carry, jnp.arange(max_iter)
         )
 
-        final_mean, _, final_key, final_best_seq, _, final_elites = final_carry
+        final_mean, _, final_key, final_best_seq, _final_best_reward, final_elites = final_carry
 
         # Temporal shift: roll forward by one timestep, repeat last action
         shifted_mean = jnp.concatenate(
@@ -387,7 +387,7 @@ def _create_icem_solve(config: Any, cost_fn: CostFn) -> Callable:
 
 
 def create_icem_planner(
-    config: Any, cost_fn: CostFn, key: jax.Array
+    config: Any, reward_fn: RewardFn, key: jax.Array
 ) -> tuple[Planner, PlannerState]:
     """Creates an Improved Cross-Entropy Method (iCEM) planner."""
     # Extract what's needed for initial state
@@ -407,7 +407,7 @@ def create_icem_planner(
     initial_state = PlannerState(key=key, mean=initial_mean, elites=initial_elites)
 
     # Create the JIT-compiled solver with everything closed over
-    _solve = _create_icem_solve(config, cost_fn)
+    _solve = _create_icem_solve(config, reward_fn)
 
     def solve_fn(
         state: PlannerState,
@@ -417,4 +417,4 @@ def create_icem_planner(
         """Solve function for iCEM."""
         return _solve(state, init_env_state, cost_params)
 
-    return Planner(cost_fn=cost_fn, solve_fn=solve_fn), initial_state
+    return Planner(reward_fn=reward_fn, solve_fn=solve_fn), initial_state

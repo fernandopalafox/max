@@ -58,36 +58,36 @@
     "wandb_project": "cheetah_ft_latent",
     "seed": 43,
     "save_dir": null,
-    "plot_run": true,
+    "plot_run": false,
     "plot_eval": true,
     "env_name": "cheetah",
     "num_agents": 1,
-    "total_steps": 1000,
+    "total_steps": 10000,
     "dim_state": 17,
     "dim_action": 6,
     "train_model_freq": 1,
     "train_policy_freq": 1,
     "normalize_freq": 1000000,
-    "eval_freq": 500,
-    "buffer_size": 5000,
+    "eval_freq": 5000,
+    "buffer_size": 10010,
 
     "evaluator_type": "rollout",
     "evaluator_params": {
       "seed": 123,
       "max_steps": 150,
       "num_episodes": 2,
-      "eval_cost_types": ["cheetah_velocity_learned"],
+      "eval_reward_types": ["cheetah_velocity_learned"],
       "env_params": {},
       "dynamics_params": {},
       "planner_params": {},
-      "cost_type": "cheetah_velocity_learned",
-      "cost_fn_params": {
+      "reward_type": "cheetah_velocity_learned",
+      "reward_fn_params": {
         "weight_control": 0.1,
         "heading_penalty_factor": 10.0
       }
     },
 
-    "dynamics": "latent_dynamics_lora",
+    "dynamics": "latent_dynamics_frozen_encdec",
     "dynamics_params": {
       "encoder_features": [256, 128],
       "dynamics_features": [512, 512, 128],
@@ -101,7 +101,7 @@
 
     "env_params": {
       "num_agents": 1,
-      "max_episode_steps": 5000,
+      "max_episode_steps": 500,
       "cheetah_mass_scale": 1.0,
       "cheetah_n_substeps": 2
     },
@@ -141,7 +141,7 @@
       "vel_fthigh", "vel_fshin", "vel_ffoot"
     ],
 
-    "cost_type": "cheetah_velocity_learned_info",
+    "reward_type": "cheetah_velocity_learned_info",
     "planner_type": "icem",
     "planner_params": {
       "horizon": 30,
@@ -156,11 +156,11 @@
       "action_high": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     },
 
-    "cost_fn_params": {
+    "reward_fn_params": {
       "weight_control": 0.1,
       "heading_penalty_factor": 10.0,
       "weight_info": 0.0,
-      "info_steps": 30,
+      "info_steps": 1,
       "meas_noise_diag": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01,
                           0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
     }
