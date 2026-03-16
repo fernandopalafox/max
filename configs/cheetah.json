@@ -76,18 +76,12 @@
       "seed": 123,
       "max_steps": 150,
       "num_episodes": 2,
-      "eval_reward_types": ["cheetah_velocity_learned"],
       "env_params": {},
       "dynamics_params": {},
-      "planner_params": {},
-      "reward_type": "cheetah_velocity_learned",
-      "reward_fn_params": {
-        "weight_control": 0.1,
-        "heading_penalty_factor": 10.0
-      }
+      "planner_params": {}
     },
 
-    "dynamics": "latent_dynamics_frozen_encdec",
+    "dynamics": "latent_dynamics_lora",
     "dynamics_params": {
       "encoder_features": [256, 128],
       "dynamics_features": [512, 512, 128],
@@ -106,14 +100,14 @@
       "cheetah_n_substeps": 2
     },
 
-    "trainer": "latent_gd",
+    "trainer": "ekf_efficient",
     "trainer_params": {
-      "learning_rate": 3e-4,
+      "learning_rate": 100.0,
       "temporal_coefficient": 0.5
     },
 
     "sampler": {
-      "type": "trajectory_batch",
+      "type": "latest",
       "batch_size": 256,
       "horizon": 3,
       "min_buffer_size": 259
