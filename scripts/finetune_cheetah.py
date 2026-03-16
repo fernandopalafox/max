@@ -3,7 +3,7 @@
 # Enable deterministic GPU operations for debugging (set before importing JAX)
 import os
 os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.45"
 
 import time
 

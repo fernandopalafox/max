@@ -62,14 +62,14 @@
     "plot_eval": true,
     "env_name": "cheetah",
     "num_agents": 1,
-    "total_steps": 10000,
+    "total_steps": 200000,
     "dim_state": 17,
     "dim_action": 6,
     "train_model_freq": 1,
     "train_policy_freq": 1,
     "normalize_freq": 1000000,
     "eval_freq": 5000,
-    "buffer_size": 10010,
+    "buffer_size": 200010,
 
     "evaluator_type": "rollout",
     "evaluator_params": {
@@ -80,12 +80,9 @@
       "dynamics_params": {},
       "planner_params": {},
       "reward_type": "cheetah_velocity_learned",
-      "reward_fn_params": {
-        "weight_control": 0.1,
-        "heading_penalty_factor": 10.0
-      }
+      "reward_fn_params": {}
     },
-
+ 
     "dynamics": "latent_dynamics_lora",
     "dynamics_params": {
       "encoder_features": [256, 128],
@@ -105,14 +102,14 @@
       "cheetah_n_substeps": 2
     },
 
-    "trainer": "ekf_efficient",
+    "trainer": "latent_gd",
     "trainer_params": {
-      "learning_rate": 100.0,
+      "learning_rate": 1e-4,
       "temporal_coefficient": 0.5
     },
 
     "sampler": {
-      "type": "latest",
+      "type": "trajectory_batch",
       "batch_size": 256,
       "horizon": 3,
       "min_buffer_size": 259
