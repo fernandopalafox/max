@@ -150,7 +150,7 @@ def main(config):
         "critic":     critic_params,
         "ema_critic": copy.deepcopy(critic_params),
         "policy":     policy_params,
-        "normalizer": norm_params,
+        "normalizer": {**norm_params, "q_scale": jnp.array(1.0)},
     }
 
     # ---- Initialize TDMPC2 trainer ----
@@ -238,7 +238,7 @@ def main(config):
     #     gif_path = create_cheetah_xy_animation(full_states)
     #     wandb.log({"eval/animation": wandb.Video(gif_path, fps=20, format="gif")}, step=0)
 
-    full_states_for_animation = []
+    # full_states_for_animation = []
 
     # ---- Main training loop ----
     print(f"[{time.time()-t0:.2f}s] Starting main loop...")
@@ -394,13 +394,13 @@ def main(config):
         wandb.log({"trajectory/actions": wandb.Image(fig)}, step=config["total_steps"])
         plt.close(fig)
 
-        if len(full_states_for_animation) > 0:
-            full_states_array = np.array(full_states_for_animation)
-            gif_path = create_cheetah_xy_animation(full_states_array)
-            wandb.log(
-                {"trajectory/animation": wandb.Video(gif_path, fps=20, format="gif")},
-                step=config["total_steps"]
-            )
+        # if len(full_states_for_animation) > 0:
+        #     full_states_array = np.array(full_states_for_animation)
+        #     gif_path = create_cheetah_xy_animation(full_states_array)
+        #     wandb.log(
+        #         {"trajectory/animation": wandb.Video(gif_path, fps=20, format="gif")},
+        #         step=config["total_steps"]
+        #     )
 
     print("Run complete.")
 

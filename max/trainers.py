@@ -29,9 +29,8 @@ from max.utilities import symlog, symexp, two_hot, two_hot_inv, soft_ce, ema_upd
 # ---------------------------------------------------------------------------
 
 class TrainState(struct.PyTreeNode):
-    """Training state holding both optimizer states and running Q-scale."""
+    """Training state holding both optimizer states."""
     opt_state: Any          # {"world_model": wm_opt_state, "policy": pi_opt_state}
-    scale: jnp.ndarray      # scalar IQR estimate for Q normalization in policy loss
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +166,6 @@ def init_tdmpc2_trainer(
 
     train_state = TrainState(
         opt_state={"world_model": wm_opt_state, "policy": pi_opt_state},
-        scale=jnp.array(1.0),  # scalar IQR estimate for Q normalization
     )
 
     # --- Vmapped helpers ---
@@ -296,14 +294,34 @@ def init_tdmpc2_trainer(
         critic_params_sg: dict,
         zs_sg: jnp.ndarray,
         key: jax.Array,
-        scale: jnp.ndarray,
+        q_scale: jnp.ndarray,
     ):
         """
-        Policy loss over all H+1 latent states with temporal_decay weighting.
+        Policy loss over H latent states with temporal_decay weighting.
         Gradients only flow through policy_params.
         """
-        TODO: IMPLEMENT
-        return None
+        B = zs_sg.shape[0]
+        policy_loss = jnp.zeros(())
+        avg_qs = []
+
+        for t in range(H):
+            z_t = zs_sg[:, t, :]                                    # (B, latent_dim)
+            key, sample_key = jax.random.split(key)
+            sample_keys = jax.random.split(sample_key, B)
+
+            actions, log_probs = sample_batch(policy_params, z_t, sample_keys)  # (B, dim_a), (B,)
+
+            q_logits = critic.value(critic_params_sg, z_t, actions)  # (num_ensemble, B, num_bins)
+            avg_q = jnp.mean(two_hot_inv(q_logits, vmin, vmax, num_bins), axis=0)  # (B,)
+            avg_qs.append(avg_q)
+
+            entropy = -log_probs                                     # (B,)
+            step_objective = (avg_q + entropy_coef * entropy) / q_scale  # (B,)
+            policy_loss = policy_loss - (temporal_decay ** t) * jnp.mean(step_objective)
+
+        avg_qs_stacked = jnp.stack(avg_qs, axis=1)                  # (B, H)
+        metrics = {"pi_loss": policy_loss, "pi_entropy": jnp.mean(-log_probs)}
+        return policy_loss, (metrics, avg_qs_stacked)
 
     @jax.jit
     def train_step(
@@ -328,9 +346,11 @@ def init_tdmpc2_trainer(
         zs_sg = jax.lax.stop_gradient(zs)
         critic_params_sg = jax.lax.stop_gradient(parameters["critic"])
 
-        (_, (pi_metrics, avg_q)), pi_grads = jax.value_and_grad(
+        q_scale = parameters["normalizer"]["q_scale"]
+
+        (_, (pi_metrics, avg_qs)), pi_grads = jax.value_and_grad(
             pi_loss_fn, argnums=0, has_aux=True
-        )(parameters["policy"], critic_params_sg, zs_sg, pi_key, train_state.scale)
+        )(parameters["policy"], critic_params_sg, zs_sg, pi_key, q_scale)
 
         pi_updates, new_pi_opt = pi_optimizer.update(
             pi_grads, train_state.opt_state["policy"]
@@ -347,14 +367,12 @@ def init_tdmpc2_trainer(
         # ---- Update running Q scale (IQR from t=0 column) ----
         # tau = 1 - ema_decay: official uses tau=0.01 for both target critic and RunningScale
         scale_tau = 1.0 - ema_decay
-        q0 = avg_q[:, 0]  # (B,)
-        iqr = jnp.percentile(q0, 95) - jnp.percentile(q0, 5)
-        iqr = jnp.maximum(iqr, 1.0)
-        new_scale = (1.0 - scale_tau) * train_state.scale + scale_tau * iqr
+        iqr = jnp.maximum(jnp.percentile(avg_qs[:, 0], 95) - jnp.percentile(avg_qs[:, 0], 5), 1.0)
+        new_q_scale = (1.0 - scale_tau) * q_scale + scale_tau * iqr
+        parameters = parameters | {"normalizer": parameters["normalizer"] | {"q_scale": new_q_scale}}
 
         new_train_state = train_state.replace(
             opt_state={"world_model": new_wm_opt, "policy": new_pi_opt},
-            scale=new_scale,
         )
 
         all_metrics = {**wm_metrics, **pi_metrics, "wm_loss_total": wm_loss_total}
