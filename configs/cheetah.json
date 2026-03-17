@@ -80,7 +80,6 @@
 
     "encoder_params": {
       "encoder_features": [256, 128],
-      "decoder_features": [512, 256],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0
     },

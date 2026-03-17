@@ -8,7 +8,7 @@ with first-class support for the HalfCheetah environment.
 Core Modules:
 - environments: Cheetah environment wrapper
 - dynamics: Learned dynamics models (MLP, LoRA)
-- encoders: Encoder/decoder abstraction (TDMPC2 path)
+- encoders: Encoder abstraction (TDMPC2 path)
 - critics: Q-function ensemble (TDMPC2 path)
 - policies: Squashed Gaussian policy (TDMPC2 path)
 - rewards: Reward models (learned + analytical)
