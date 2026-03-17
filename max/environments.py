@@ -10,6 +10,7 @@ from dataclasses import dataclass
 class EnvParams:
     """Environment parameters."""
 
+    num_agents: int = 1
     max_episode_steps: int = 200
     dt: float = 0.1
 
