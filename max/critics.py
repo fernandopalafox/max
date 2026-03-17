@@ -5,12 +5,7 @@ import jax.numpy as jnp
 import flax.linen as nn
 from typing import NamedTuple, Callable, Any
 
-
-def _two_hot_inv(logits: jnp.ndarray, vmin: float, vmax: float, num_bins: int) -> jnp.ndarray:
-    """Convert categorical logits to scalar value (expectation over bins)."""
-    bins = jnp.linspace(vmin, vmax, num_bins)
-    probs = jax.nn.softmax(logits, axis=-1)
-    return jnp.sum(probs * bins, axis=-1)
+from max.utilities import mish, two_hot_inv
 
 
 class Critic(NamedTuple):
@@ -28,7 +23,7 @@ def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
         num_bins:     int, distributional bins (default 101)
         vmin:         float, minimum return (default -10)
         vmax:         float, maximum return (default 10)
-        dropout:      float, dropout rate (default 0.01)
+        dropout:      float, dropout rate on first hidden layer (default 0.01)
 
     Returns:
         (Critic, critic_params) where critic_params = {"ensemble": vmapped_flax_params}
@@ -45,11 +40,11 @@ def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
         @nn.compact
         def __call__(self, z, a, training: bool = False):
             x = jnp.concatenate([z, a], axis=-1)
-            for feat in features:
+            for i, feat in enumerate(features):
                 x = nn.Dense(feat)(x)
                 x = nn.LayerNorm()(x)
-                x = nn.relu(x)
-                if dropout > 0.0:
+                x = mish(x)
+                if i == 0 and dropout > 0.0:
                     x = nn.Dropout(rate=dropout, deterministic=not training)(x)
             return nn.Dense(num_bins)(x)
 
@@ -91,7 +86,7 @@ def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
           "all" - return all ensemble Q-values (num_ensemble, ...)
         """
         logits = value(critic_params, z, a)               # (num_ensemble, ..., num_bins)
-        q_vals = _two_hot_inv(logits, vmin, vmax, num_bins)  # (num_ensemble, ...)
+        q_vals = two_hot_inv(logits, vmin, vmax, num_bins)  # (num_ensemble, ...)
 
         if return_type == "all":
             return q_vals

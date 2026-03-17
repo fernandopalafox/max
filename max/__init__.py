@@ -23,13 +23,7 @@ __version__ = "0.1.0"
 
 # Core components
 from max.environments import init_env
-from max.dynamics import DynamicsModel, init_dynamics
-from max.dynamics_trainers import (
-    Trainer as DynamicsTrainer,
-    TrainState as DynamicsTrainState,
-    init_trainer as init_dynamics_trainer,
-    create_gradient_descent_trainer,
-)
+from max.dynamics import Dynamics, init_dynamics
 from max.encoders import Encoder, init_encoder
 from max.critics import Critic, init_critic
 from max.policies import Policy, init_policy
@@ -52,7 +46,7 @@ __all__ = [
     # Environments
     "init_env",
     # Dynamics
-    "DynamicsModel",
+    "Dynamics",
     "init_dynamics",
     # Encoders (TDMPC2)
     "Encoder",
@@ -70,11 +64,6 @@ __all__ = [
     "Trainer",
     "TrainState",
     "init_trainer",
-    # Legacy dynamics trainer
-    "DynamicsTrainer",
-    "DynamicsTrainState",
-    "init_dynamics_trainer",
-    "create_gradient_descent_trainer",
     # Normalizers
     "Normalizer",
     "init_normalizer",

@@ -21,7 +21,7 @@ from max.dynamics import init_dynamics
 from max.encoders import init_encoder
 from max.critics import init_critic
 from max.policies import init_policy
-from max.rewards import init_reward_model, init_reward
+from max.rewards import init_reward_model
 from max.trainers import init_trainer
 from max.samplers import init_sampler
 from max.dynamics_evaluators import init_evaluator
@@ -181,9 +181,16 @@ def main(config):
     })
     print(f"Trainable params: encoder={enc_n}, dynamics={dyn_n}, critic={cri_n}, policy={pol_n}, reward={rew_n}, total={total_n}")
 
-    # ---- Initialize evaluator (uses legacy iCEM + learned reward for compat) ----
+    # ---- Initialize evaluator (TDMPC2 MPPI evaluator) ----
     print(f"[{time.time()-t0:.2f}s] Initializing evaluator...")
-    evaluator = init_evaluator(config)
+    evaluator = init_evaluator(
+        config,
+        encoder=encoder,
+        dynamics=dynamics,
+        reward=reward_model,
+        critic=critic,
+        policy=policy,
+    )
     print(f"[{time.time()-t0:.2f}s] Evaluator initialized")
 
     # ---- Initialize MPPI planner ----
@@ -216,25 +223,20 @@ def main(config):
     episode_length = 0
     episode_total_reward = 0.0
 
-    # Initial evaluation
-    print(f"[{time.time()-t0:.2f}s] Running initial evaluation...")
-    # Build eval-compatible params (legacy evaluator expects old LoRA format)
-    eval_params = {
-        "model": {"dynamics_lora": parameters["dynamics"]["mean"]},
-        "normalizer": parameters["normalizer"],
-    }
-    eval_results = evaluator.evaluate(eval_params)
-    initial_metrics = {
-        k: v for k, v in eval_results.items() if isinstance(v, (int, float))
-    }
-    wandb.log(initial_metrics, step=0)
-    print(f"[{time.time()-t0:.2f}s] Initial evaluation complete")
+    # # Initial evaluation
+    # print(f"[{time.time()-t0:.2f}s] Running initial evaluation...")
+    # eval_results = evaluator.evaluate(parameters)
+    # initial_metrics = {
+    #     k: v for k, v in eval_results.items() if isinstance(v, (int, float))
+    # }
+    # wandb.log(initial_metrics, step=0)
+    # print(f"[{time.time()-t0:.2f}s] Initial evaluation complete")
 
-    if plot_eval and "trajectory" in eval_results:
-        traj = eval_results["trajectory"]
-        full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
-        gif_path = create_cheetah_xy_animation(full_states)
-        wandb.log({"eval/animation": wandb.Video(gif_path, fps=20, format="gif")}, step=0)
+    # if plot_eval and "trajectory" in eval_results:
+    #     traj = eval_results["trajectory"]
+    #     full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
+    #     gif_path = create_cheetah_xy_animation(full_states)
+    #     wandb.log({"eval/animation": wandb.Video(gif_path, fps=20, format="gif")}, step=0)
 
     full_states_for_animation = []
 
@@ -323,11 +325,7 @@ def main(config):
         dt_eval = 0.0
         if step % config["eval_freq"] == 0:
             _t0 = time.time()
-            eval_params = {
-                "model": {"dynamics_lora": parameters["dynamics"]["mean"]},
-                "normalizer": parameters["normalizer"],
-            }
-            eval_results = evaluator.evaluate(eval_params)
+            eval_results = evaluator.evaluate(parameters)
             dt_eval = time.time() - _t0
             t_eval += dt_eval
 

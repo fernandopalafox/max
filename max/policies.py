@@ -5,6 +5,8 @@ import jax.numpy as jnp
 import flax.linen as nn
 from typing import NamedTuple, Callable, Any
 
+from max.utilities import mish
+
 
 class Policy(NamedTuple):
     sample: Callable  # (policy_params, z, key) -> (tanh_action, log_prob)
@@ -30,9 +32,6 @@ def init_policy(key: jax.Array, config: dict) -> tuple["Policy", dict]:
     latent_dim: int = config["encoder_params"]["encoder_features"][-1]
     dim_a: int = config["dim_action"]
 
-    def _mish(x):
-        return x * jnp.tanh(jax.nn.softplus(x))
-
     class _PolicyNet(nn.Module):
         @nn.compact
         def __call__(self, z):
@@ -40,7 +39,7 @@ def init_policy(key: jax.Array, config: dict) -> tuple["Policy", dict]:
             for feat in features:
                 x = nn.Dense(feat)(x)
                 x = nn.LayerNorm()(x)
-                x = _mish(x)
+                x = mish(x)
             mean = nn.Dense(dim_a)(x)
             log_std = nn.Dense(dim_a)(x)
             return mean, log_std
@@ -59,11 +58,6 @@ def init_policy(key: jax.Array, config: dict) -> tuple["Policy", dict]:
         """
         Sample action from squashed Gaussian policy.
 
-        Args:
-            policy_params: policy parameter dict
-            z: latent state (latent_dim,) or batched
-            key: PRNGKey
-
         Returns:
             (tanh_action, log_prob) with Jacobian correction for tanh squashing.
         """
@@ -75,11 +69,8 @@ def init_policy(key: jax.Array, config: dict) -> tuple["Policy", dict]:
         noise = jax.random.normal(noise_key, shape=mean.shape)
         x = mean + std * noise
 
-        # Tanh squashing
         action = jnp.tanh(x)
 
-        # Log probability with Jacobian correction for tanh
-        # log p(u) = log N(x; mean, std) - sum log(1 - tanh(x)^2)
         log_prob_gauss = jnp.sum(
             -0.5 * (noise ** 2 + jnp.log(2.0 * jnp.pi)) - log_std,
             axis=-1,

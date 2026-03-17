@@ -21,89 +21,7 @@ from typing import Any, Callable, NamedTuple
 from max.encoders import Encoder
 from max.critics import Critic
 from max.policies import Policy
-
-
-# ---------------------------------------------------------------------------
-# Math helpers (ported from TDMPC2 math.py to JAX)
-# ---------------------------------------------------------------------------
-
-def symlog(x: jnp.ndarray) -> jnp.ndarray:
-    """Symmetric log: sign(x) * log(1 + |x|)."""
-    return jnp.sign(x) * jnp.log1p(jnp.abs(x))
-
-
-def symexp(x: jnp.ndarray) -> jnp.ndarray:
-    """Symmetric exp: sign(x) * (exp(|x|) - 1)."""
-    return jnp.sign(x) * jnp.expm1(jnp.abs(x))
-
-
-def two_hot(x: jnp.ndarray, vmin: float, vmax: float, num_bins: int) -> jnp.ndarray:
-    """
-    Encode scalar x as a two-hot distribution over `num_bins` evenly-spaced bins.
-
-    Args:
-        x:       scalar or shape (...)
-        vmin:    minimum bin value
-        vmax:    maximum bin value
-        num_bins: number of bins
-
-    Returns:
-        soft label vector of shape (..., num_bins)
-    """
-    bins = jnp.linspace(vmin, vmax, num_bins)
-    x_clipped = jnp.clip(x, vmin, vmax)
-    # Lower bin index
-    k = jnp.floor(
-        (x_clipped - vmin) / (vmax - vmin + 1e-8) * (num_bins - 1)
-    ).astype(jnp.int32)
-    k = jnp.clip(k, 0, num_bins - 2)
-    lower_val = bins[k]
-    upper_val = bins[k + 1]
-    upper_weight = (x_clipped - lower_val) / (upper_val - lower_val + 1e-8)
-    upper_weight = jnp.clip(upper_weight, 0.0, 1.0)
-    lower_weight = 1.0 - upper_weight
-    # Build one-hot-like label — needs to be done without dynamic scatters for JIT
-    lower_one_hot = jax.nn.one_hot(k, num_bins)
-    upper_one_hot = jax.nn.one_hot(k + 1, num_bins)
-    # Broadcast weights to match trailing dim
-    lower_w = jnp.expand_dims(lower_weight, axis=-1)
-    upper_w = jnp.expand_dims(upper_weight, axis=-1)
-    return lower_w * lower_one_hot + upper_w * upper_one_hot
-
-
-def two_hot_inv(logits: jnp.ndarray, vmin: float, vmax: float, num_bins: int) -> jnp.ndarray:
-    """
-    Convert categorical logits to scalar Q value (expectation over bins).
-
-    Args:
-        logits: (..., num_bins)
-    Returns:
-        (...,)
-    """
-    bins = jnp.linspace(vmin, vmax, num_bins)
-    probs = jax.nn.softmax(logits, axis=-1)
-    return jnp.sum(probs * bins, axis=-1)
-
-
-def soft_ce(logits: jnp.ndarray, targets: jnp.ndarray) -> jnp.ndarray:
-    """
-    Soft cross-entropy: -sum(targets * log_softmax(logits), axis=-1).
-
-    Args:
-        logits:  (..., num_bins)
-        targets: (..., num_bins)
-    Returns:
-        (...,) scalar per sample
-    """
-    log_probs = jax.nn.log_softmax(logits, axis=-1)
-    return -jnp.sum(targets * log_probs, axis=-1)
-
-
-def ema_update(old: Any, new: Any, decay: float) -> Any:
-    """Exponential moving average: new_val = decay * old + (1 - decay) * new."""
-    return jax.tree_util.tree_map(
-        lambda o, n: decay * o + (1.0 - decay) * n, old, new
-    )
+from max.utilities import symlog, symexp, two_hot, two_hot_inv, soft_ce, ema_update
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +31,7 @@ def ema_update(old: Any, new: Any, decay: float) -> Any:
 class TrainState(struct.PyTreeNode):
     """Training state holding both optimizer states and running Q-scale."""
     opt_state: Any          # {"world_model": wm_opt_state, "policy": pi_opt_state}
-    scale: jnp.ndarray      # shape (2,) = [mean, std] for Q normalization in policy loss
+    scale: jnp.ndarray      # scalar IQR estimate for Q normalization in policy loss
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +121,8 @@ def init_tdmpc2_trainer(
     value_coef: float = tp["value_coef"]
     entropy_coef: float = tp["entropy_coef"]
 
+    dim_action: int = config["dim_action"]
+
     # critic distributional params
     critic_cfg = config["critic_params"]
     num_bins: int = critic_cfg["num_bins"]
@@ -247,7 +167,7 @@ def init_tdmpc2_trainer(
 
     train_state = TrainState(
         opt_state={"world_model": wm_opt_state, "policy": pi_opt_state},
-        scale=jnp.array([0.0, 1.0]),  # [mean, std] for Q normalization
+        scale=jnp.array(1.0),  # scalar IQR estimate for Q normalization
     )
 
     # --- Vmapped helpers ---
@@ -255,13 +175,11 @@ def init_tdmpc2_trainer(
     encode_single = encoder.encode
     # Batched: (B, dim_s) -> (B, latent)
     encode_batch = jax.vmap(encode_single, in_axes=(None, 0))
-    # Decode: (B, latent) -> (B, dim_s) in normalized space
-    decode_batch = jax.vmap(encoder.decode, in_axes=(None, 0))
 
-    # Dynamics: (dyn_params, (B, latent), (B, dim_a)) -> (B, latent)
-    infer_batch = jax.vmap(dynamics.infer_dynamics, in_axes=(None, 0, 0))
+    # Dynamics: (mean_params, (B, latent), (B, dim_a)) -> (B, latent)
+    infer_batch = jax.vmap(dynamics.predict, in_axes=(None, 0, 0))
 
-    # Reward logits: reward.logits expected for tdmpc2_learned
+    # Reward logits: reward.logits for tdmpc2_learned
     rew_logits_fn = reward.logits  # (reward_params, z, a) -> (num_bins,) logits
     rew_logits_batch = jax.vmap(rew_logits_fn, in_axes=(None, 0, 0))
 
@@ -359,6 +277,10 @@ def init_tdmpc2_trainer(
 
         zs_stacked = jnp.stack(zs, axis=1)  # (B, H+1, latent)
 
+        consistency_loss = consistency_loss / H
+        reward_loss = reward_loss / H
+        q_loss = q_loss / (H * num_ensemble)
+
         total_loss = (
             consistency_coef * consistency_loss
             + reward_coef * reward_loss
@@ -403,20 +325,19 @@ def init_tdmpc2_trainer(
         avg_q = flat_avg_q.reshape(B, H1)            # (B, H+1)
         log_probs = flat_log_probs.reshape(B, H1)    # (B, H+1)
 
-        # Q normalization with running scale
-        scale_mean, scale_std = scale[0], scale[1]
-        avg_q_norm = (avg_q - scale_mean) / (scale_std + 1e-8)
+        # Q normalization with running scale (IQR-based, no mean subtraction)
+        avg_q_norm = avg_q / scale
 
         # Temporal decay weights
         temporal_weights = temporal_decay ** jnp.arange(H1)  # (H+1,)
 
-        # pi_loss = -(entropy_coef * entropy + Q_normalized) * weights
-        entropy = -log_probs  # (B, H+1)
-        pi_loss = (-(entropy_coef * entropy + avg_q_norm) * temporal_weights).mean()
+        # pi_loss = -(entropy_coef * scaled_entropy + Q_normalized) * weights
+        scaled_entropy = -log_probs * dim_action  # (B, H+1)
+        pi_loss = jnp.mean(-(entropy_coef * scaled_entropy + avg_q_norm) * temporal_weights)
 
         metrics = {
             "policy_loss": pi_loss,
-            "policy_entropy": entropy.mean(),
+            "policy_entropy": (-log_probs).mean(),
         }
         return pi_loss, (metrics, avg_q)
 
@@ -430,7 +351,7 @@ def init_tdmpc2_trainer(
         key, wm_key, pi_key = jax.random.split(key, 3)
 
         # ---- Step 1: World-model backward ----
-        (wm_loss, (wm_metrics, zs)), wm_grads = jax.value_and_grad(
+        (wm_loss_total, (wm_metrics, zs)), wm_grads = jax.value_and_grad(
             wm_loss_fn, has_aux=True
         )(parameters, batch, wm_key)
 
@@ -443,7 +364,7 @@ def init_tdmpc2_trainer(
         zs_sg = jax.lax.stop_gradient(zs)
         critic_params_sg = jax.lax.stop_gradient(parameters["critic"])
 
-        (pi_loss, (pi_metrics, avg_q)), pi_grads = jax.value_and_grad(
+        (_, (pi_metrics, avg_q)), pi_grads = jax.value_and_grad(
             pi_loss_fn, argnums=0, has_aux=True
         )(parameters["policy"], critic_params_sg, zs_sg, pi_key, train_state.scale)
 
@@ -459,20 +380,20 @@ def init_tdmpc2_trainer(
             "ema_critic": ema_update(parameters["ema_critic"], parameters["critic"], ema_decay)
         }
 
-        # ---- Update running Q scale ----
-        q_mean = jnp.mean(avg_q)
-        q_std = jnp.std(avg_q)
-        new_scale = jnp.array([
-            0.99 * train_state.scale[0] + 0.01 * q_mean,
-            0.99 * train_state.scale[1] + 0.01 * q_std,
-        ])
+        # ---- Update running Q scale (IQR from t=0 column) ----
+        # tau = 1 - ema_decay: official uses tau=0.01 for both target critic and RunningScale
+        scale_tau = 1.0 - ema_decay
+        q0 = avg_q[:, 0]  # (B,)
+        iqr = jnp.percentile(q0, 95) - jnp.percentile(q0, 5)
+        iqr = jnp.maximum(iqr, 1.0)
+        new_scale = (1.0 - scale_tau) * train_state.scale + scale_tau * iqr
 
         new_train_state = train_state.replace(
             opt_state={"world_model": new_wm_opt, "policy": new_pi_opt},
             scale=new_scale,
         )
 
-        all_metrics = {**wm_metrics, **pi_metrics, "wm_loss": wm_loss, "pi_loss": pi_loss}
+        all_metrics = {**wm_metrics, **pi_metrics, "wm_loss_total": wm_loss_total}
         return new_train_state, parameters, all_metrics
 
     def train_fn(train_state, batch, parameters, key):
