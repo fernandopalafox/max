@@ -763,13 +763,26 @@ def init_dynamics(
     config: Any,
     normalizer: Normalizer = None,
     normalizer_params=None,
+    encoder=None,
 ) -> tuple[Any, Any]:
-    """Initializes the appropriate dynamics model based on the configuration."""
+    """
+    Initializes the appropriate dynamics model based on the configuration.
+
+    When `encoder` is provided (TDMPC2 path), creates a dynamics model whose
+    parameters have structure {"mean": ...} and whose infer_dynamics signature
+    is (dyn_params, z, action) -> z_next  (action normalization baked in).
+
+    When `encoder` is None (legacy path), creates the original DynamicsModel.
+    """
     dynamics_type = config["dynamics"]
     print(f"🚀 Initializing dynamics model: {dynamics_type.upper()}")
 
     if normalizer is None:
         normalizer, normalizer_params = init_normalizer(config)
+
+    if encoder is not None:
+        # TDMPC2 path: separate encoder, dynamics-only params
+        return _create_dynamics_tdmpc2(key, config, encoder, normalizer, normalizer_params)
 
     if dynamics_type == "latent_dynamics":
         model, params = create_latent_dynamics(
@@ -795,3 +808,134 @@ def init_dynamics(
         raise ValueError(f"Unknown dynamics type: '{dynamics_type}'")
 
     return model, params
+
+
+def _create_dynamics_tdmpc2(
+    key: jax.Array,
+    config: Any,
+    encoder,
+    normalizer: Normalizer,
+    normalizer_params: dict,
+) -> tuple[Any, dict]:
+    """
+    TDMPC2-compatible dynamics model.
+
+    Supports both "latent_dynamics" (fresh dense MLP) and "latent_dynamics_lora"
+    (LoRA-XS on pretrained). The encoder/decoder are owned by the Encoder object
+    (not here). Only the dynamics MLP (or LoRA R matrices) are returned as params.
+
+    Returns:
+        (DynamicsModel, {"mean": dyn_params})
+
+    DynamicsModel.infer_dynamics(dyn_params, z, action) -> z_next
+        - dyn_params  = parameters["dynamics"]["mean"]
+        - action      = raw (un-normalized); normalization baked in via closure
+    DynamicsModel.pred_one_step(parameters, obs, action) -> obs_next
+        - parameters  = full unified parameters dict (uses parameters["encoder"])
+    """
+    dynamics_type = config["dynamics"]
+    dyn_cfg = config["dynamics_params"]
+    encoder_features = dyn_cfg["encoder_features"]
+    dynamics_features = dyn_cfg["dynamics_features"]
+    simnorm_dim_v = dyn_cfg["simnorm_dim_v"]
+    simnorm_tau = dyn_cfg.get("simnorm_tau", 1.0)
+
+    latent_dim = encoder_features[-1]
+    dim_action = config["dim_action"]
+    action_norm_params = normalizer_params["action"]
+    state_norm_params = normalizer_params["state"]
+
+    def _mish(x):
+        return x * jnp.tanh(jax.nn.softplus(x))
+
+    def _simnorm(x):
+        shape = x.shape
+        L = shape[-1] // simnorm_dim_v
+        x = x.reshape(*shape[:-1], L, simnorm_dim_v)
+        x = jax.nn.softmax(x / simnorm_tau, axis=-1)
+        return x.reshape(shape)
+
+    if dynamics_type == "latent_dynamics":
+        # Fresh dense dynamics MLP
+        class _DynamicsNet(nn.Module):
+            @nn.compact
+            def __call__(self, x):
+                for feat in dynamics_features[:-1]:
+                    x = nn.Dense(feat)(x)
+                    x = nn.LayerNorm()(x)
+                    x = _mish(x)
+                x = nn.Dense(dynamics_features[-1])(x)
+                x = nn.LayerNorm()(x)
+                return _simnorm(x)
+
+        dynamics_net = _DynamicsNet()
+        dummy_x = jnp.ones((latent_dim + dim_action,))
+        key, k1 = jax.random.split(key)
+        dense_params = dynamics_net.init(k1, dummy_x)
+        dyn_params = {"mean": dense_params}
+
+        def _infer_dynamics_inner(mean_params, z, norm_action):
+            x = jnp.concatenate([z, norm_action], axis=-1)
+            return dynamics_net.apply(mean_params, x)
+
+    elif dynamics_type == "latent_dynamics_lora":
+        # LoRA-XS on pretrained dynamics
+        svd_rank = dyn_cfg.get("svd_rank", 32)
+        r_init_std = dyn_cfg.get("r_init_std", 1e-5)
+        pretrained_path = dyn_cfg.get("pretrained_params_path")
+        assert pretrained_path is not None, (
+            "_create_dynamics_tdmpc2 with latent_dynamics_lora requires pretrained_params_path"
+        )
+        with open(pretrained_path, "rb") as f:
+            import pickle
+            pretrained = pickle.load(f)
+        pretrained_dyn_params = pretrained["model"]["dynamics"]["params"]
+        input_dim = latent_dim + dim_action
+        frozen_dyn_layers, trainable_R_init = _init_latent_lora_layers(
+            key, dynamics_features, input_dim, pretrained_dyn_params, svd_rank, r_init_std
+        )
+        dyn_params = {"mean": trainable_R_init}
+
+        def _infer_dynamics_inner(mean_params, z, norm_action):
+            x = jnp.concatenate([z, norm_action], axis=-1)
+            return _latent_lora_dynamics_forward(
+                x, mean_params, frozen_dyn_layers, _simnorm
+            )
+
+    else:
+        raise ValueError(
+            f"_create_dynamics_tdmpc2 does not support dynamics type: {dynamics_type!r}"
+        )
+
+    def infer_dynamics(dyn_params: Any, z: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
+        """
+        Latent dynamics step.
+        dyn_params: parameters["dynamics"]["mean"]
+        z:          latent state
+        action:     raw action (normalized internally)
+        """
+        norm_action = normalizer.normalize(action_norm_params, action)
+        return _infer_dynamics_inner(dyn_params, z, norm_action)
+
+    def pred_one_step(
+        parameters: Any, obs: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Full obs-space prediction using encoder/decoder from parameters["encoder"]."""
+        z = encoder.encode(parameters["encoder"], obs)
+        z_next = infer_dynamics(parameters["dynamics"]["mean"], z, action)
+        norm_next = encoder.decode(parameters["encoder"], z_next)
+        return normalizer.unnormalize(state_norm_params, norm_next)
+
+    def pred_norm_delta(
+        parameters: Any, obs: jnp.ndarray, action: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Returns normalized-space next observation (decoder output)."""
+        z = encoder.encode(parameters["encoder"], obs)
+        z_next = infer_dynamics(parameters["dynamics"]["mean"], z, action)
+        return encoder.decode(parameters["encoder"], z_next)
+
+    return DynamicsModel(
+        pred_one_step=pred_one_step,
+        pred_norm_delta=pred_norm_delta,
+        infer_dynamics=infer_dynamics,
+    ), dyn_params

@@ -65,8 +65,7 @@
     "total_steps": 200000,
     "dim_state": 17,
     "dim_action": 6,
-    "train_model_freq": 1,
-    "train_policy_freq": 1,
+    "train_freq": 1,
     "normalize_freq": 1000000,
     "eval_freq": 5000,
     "buffer_size": 200010,
@@ -78,11 +77,34 @@
       "num_episodes": 2,
       "env_params": {},
       "dynamics_params": {},
-      "planner_params": {},
+      "planner_type": "icem",
+      "planner_params": {
+        "horizon": 10,
+        "batch_size": 200,
+        "max_iter": 1,
+        "elit_frac": 0.1,
+        "learning_rate": 0.9,
+        "colored_noise_beta": 0.25,
+        "initial_variance_val": 0.5,
+        "dim_control": 6,
+        "action_low": [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+        "action_high": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      },
       "reward_type": "cheetah_velocity_learned",
-      "reward_fn_params": {}
+      "reward_fn_params": {
+        "weight_control": 0.1,
+        "heading_penalty_factor": 10.0
+      }
     },
- 
+
+    "encoder_params": {
+      "encoder_features": [256, 128],
+      "decoder_features": [512, 256],
+      "simnorm_dim_v": 8,
+      "simnorm_tau": 1.0,
+      "pretrained_params_path": "./data/pretrained_models/cheetah/20260311_180621/latent_dynamics_cheetah_run_tdmpc2_clean_small_aug.pkl"
+    },
+
     "dynamics": "latent_dynamics_lora",
     "dynamics_params": {
       "encoder_features": [256, 128],
@@ -95,6 +117,29 @@
       "pretrained_params_path": "./data/pretrained_models/cheetah/20260311_180621/latent_dynamics_cheetah_run_tdmpc2_clean_small_aug.pkl"
     },
 
+    "critic_params": {
+      "features": [512, 512],
+      "num_ensemble": 5,
+      "num_bins": 101,
+      "vmin": -10.0,
+      "vmax": 10.0,
+      "dropout": 0.01
+    },
+
+    "policy_params": {
+      "features": [512, 512],
+      "log_std_min": -10,
+      "log_std_max": 2
+    },
+
+    "reward_type": "tdmpc2_learned",
+    "reward_params": {
+      "features": [512, 512],
+      "num_bins": 101,
+      "vmin": -10.0,
+      "vmax": 10.0
+    },
+
     "env_params": {
       "num_agents": 1,
       "max_episode_steps": 500,
@@ -102,10 +147,20 @@
       "cheetah_n_substeps": 2
     },
 
-    "trainer": "latent_gd",
+    "trainer": "tdmpc2",
     "trainer_params": {
-      "learning_rate": 1e-4,
-      "temporal_coefficient": 0.5
+      "lr": 3e-4,
+      "encoder_lr": 9e-5,
+      "policy_lr": 3e-4,
+      "grad_clip_norm": 20,
+      "horizon": 3,
+      "discount_factor": 0.99,
+      "temporal_decay": 0.5,
+      "ema_decay": 0.01,
+      "consistency_coef": 20.0,
+      "reward_coef": 0.1,
+      "value_coef": 0.1,
+      "entropy_coef": 1e-4
     },
 
     "sampler": {
@@ -137,19 +192,15 @@
       "vel_fthigh", "vel_fshin", "vel_ffoot"
     ],
 
-    "reward_type": "cheetah_velocity_learned_info",
-    "planner_type": "icem",
+    "planner_type": "mppi",
     "planner_params": {
-      "horizon": 30,
-      "batch_size": 500,
-      "max_iter": 1,
-      "elit_frac": 0.1,
-      "learning_rate": 0.9,
-      "colored_noise_beta": 0.25,
-      "initial_variance_val": 0.5,
+      "horizon": 3,
       "dim_control": 6,
-      "action_low": [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
-      "action_high": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      "batch_size": 512,
+      "num_pi_trajs": 24,
+      "temperature": 0.5,
+      "min_std": 0.05,
+      "discount_factor": 0.99
     },
 
     "reward_fn_params": {

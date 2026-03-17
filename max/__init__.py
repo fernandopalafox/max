@@ -7,26 +7,34 @@ with first-class support for the HalfCheetah environment.
 
 Core Modules:
 - environments: Cheetah environment wrapper
-- dynamics: Learned dynamics models (MLP, PETS)
-- trainers: Dynamics model training (GD, EKF, PETS)
+- dynamics: Learned dynamics models (MLP, LoRA)
+- encoders: Encoder/decoder abstraction (TDMPC2 path)
+- critics: Q-function ensemble (TDMPC2 path)
+- policies: Squashed Gaussian policy (TDMPC2 path)
+- rewards: Reward models (learned + analytical)
+- trainers: TDMPC2 trainer
 - normalizers: State/action/reward normalization
 - buffers: JAX-based replay buffers
-- planners: Model-based planning (CEM, iCEM)
+- planners: Model-based planning (CEM, iCEM, MPPI)
 - evaluation: Dynamics model evaluation
-- estimators: EKF and state estimation
 """
 
 __version__ = "0.1.0"
 
 # Core components
 from max.environments import init_env
-from max.dynamics import DynamicsModel
+from max.dynamics import DynamicsModel, init_dynamics
 from max.dynamics_trainers import (
-    Trainer,
-    TrainState,
-    init_trainer,
+    Trainer as DynamicsTrainer,
+    TrainState as DynamicsTrainState,
+    init_trainer as init_dynamics_trainer,
     create_gradient_descent_trainer,
 )
+from max.encoders import Encoder, init_encoder
+from max.critics import Critic, init_critic
+from max.policies import Policy, init_policy
+from max.rewards import Reward, init_reward_model
+from max.trainers import Trainer, TrainState, init_trainer
 from max.normalizers import (
     Normalizer,
     init_normalizer,
@@ -45,10 +53,27 @@ __all__ = [
     "init_env",
     # Dynamics
     "DynamicsModel",
-    # Trainers
+    "init_dynamics",
+    # Encoders (TDMPC2)
+    "Encoder",
+    "init_encoder",
+    # Critics (TDMPC2)
+    "Critic",
+    "init_critic",
+    # Policies (TDMPC2)
+    "Policy",
+    "init_policy",
+    # Rewards
+    "Reward",
+    "init_reward_model",
+    # TDMPC2 Trainer
     "Trainer",
     "TrainState",
     "init_trainer",
+    # Legacy dynamics trainer
+    "DynamicsTrainer",
+    "DynamicsTrainState",
+    "init_dynamics_trainer",
     "create_gradient_descent_trainer",
     # Normalizers
     "Normalizer",

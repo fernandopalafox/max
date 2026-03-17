@@ -3,11 +3,130 @@ Minimal functional reward abstractions for max library.
 
 Provides factory functions that return JIT-compiled closures for cheetah reward patterns.
 Follows the max library philosophy: pure functions, closures, and NamedTuples.
+
+Two-tier API:
+  - init_reward_model(config, encoder=None) -> (Reward, dict)
+      New TDMPC2 path. Returns a Reward NamedTuple with predict/logits callables.
+      predict(reward_params, z, action) -> scalar
+      logits(reward_params, z, action)  -> (num_bins,)   [tdmpc2_learned only]
+
+  - init_reward(config, dynamics_model) -> Callable
+      Legacy path for iCEM planner / evaluator.
+      Returns reward_fn(init_state, controls, cost_params) -> scalar.
 """
 
 import jax
 import jax.numpy as jnp
-from typing import Callable
+import flax.linen as nn
+from typing import Callable, NamedTuple, Any, Optional
+
+
+# ---------------------------------------------------------------------------
+# Reward abstraction (TDMPC2 path)
+# ---------------------------------------------------------------------------
+
+class Reward(NamedTuple):
+    predict: Callable  # (reward_params, z, action) -> scalar
+    logits: Optional[Callable] = None  # (reward_params, z, action) -> (num_bins,) [tdmpc2_learned]
+
+
+def init_reward_model(config: dict, encoder=None) -> tuple["Reward", dict]:
+    """
+    Initialize a Reward model for TDMPC2.
+
+    Supported reward_type values:
+      "tdmpc2_learned"          — learned NN reward head in latent space
+      "cheetah_velocity_learned" — analytical velocity reward after decoding z
+
+    Returns:
+        (Reward, reward_params)
+    """
+    reward_type = config.get("reward_type", "tdmpc2_learned")
+    print(f"Initializing reward model: {reward_type.upper()}")
+
+    if reward_type == "tdmpc2_learned":
+        return _init_tdmpc2_learned_reward(config)
+
+    elif reward_type == "cheetah_velocity_learned":
+        return _init_cheetah_velocity_reward_model(config, encoder)
+
+    else:
+        raise ValueError(f"Unknown reward_type for init_reward_model: {reward_type!r}")
+
+
+def _init_tdmpc2_learned_reward(config: dict) -> tuple["Reward", dict]:
+    """Learned NN reward head: (z, a) -> logits (num_bins,)."""
+    rp = config["reward_params"]
+    features = rp["features"]
+    num_bins: int = rp["num_bins"]
+    latent_dim: int = config["encoder_params"]["encoder_features"][-1]
+    dim_a: int = config["dim_action"]
+
+    def _mish(x):
+        return x * jnp.tanh(jax.nn.softplus(x))
+
+    class _RewardHead(nn.Module):
+        @nn.compact
+        def __call__(self, z, a):
+            x = jnp.concatenate([z, a], axis=-1)
+            for feat in features:
+                x = nn.Dense(feat)(x)
+                x = nn.LayerNorm()(x)
+                x = _mish(x)
+            return nn.Dense(num_bins)(x)
+
+    reward_net = _RewardHead()
+    dummy_z = jnp.ones((latent_dim,))
+    dummy_a = jnp.ones((dim_a,))
+    key = jax.random.key(0)
+    reward_nn_params = reward_net.init(key, dummy_z, dummy_a)
+    reward_params = {"reward_head": reward_nn_params}
+
+    vmin: float = rp.get("vmin", -10.0)
+    vmax: float = rp.get("vmax", 10.0)
+
+    def logits_fn(reward_params: Any, z: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
+        return reward_net.apply(reward_params["reward_head"], z, a)
+
+    def predict_fn(reward_params: Any, z: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
+        """Returns scalar reward: symexp(two_hot_inv(logits))."""
+        from max.trainers import symexp, two_hot_inv
+        raw_logits = logits_fn(reward_params, z, a)
+        return symexp(two_hot_inv(raw_logits, vmin, vmax, num_bins))
+
+    return Reward(predict=predict_fn, logits=logits_fn), reward_params
+
+
+def _init_cheetah_velocity_reward_model(config: dict, encoder) -> tuple["Reward", dict]:
+    """
+    Analytical velocity reward via decoder: z -> obs -> velocity reward.
+    encoder.decode(enc_params, z) must be available (passes enc_params from parameters).
+    reward_params = {} (config baked in)
+    """
+    rp = config.get("reward_fn_params", {})
+    weight_control: float = rp.get("weight_control", 0.1)
+    heading_penalty_factor: float = rp.get("heading_penalty_factor", 10.0)
+    from max.normalizers import init_normalizer
+    normalizer, normalizer_params = init_normalizer(config)
+    state_norm_params = normalizer_params["state"]
+
+    def predict_fn(reward_params: Any, z: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
+        # reward_params is ignored (use None or {} at call site)
+        # enc_params not available here since reward_params carries nothing
+        # This variant requires that z is already decoded externally OR that
+        # the caller passes enc_params in reward_params.
+        # For simplicity: reward_params = enc_params (the encoder params dict).
+        if reward_params is not None and encoder is not None:
+            norm_next = encoder.decode(reward_params, z)
+            state = normalizer.unnormalize(state_norm_params, norm_next)
+        else:
+            # Fallback: treat z as state directly (16/17 dim)
+            state = z
+        return _stage_reward_cheetah_velocity_learned(
+            state, action, weight_control, heading_penalty_factor
+        )
+
+    return Reward(predict=predict_fn, logits=None), {}
 
 
 # --- Helpers for info gathering term ---

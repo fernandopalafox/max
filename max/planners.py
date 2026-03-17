@@ -55,11 +55,20 @@ class Planner(NamedTuple):
 
 
 def init_planner(
-    config: Any, reward_fn: RewardFn, key: jax.Array
+    config: Any,
+    reward_fn: RewardFn = None,
+    key: jax.Array = None,
+    encoder=None,
+    dynamics=None,
+    reward=None,
+    critic=None,
+    policy=None,
 ) -> tuple[Planner, PlannerState]:
     """
     Initializes the appropriate planner based on the configuration.
-    The reward function is now a required argument for initialization.
+
+    For iCEM/CEM/random planners: pass reward_fn and key.
+    For MPPI planner: pass encoder, dynamics, reward, critic, policy, and key.
     """
     planner_type = config.get("planner_type", "icem")
     print(f"🚀 Initializing planner: {planner_type.upper()}")
@@ -70,8 +79,10 @@ def init_planner(
         planner, state = create_icem_planner(config, reward_fn, key)
     elif planner_type == "random":
         planner, state = create_random_planner(config, reward_fn, key)
-    # elif planner_type == "ilqr":
-    #     planner, state = create_ilqr_planner(config, reward_fn, key) # Future extension
+    elif planner_type == "mppi":
+        planner, state = create_mppi_planner(
+            config, encoder, dynamics, reward, critic, policy, key
+        )
     else:
         raise ValueError(f"Unknown planner type: {planner_type}")
 
@@ -418,3 +429,130 @@ def create_icem_planner(
         return _solve(state, init_env_state, cost_params)
 
     return Planner(reward_fn=reward_fn, solve_fn=solve_fn), initial_state
+
+
+# --- MPPI (latent-space, TDMPC2-style) ---
+
+
+def create_mppi_planner(
+    config: Any,
+    encoder,
+    dynamics,
+    reward,
+    critic,
+    policy,
+    key: jax.Array,
+) -> tuple[Planner, PlannerState]:
+    """
+    MPPI planner operating in latent space (TD-MPC2 style).
+
+    Plans by:
+      1. Encoding obs -> z0
+      2. Sampling action sequences (Gaussian perturbations of current mean)
+      3. Rolling out trajectories in latent space
+      4. Evaluating: sum_t reward_head(z_t, a_t) + gamma^H * Q(z_H, pi(z_H))
+      5. Temperature-weighted mean update
+      6. Returning best action
+
+    cost_params passed to solve() must be the full `parameters` dict
+    (containing "encoder", "dynamics", "reward", "critic", "policy" keys).
+
+    config["planner_params"]:
+        horizon:      int
+        dim_control:  int (= dim_action)
+        batch_size:   int, number of trajectory samples
+        num_pi_trajs: int, how many samples come from the policy (default 24)
+        temperature:  float, MPPI temperature (default 0.5)
+        min_std:      float, minimum action std (default 0.05)
+        discount_factor: float, gamma for bootstrap value (default 0.99)
+    """
+    pp = config.get("planner_params", {})
+    horizon: int = pp["horizon"]
+    dim_a: int = pp.get("dim_control", config["dim_action"])
+    num_samples: int = pp.get("batch_size", 512)
+    num_pi_trajs: int = min(pp.get("num_pi_trajs", 24), num_samples)
+    temperature: float = pp.get("temperature", 0.5)
+    min_std: float = pp.get("min_std", 0.05)
+    discount_factor: float = pp.get("discount_factor", 0.99)
+
+    initial_mean = jnp.zeros((horizon, dim_a))
+    initial_state = PlannerState(key=key, mean=initial_mean)
+
+    @partial(jax.jit)
+    def solve_fn(
+        state: PlannerState,
+        obs: Array,
+        parameters: dict,  # full unified parameters dict
+    ) -> Tuple[Array, PlannerState]:
+        key, enc_key, sample_key, pi_key, q_key = jax.random.split(state.key, 5)
+
+        # 1. Encode current observation
+        z0 = encoder.encode(parameters["encoder"], obs)  # (latent,)
+
+        # 2. Build action sequences
+        #    - num_pi_trajs from the policy (sample H actions per trajectory)
+        #    - rest: prior mean + Gaussian noise
+        noise_keys = jax.random.split(sample_key, num_samples)
+
+        def make_noisy(k):
+            noise = jax.random.normal(k, (horizon, dim_a)) * jnp.maximum(min_std, 0.5)
+            return jnp.clip(state.mean + noise, -1.0, 1.0)
+
+        # Noise-based samples
+        action_seqs = jax.vmap(make_noisy)(noise_keys)  # (N, H, dim_a)
+
+        # Policy-based samples (first num_pi_trajs slots)
+        def policy_rollout(k):
+            def step(z, k_t):
+                k_t, k_next = jax.random.split(k_t)
+                a, _ = policy.sample(parameters["policy"], z, k_t)
+                z_next = dynamics.infer_dynamics(parameters["dynamics"]["mean"], z, a)
+                return z_next, a
+            pi_keys_t = jax.random.split(k, horizon)
+            _, pi_acts = jax.lax.scan(step, z0, pi_keys_t)
+            return pi_acts  # (H, dim_a)
+
+        pi_rollout_keys = jax.random.split(pi_key, num_pi_trajs)
+        pi_action_seqs = jax.vmap(policy_rollout)(pi_rollout_keys)  # (num_pi_trajs, H, dim_a)
+        action_seqs = action_seqs.at[:num_pi_trajs].set(pi_action_seqs)
+
+        # 3. Evaluate trajectories
+        def eval_trajectory(actions):
+            """
+            actions: (H, dim_a)
+            Returns: total discounted return estimate
+            """
+            def step(z, a):
+                rew = reward.predict(parameters["reward"], z, a)
+                z_next = dynamics.infer_dynamics(parameters["dynamics"]["mean"], z, a)
+                return z_next, rew
+
+            z_final, stage_rewards = jax.lax.scan(step, z0, actions)
+
+            # Bootstrap terminal value: Q(z_H, pi(z_H))
+            key_pi, key_q = jax.random.split(q_key)
+            pi_a_final, _ = policy.sample(parameters["policy"], z_final, key_pi)
+            v_final = critic.scalar_value(
+                parameters["critic"], z_final, pi_a_final, "min", key_q
+            )
+
+            # Discount schedule: gamma^0, gamma^1, ..., gamma^(H-1)
+            discounts = discount_factor ** jnp.arange(horizon)
+            total = jnp.sum(discounts * stage_rewards) + (discount_factor ** horizon) * v_final
+            return total
+
+        values = jax.vmap(eval_trajectory)(action_seqs)  # (N,)
+
+        # 4. Temperature-weighted mean update
+        max_val = jnp.max(values)  # numerical stability
+        weights = jax.nn.softmax((values - max_val) / (temperature + 1e-8))  # (N,)
+        new_mean = jnp.einsum("n,nha->ha", weights, action_seqs)  # (H, dim_a)
+        new_mean = jnp.clip(new_mean, -1.0, 1.0)
+
+        # 5. Temporal shift for next planning step
+        shifted_mean = jnp.concatenate([new_mean[1:], new_mean[-1:]], axis=0)
+
+        new_state = state.replace(mean=shifted_mean, key=key)
+        return new_mean, new_state
+
+    return Planner(reward_fn=None, solve_fn=solve_fn), initial_state

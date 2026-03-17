@@ -51,11 +51,12 @@ def _create_latest_sampler() -> Sampler:
 
 def _create_trajectory_batch_sampler(batch_size: int, horizon: int, min_buffer_size: int = None) -> Sampler:
     """
-    Trajectory-batch sampler for latent_gd-style trainers.
+    Trajectory-batch sampler for latent_gd / TDMPC2-style trainers.
 
     Returns batches of shape:
-        states:  (batch_size, horizon+1, dim_s)
-        actions: (batch_size, horizon,   dim_a)
+        states:   (batch_size, horizon+1, dim_s)
+        actions:  (batch_size, horizon,   dim_a)
+        rewards:  (batch_size, horizon)
 
     Episode boundaries (dones == 1) are never spanned.
     Training is skipped until buffer_idx >= min_buffer_size (default: batch_size + horizon)
@@ -64,9 +65,10 @@ def _create_trajectory_batch_sampler(batch_size: int, horizon: int, min_buffer_s
     _min_buffer_size = min_buffer_size if min_buffer_size is not None else batch_size + horizon
 
     @jax.jit
-    def _sample_jit(key, states, actions, dones, buffer_idx):
+    def _sample_jit(key, states, actions, rewards, dones, buffer_idx):
         # states:  (buffer_size, dim_s)
         # actions: (buffer_size, dim_a)
+        # rewards: (buffer_size,)
         # dones:   (buffer_size,)
         n = states.shape[0]  # static (buffer_size)
 
@@ -87,12 +89,15 @@ def _create_trajectory_batch_sampler(batch_size: int, horizon: int, min_buffer_s
         def extract_one(start):
             s = jax.lax.dynamic_slice(states,  (start, 0), (horizon + 1, states.shape[1]))
             a = jax.lax.dynamic_slice(actions, (start, 0), (horizon,     actions.shape[1]))
-            return s, a
+            r = jax.lax.dynamic_slice(rewards, (start,),   (horizon,))
+            return s, a, r
 
-        state_windows, action_windows = jax.vmap(extract_one)(start_indices)
-        return {"states": state_windows, "actions": action_windows}
-        # states:  (batch_size, horizon+1, dim_s)
-        # actions: (batch_size, horizon,   dim_a)
+        state_windows, action_windows, reward_windows = jax.vmap(extract_one)(start_indices)
+        return {
+            "states":  state_windows,   # (batch_size, horizon+1, dim_s)
+            "actions": action_windows,  # (batch_size, horizon,   dim_a)
+            "rewards": reward_windows,  # (batch_size, horizon)
+        }
 
     def sample_fn(key, buffer, buffer_idx):
         if buffer_idx < _min_buffer_size:
@@ -101,6 +106,7 @@ def _create_trajectory_batch_sampler(batch_size: int, horizon: int, min_buffer_s
             key,
             buffer["states"][0],
             buffer["actions"][0],
+            buffer["rewards"][0],
             buffer["dones"],
             buffer_idx,
         )
