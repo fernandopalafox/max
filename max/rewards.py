@@ -36,8 +36,8 @@ def init_reward_model(config: dict, encoder=None) -> tuple["Reward", dict]:
     rp = config["reward_params"]
     features = rp["features"]
     num_bins: int = rp["num_bins"]
-    vmin: float = rp.get("vmin", -10.0)
-    vmax: float = rp.get("vmax", 10.0)
+    vmin: float = rp["vmin"]
+    vmax: float = rp["vmax"]
 
     latent_dim: int = config["encoder_params"]["encoder_features"][-1]
     dim_a: int = config["dim_action"]

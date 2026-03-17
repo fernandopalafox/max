@@ -44,11 +44,11 @@ def init_planner(
 
     For MPPI planner: pass encoder, dynamics, reward, critic, policy, and key.
     """
-    planner_type = config.get("planner_type", "mppi")
+    planner_type = config["planner_type"]
     print(f"Initializing planner: {planner_type.upper()}")
 
     if planner_type == "mppi":
-        pp = config.get("planner_params", {})
+        pp = config["planner_params"]
         horizon = pp["horizon"]
         discount = pp.get("discount_factor", 0.99)
         encode_fn = make_tdmpc2_encode_fn(encoder)
@@ -82,7 +82,7 @@ def make_tdmpc2_trajectory_value_fn(dynamics, reward, critic, policy, horizon, d
                 return z_next, r
             z_H, rewards = jax.lax.scan(step, z0, actions)
             pi_a, _ = policy.sample(cost_params["policy"], z_H, key_pi)
-            v = critic.scalar_value(cost_params["critic"], z_H, pi_a, "min", key_q)
+            v = critic.subsample_and_min(cost_params["critic"], z_H, pi_a, key_q)
             discounts = discount_factor ** jnp.arange(horizon)
             return jnp.dot(discounts, rewards) + (discount_factor ** horizon) * v
 
@@ -110,7 +110,7 @@ def create_mppi_planner(
     encode_fn: Callable,           # (cost_params, obs) -> z
     trajectory_value_fn: Callable, # (cost_params, z0, action_seqs, key) -> values  shape (N,)
     key: jax.Array,
-    action_proposal_fn: Callable = None,  # optional: (cost_params, z0, key, n) -> action_seqs  shape (n, H, dim_a)
+    action_proposal_fn: Callable,  # (cost_params, z0, key, n) -> action_seqs  shape (n, H, dim_a)
 ) -> tuple[Planner, PlannerState]:
     """
     Generic MPPI planner. Reward/value logic is fully decoupled via callbacks.
@@ -119,20 +119,23 @@ def create_mppi_planner(
         horizon:      int
         dim_control:  int (= dim_action)
         batch_size:   int, number of trajectory samples
-        num_pi_trajs: int, how many samples come from action_proposal_fn (default 24)
-        temperature:  float, MPPI temperature (default 0.5)
-        min_std:      float, minimum action std (default 0.05)
+        num_pi_trajs: int, how many samples come from action_proposal_fn
+        temperature:  float, MPPI temperature
+        min_std:      float, minimum action std
+        num_iterations: int
+        num_elites:   int
+        max_std:      float
     """
-    pp = config.get("planner_params", {})
+    pp = config["planner_params"]
     horizon: int = pp["horizon"]
-    dim_a: int = pp.get("dim_control", config["dim_action"])
-    num_samples: int = pp.get("batch_size", 512)
-    num_pi_trajs: int = min(pp.get("num_pi_trajs", 24), num_samples) if action_proposal_fn is not None else 0
-    temperature: float = pp.get("temperature", 0.5)
-    min_std: float = pp.get("min_std", 0.05)
-    num_iterations: int = pp.get("num_iterations", 6)
-    num_elites: int = pp.get("num_elites", 64)
-    max_std: float = pp.get("max_std", 2.0)
+    dim_a: int = pp["dim_control"]
+    num_samples: int = pp["batch_size"]
+    num_pi_trajs: int = pp["num_pi_trajs"]
+    temperature: float = pp["temperature"]
+    min_std: float = pp["min_std"]
+    num_iterations: int = pp["num_iterations"]
+    num_elites: int = pp["num_elites"]
+    max_std: float = pp["max_std"]
 
     initial_mean = jnp.zeros((horizon, dim_a))
     initial_state = PlannerState(key=key, mean=initial_mean)
@@ -149,10 +152,7 @@ def create_mppi_planner(
         z0 = encode_fn(cost_params, obs)
 
         # 2. Compute policy proposals once before the iteration loop
-        if action_proposal_fn is not None:
-            pi_seqs = action_proposal_fn(cost_params, z0, proposal_key, num_pi_trajs)
-        else:
-            pi_seqs = jnp.zeros((0, horizon, dim_a))
+        pi_seqs = action_proposal_fn(cost_params, z0, proposal_key, num_pi_trajs)
 
         n_gaussian = num_samples - num_pi_trajs
 

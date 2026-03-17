@@ -65,7 +65,7 @@ def init_trainer(
 
     Currently supported: "tdmpc2"
     """
-    trainer_type = config.get("trainer", "tdmpc2")
+    trainer_type = config["trainer"]
     print(f"Initializing trainer: {trainer_type.upper()}")
 
     if trainer_type == "tdmpc2":
@@ -109,9 +109,9 @@ def init_tdmpc2_trainer(
     """
     tp = config["trainer_params"]
     lr: float = tp["lr"]
-    encoder_lr: float = tp.get("encoder_lr", lr * 0.3)
+    encoder_lr: float = tp["encoder_lr"]
     policy_lr: float = tp["policy_lr"]
-    grad_clip_norm: float = tp.get("grad_clip_norm", 20.0)
+    grad_clip_norm: float = tp["grad_clip_norm"]
     H: int = tp["horizon"]
     discount_factor: float = tp["discount_factor"]
     temporal_decay: float = tp["temporal_decay"]
@@ -128,12 +128,12 @@ def init_tdmpc2_trainer(
     num_bins: int = critic_cfg["num_bins"]
     vmin: float = critic_cfg["vmin"]
     vmax: float = critic_cfg["vmax"]
-    num_ensemble: int = critic_cfg.get("num_ensemble", 5)
+    num_ensemble: int = critic_cfg["num_ensemble"]
 
     reward_cfg = config["reward_params"]
-    rew_num_bins: int = reward_cfg.get("num_bins", num_bins)
-    rew_vmin: float = reward_cfg.get("vmin", vmin)
-    rew_vmax: float = reward_cfg.get("vmax", vmax)
+    rew_num_bins: int = reward_cfg["num_bins"]
+    rew_vmin: float = reward_cfg["vmin"]
+    rew_vmax: float = reward_cfg["vmax"]
 
     # --- Optimizers ---
     # World-model optimizer: per-component learning rates, EMA/policy/normalizer frozen
@@ -228,10 +228,8 @@ def init_tdmpc2_trainer(
         # Q target: min of 2 random ensemble members on EMA critic
         q_keys_flat = jax.random.split(q_key, B * H)
         q_min_flat = jax.vmap(
-            lambda z, a, k: critic.scalar_value(
-                params["ema_critic"], z, a, "min", k
-            )
-        )(z_next_flat_sg, next_actions_flat, q_keys_flat)  # (B*H,)
+            critic.subsample_and_min, in_axes=(None, 0, 0, 0)
+        )(params["ema_critic"], z_next_flat_sg, next_actions_flat, q_keys_flat)  # (B*H,)
         q_min = q_min_flat.reshape(B, H)
 
         td_targets = jax.lax.stop_gradient(rewards + discount_factor * q_min)  # (B, H)
@@ -304,42 +302,8 @@ def init_tdmpc2_trainer(
         Policy loss over all H+1 latent states with temporal_decay weighting.
         Gradients only flow through policy_params.
         """
-        B = zs_sg.shape[0]
-        H1 = zs_sg.shape[1]  # H+1
-
-        key, pi_key, q_key = jax.random.split(key, 3)
-
-        # Sample actions for all (B, H+1) latent states
-        flat_z = zs_sg.reshape(B * H1, -1)
-        flat_pi_keys = jax.random.split(pi_key, B * H1)
-        flat_actions, flat_log_probs = sample_batch(
-            policy_params, flat_z, flat_pi_keys
-        )  # (B*H1, dim_a), (B*H1,)
-
-        # Average Q of 2 random ensemble members (stop_gradient on critic)
-        flat_q_keys = jax.random.split(q_key, B * H1)
-        flat_avg_q = jax.vmap(
-            lambda z, a, k: critic.scalar_value(critic_params_sg, z, a, "avg", k)
-        )(flat_z, flat_actions, flat_q_keys)  # (B*H1,)
-
-        avg_q = flat_avg_q.reshape(B, H1)            # (B, H+1)
-        log_probs = flat_log_probs.reshape(B, H1)    # (B, H+1)
-
-        # Q normalization with running scale (IQR-based, no mean subtraction)
-        avg_q_norm = avg_q / scale
-
-        # Temporal decay weights
-        temporal_weights = temporal_decay ** jnp.arange(H1)  # (H+1,)
-
-        # pi_loss = -(entropy_coef * scaled_entropy + Q_normalized) * weights
-        scaled_entropy = -log_probs * dim_action  # (B, H+1)
-        pi_loss = jnp.mean(-(entropy_coef * scaled_entropy + avg_q_norm) * temporal_weights)
-
-        metrics = {
-            "policy_loss": pi_loss,
-            "policy_entropy": (-log_probs).mean(),
-        }
-        return pi_loss, (metrics, avg_q)
+        TODO: IMPLEMENT
+        return None
 
     @jax.jit
     def train_step(

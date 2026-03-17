@@ -26,8 +26,8 @@ def init_policy(key: jax.Array, config: dict) -> tuple["Policy", dict]:
     """
     policy_cfg = config["policy_params"]
     features = policy_cfg["features"]
-    log_std_min: float = policy_cfg.get("log_std_min", -10.0)
-    log_std_max: float = policy_cfg.get("log_std_max", 2.0)
+    log_std_min: float = policy_cfg["log_std_min"]
+    log_std_max: float = policy_cfg["log_std_max"]
 
     latent_dim: int = config["encoder_params"]["encoder_features"][-1]
     dim_a: int = config["dim_action"]

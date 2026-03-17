@@ -98,7 +98,8 @@
       "num_bins": 101,
       "vmin": -10.0,
       "vmax": 10.0,
-      "dropout": 0.01
+      "dropout": 0.01,
+      "num_subsample": 2
     },
 
     "policy_params": {

@@ -9,8 +9,8 @@ from max.utilities import mish, two_hot_inv
 
 
 class Critic(NamedTuple):
-    value: Callable         # (critic_params, z, a) -> logits  shape (...batch dims...) prepended with (num_ensemble,)
-    scalar_value: Callable  # (critic_params, z, a, return_type, key) -> scalar Q
+    value: Callable            # (critic_params, z, a) -> logits  shape (...batch dims...) prepended with (num_ensemble,)
+    subsample_and_min: Callable  # (critic_params, z, a, key) -> scalar Q
 
 
 def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
@@ -18,23 +18,25 @@ def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
     Initialize Q-function ensemble.
 
     config["critic_params"]:
-        features:     list[int], MLP hidden sizes
-        num_ensemble: int, number of Q-network ensemble members (default 5)
-        num_bins:     int, distributional bins (default 101)
-        vmin:         float, minimum return (default -10)
-        vmax:         float, maximum return (default 10)
-        dropout:      float, dropout rate on first hidden layer (default 0.01)
+        features:      list[int], MLP hidden sizes
+        num_ensemble:  int, number of Q-network ensemble members
+        num_bins:      int, distributional bins
+        vmin:          float, minimum return
+        vmax:          float, maximum return
+        dropout:       float, dropout rate on first hidden layer
+        num_subsample: int, ensemble members to subsample for TD targets
 
     Returns:
         (Critic, critic_params) where critic_params = {"ensemble": vmapped_flax_params}
     """
     critic_cfg = config["critic_params"]
     features = critic_cfg["features"]
-    num_ensemble: int = critic_cfg.get("num_ensemble", 5)
-    num_bins: int = critic_cfg.get("num_bins", 101)
-    vmin: float = critic_cfg.get("vmin", -10.0)
-    vmax: float = critic_cfg.get("vmax", 10.0)
-    dropout: float = critic_cfg.get("dropout", 0.01)
+    num_ensemble: int = critic_cfg["num_ensemble"]
+    num_bins: int = critic_cfg["num_bins"]
+    vmin: float = critic_cfg["vmin"]
+    vmax: float = critic_cfg["vmax"]
+    dropout: float = critic_cfg["dropout"]
+    num_subsample: int = critic_cfg["num_subsample"]
 
     class _QNet(nn.Module):
         @nn.compact
@@ -71,35 +73,22 @@ def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
             return q_net.apply(params, z, a)
         return jax.vmap(single_forward)(critic_params["ensemble"])
 
-    def scalar_value(
+    def subsample_and_min(
         critic_params: Any,
         z: jnp.ndarray,
         a: jnp.ndarray,
-        return_type: str,
         key: jax.Array,
     ) -> jnp.ndarray:
         """
-        Returns scalar Q estimate(s).
-        return_type:
-          "min" - pick 2 random ensemble members, return min (anti-overestimation for TD targets)
-          "avg" - pick 2 random ensemble members, return average (for policy gradient)
-          "all" - return all ensemble Q-values (num_ensemble, ...)
+        Pick num_subsample random ensemble members, return min of their scalar Q values.
+        Used for TD targets (anti-overestimation).
         """
-        logits = value(critic_params, z, a)               # (num_ensemble, ..., num_bins)
-        q_vals = two_hot_inv(logits, vmin, vmax, num_bins)  # (num_ensemble, ...)
+        logits = value(critic_params, z, a)                       # (num_ensemble, num_bins)
+        q_vals = two_hot_inv(logits, vmin, vmax, num_bins)         # (num_ensemble,)
+        keys = jax.random.split(key, num_subsample)
+        idxs = jax.vmap(
+            lambda k: jax.random.randint(k, shape=(), minval=0, maxval=num_ensemble)
+        )(keys)
+        return jnp.min(q_vals[idxs])
 
-        if return_type == "all":
-            return q_vals
-
-        key, k1, k2 = jax.random.split(key, 3)
-        idx1 = jax.random.randint(k1, shape=(), minval=0, maxval=num_ensemble)
-        idx2 = jax.random.randint(k2, shape=(), minval=0, maxval=num_ensemble)
-
-        if return_type == "min":
-            return jnp.minimum(q_vals[idx1], q_vals[idx2])
-        elif return_type == "avg":
-            return 0.5 * (q_vals[idx1] + q_vals[idx2])
-        else:
-            raise ValueError(f"Unknown return_type: {return_type!r}")
-
-    return Critic(value=value, scalar_value=scalar_value), critic_params
+    return Critic(value=value, subsample_and_min=subsample_and_min), critic_params

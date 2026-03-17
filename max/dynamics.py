@@ -31,7 +31,7 @@ def init_dynamics(
         Dynamics.predict(dyn_params["mean"], z, action) -> z_next
             action: raw (un-normalized); normalization baked in via closure.
     """
-    variant = config.get("dynamics", "dense")
+    variant = config["dynamics"]
     print(f"Initializing dynamics: {variant.upper()}")
 
     if normalizer is None:
@@ -65,7 +65,7 @@ def _init_dense_dynamics(
     dyn_cfg = config["dynamics_params"]
     features = dyn_cfg["dynamics_features"]
     simnorm_dim_v: int = dyn_cfg["simnorm_dim_v"]
-    simnorm_tau: float = dyn_cfg.get("simnorm_tau", 1.0)
+    simnorm_tau: float = dyn_cfg["simnorm_tau"]
 
     latent_dim: int = config["encoder_params"]["encoder_features"][-1]
     dim_action: int = config["dim_action"]
@@ -128,9 +128,9 @@ def _init_lora_dynamics(
     dyn_cfg = config["dynamics_params"]
     features = dyn_cfg["dynamics_features"]
     simnorm_dim_v: int = dyn_cfg["simnorm_dim_v"]
-    simnorm_tau: float = dyn_cfg.get("simnorm_tau", 1.0)
-    svd_rank: int = dyn_cfg.get("svd_rank", 32)
-    r_init_std: float = dyn_cfg.get("r_init_std", 1e-5)
+    simnorm_tau: float = dyn_cfg["simnorm_tau"]
+    svd_rank: int = dyn_cfg["svd_rank"]
+    r_init_std: float = dyn_cfg["r_init_std"]
     pretrained_path: str = dyn_cfg["pretrained_params_path"]
 
     latent_dim: int = config["encoder_params"]["encoder_features"][-1]

@@ -44,7 +44,7 @@ def init_encoder(
     encoder_features: Sequence[int] = enc_cfg["encoder_features"]
     decoder_features: Sequence[int] = enc_cfg["decoder_features"]
     simnorm_dim_v: int = enc_cfg["simnorm_dim_v"]
-    simnorm_tau: float = enc_cfg.get("simnorm_tau", 1.0)
+    simnorm_tau: float = enc_cfg["simnorm_tau"]
 
     latent_dim = encoder_features[-1]
     assert latent_dim % simnorm_dim_v == 0, (
