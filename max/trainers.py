@@ -227,7 +227,7 @@ def init_tdmpc2_trainer(
         q_keys_flat = jax.random.split(q_key, B * H)
         q_sampled_flat = jax.vmap(
             critic.subsample, in_axes=(None, 0, 0, 0)
-        )(params["ema_critic"], z_next_flat_sg, next_actions_flat, q_keys_flat)  # (B*H, 2)
+        )(params["ema_critic"], z_next_flat_sg, next_actions_flat, q_keys_flat)  # (B*H, num_subsample)
         q_min_flat = jnp.min(q_sampled_flat, axis=-1)                            # (B*H,)
         q_min = q_min_flat.reshape(B, H)
 
@@ -310,7 +310,7 @@ def init_tdmpc2_trainer(
 
             actions, log_probs = sample_batch(policy_params, z_t, sample_keys)  # (B, dim_a), (B,)
 
-            q_sampled = critic.subsample(critic_params_sg, z_t, actions, subkey)  # (2, B)
+            q_sampled = critic.subsample(critic_params_sg, z_t, actions, subkey)  # (num_subsample, B)
             avg_q = jnp.mean(q_sampled, axis=0)                                   # (B,)
             avg_qs.append(avg_q)
 

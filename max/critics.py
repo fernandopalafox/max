@@ -73,22 +73,20 @@ def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
             return q_net.apply(params, z, a)
         return jax.vmap(single_forward)(critic_params["ensemble"])
 
-    # TODO: CHANGE THIS SO THAT n IS NOT A PARAMETER, BUT INSTEAD ALWAYS SUBSAMPLES num_subsample ENSEMBLE MEMBERS. THIS WAY WE CAN JIT COMPILE THE FUNCTION.
     def subsample(
         critic_params: Any,
         z: jnp.ndarray,
         a: jnp.ndarray,
         key: jax.Array,
-        n: int = 2,
     ) -> jnp.ndarray:
         """
-        Pick n random ensemble members, return their scalar Q values (no aggregation).
-        z/a unbatched -> returns (n,); z/a batched (B,...) -> returns (n, B).
-        Caller decides how to aggregate (min for TD targets, mean for policy).
+        Pick num_subsample random ensemble members, return their scalar Q values (no aggregation).
+        z/a unbatched -> returns (num_subsample,); z/a batched (B,...) -> returns (num_subsample, B).
+        Caller decides how to aggregate (min for TD targets, mean for policy/planner).
         """
         logits = value(critic_params, z, a)                        # (num_ensemble, [B,] num_bins)
         q_vals = two_hot_inv(logits, vmin, vmax, num_bins)          # (num_ensemble, [B])
-        idxs = jax.random.choice(key, num_ensemble, shape=(n,), replace=False)
-        return q_vals[idxs]                                         # (n, [B])
+        idxs = jax.random.choice(key, num_ensemble, shape=(num_subsample,), replace=False)
+        return q_vals[idxs]                                         # (num_subsample, [B])
 
     return Critic(value=value, subsample=subsample), critic_params
