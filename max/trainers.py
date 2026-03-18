@@ -65,7 +65,6 @@ def init_trainer(
     Currently supported: "tdmpc2"
     """
     trainer_type = config["trainer"]
-    print(f"Initializing trainer: {trainer_type.upper()}")
 
     if trainer_type == "tdmpc2":
         return init_tdmpc2_trainer(
@@ -282,9 +281,9 @@ def init_tdmpc2_trainer(
             + value_coef * q_loss
         )
         metrics = {
-            "consistency_loss": consistency_loss,
-            "reward_loss": reward_loss,
-            "q_loss": q_loss,
+            "losses/consistency": consistency_loss,
+            "losses/reward":      reward_loss,
+            "losses/value":       q_loss,
         }
         return total_loss, (metrics, zs_stacked)
 
@@ -320,7 +319,7 @@ def init_tdmpc2_trainer(
             policy_loss = policy_loss - (temporal_decay ** t) * jnp.mean(step_objective)
 
         avg_qs_stacked = jnp.stack(avg_qs, axis=1)                  # (B, H+1)
-        metrics = {"pi_loss": policy_loss, "pi_entropy": jnp.mean(-log_probs)}
+        metrics = {"losses/policy": policy_loss, "losses/entropy": jnp.mean(-log_probs)}
         return policy_loss, (metrics, avg_qs_stacked)
 
     @jax.jit
@@ -375,7 +374,7 @@ def init_tdmpc2_trainer(
             opt_state={"world_model": new_wm_opt, "policy": new_pi_opt},
         )
 
-        all_metrics = {**wm_metrics, **pi_metrics, "wm_loss_total": wm_loss_total}
+        all_metrics = {**wm_metrics, **pi_metrics, "losses/world_model": wm_loss_total}
         return new_train_state, parameters, all_metrics
 
     def train_fn(train_state, batch, parameters, key):

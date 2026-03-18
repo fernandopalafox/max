@@ -45,7 +45,6 @@ def init_planner(
     For MPPI planner: pass encoder, dynamics, reward, critic, policy, and key.
     """
     planner_type = config["planner_type"]
-    print(f"Initializing planner: {planner_type.upper()}")
 
     if planner_type == "mppi":
         pp = config["planner_params"]

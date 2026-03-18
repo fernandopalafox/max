@@ -68,3 +68,8 @@ def ema_update(old: Any, new: Any, decay: float) -> Any:
     return jax.tree_util.tree_map(
         lambda o, n: decay * o + (1.0 - decay) * n, old, new
     )
+
+
+def count_parameters(params: Any) -> int:
+    """Count total number of scalar parameters in a pytree."""
+    return sum(x.size for x in jax.tree_util.tree_leaves(params))

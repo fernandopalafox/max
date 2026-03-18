@@ -5,20 +5,9 @@ import jax.numpy as jnp
 from typing import Dict
 
 
-def init_jax_buffers(
-    num_agents: int,
-    buffer_size: int,
-    dim_state: int,
-    dim_action: int,
-) -> Dict[str, jnp.ndarray]:
+def init_buffer(config: dict) -> Dict[str, jnp.ndarray]:
     """
     Pre-allocate JAX arrays for buffer storage.
-
-    Args:
-        num_agents: Number of agents
-        buffer_size: Maximum number of steps to store
-        dim_state: State dimension
-        dim_action: Action dimension
 
     Returns:
         Dict containing preallocated JAX arrays:
@@ -27,6 +16,10 @@ def init_jax_buffers(
             - rewards: (num_agents, buffer_size)
             - dones:   (buffer_size,)
     """
+    num_agents  = config["num_agents"]
+    buffer_size = config["buffer_size"]
+    dim_state   = config["dim_state"]
+    dim_action  = config["dim_action"]
     return {
         "states":  jnp.zeros((num_agents, buffer_size, dim_state)),
         "actions": jnp.zeros((num_agents, buffer_size, dim_action)),
@@ -36,7 +29,7 @@ def init_jax_buffers(
 
 
 @jax.jit
-def update_buffer_dynamic(
+def update_buffer(
     buffers: Dict[str, jnp.ndarray],
     buffer_idx: int,
     states: jnp.ndarray,

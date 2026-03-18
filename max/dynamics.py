@@ -32,7 +32,6 @@ def init_dynamics(
             action: raw (un-normalized); normalization baked in via closure.
     """
     variant = config["dynamics"]
-    print(f"Initializing dynamics: {variant.upper()}")
 
     if normalizer is None:
         normalizer, normalizer_params = init_normalizer(config)
@@ -144,7 +143,6 @@ def _init_lora_dynamics(
     with open(pretrained_path, "rb") as f:
         pretrained = pickle.load(f)
     pretrained_dyn = pretrained["dynamics"]["mean"]["params"]
-    print(f"Loaded pretrained dynamics from {pretrained_path}")
 
     # Build frozen layer dicts and initialize R matrices
     frozen_layers = []

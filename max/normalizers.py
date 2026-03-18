@@ -94,10 +94,8 @@ def init_normalizer(config: Dict) -> Tuple[Normalizer, Dict]:
 
     if method == "none":
         normalizer = NONE_NORMALIZER
-        print("-> Using NO normalization.")
     else:
         normalizer = STANDARD_NORMALIZER
-        print(f"-> Using {method.upper()} normalization.")
 
     params = _initialize_normalization_params(config)
     return normalizer, params

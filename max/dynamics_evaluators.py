@@ -51,7 +51,6 @@ def init_evaluator(
     Returns:
         Evaluator instance
     """
-    print("Initializing evaluator: TDMPC2 ROLLOUT (MPPI)")
     return _create_evaluator(config, encoder, dynamics, reward, critic, policy)
 
 
@@ -86,7 +85,6 @@ def _create_evaluator(
     if ep:
         env_config["env_params"] = ep
 
-    print("  Initializing evaluation environment...")
     reset_fn, step_fn, get_obs_fn = init_env(env_config)
 
     # Build MPPI planner config — evaluator_params.planner_params overrides top-level
@@ -96,7 +94,6 @@ def _create_evaluator(
         mppi_config["planner_params"] = ep_pp
     mppi_config["planner_type"] = "mppi"
 
-    print("  Initializing MPPI planner for evaluation...")
     key = jax.random.key(seed)
     key, planner_key = jax.random.split(key)
 
@@ -162,5 +159,4 @@ def _create_evaluator(
             "num_episodes": num_episodes,
         }
 
-    print("  TDMPC2 rollout evaluator initialized.")
     return Evaluator(evaluate_fn=evaluate_fn)

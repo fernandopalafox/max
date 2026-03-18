@@ -36,7 +36,7 @@ from max.normalizers import (
     NONE_NORMALIZER,
     STANDARD_NORMALIZER,
 )
-from max.buffers import init_jax_buffers, update_buffer_dynamic
+from max.buffers import init_buffer, update_buffer
 from max.planners import Planner, PlannerState, init_planner
 from max.dynamics_evaluators import init_evaluator
 
@@ -71,8 +71,8 @@ __all__ = [
     "NONE_NORMALIZER",
     "STANDARD_NORMALIZER",
     # Buffers
-    "init_jax_buffers",
-    "update_buffer_dynamic",
+    "init_buffer",
+    "update_buffer",
     # Planners
     "Planner",
     "PlannerState",

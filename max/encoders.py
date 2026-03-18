@@ -67,7 +67,6 @@ def init_encoder(
         with open(pretrained_path, "rb") as f:
             pretrained = pickle.load(f)
         encoder_nn_params = pretrained["encoder"]["encoder"]
-        print(f"Loaded pretrained encoder from {pretrained_path}")
     else:
         key, k1 = jax.random.split(key)
         encoder_nn_params = encoder_net.init(k1, dummy_norm_state)

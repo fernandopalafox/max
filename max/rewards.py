@@ -57,8 +57,6 @@ def init_reward_model(config: dict, encoder=None) -> tuple["Reward", dict]:
     dummy_a = jnp.ones((dim_a,))
     reward_params = reward_net.init(jax.random.key(0), dummy_z, dummy_a)
 
-    print("Initializing reward model: TDMPC2_LEARNED")
-
     def logits_fn(reward_params: Any, z: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
         return reward_net.apply(reward_params, z, a)
 
