@@ -62,13 +62,13 @@
     "plot_eval": true,
     "env_name": "cheetah",
     "num_agents": 1,
-    "total_steps": 200000,
+    "total_steps": 1000000,
     "dim_state": 17,
     "dim_action": 6,
     "train_freq": 1,
-    "normalize_freq": 1000000,
-    "eval_freq": 300000,
-    "buffer_size": 200010,
+    "normalize_freq": 1000001,
+    "eval_freq": 1000010,
+    "buffer_size": 1000010,
 
     "evaluator_params": {
       "seed": 123,

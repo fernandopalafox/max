@@ -62,7 +62,8 @@ def init_policy(key: jax.Array, config: dict) -> tuple["Policy", dict]:
             (tanh_action, log_prob) with Jacobian correction for tanh squashing.
         """
         mean, log_std_raw = policy_net.apply(policy_params["policy_net"], z)
-        log_std = jnp.clip(log_std_raw, log_std_min, log_std_max)
+        log_std_dif = log_std_max - log_std_min
+        log_std = log_std_min + 0.5 * log_std_dif * (jnp.tanh(log_std_raw) + 1)
         std = jnp.exp(log_std)
 
         key, noise_key = jax.random.split(key)

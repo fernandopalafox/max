@@ -256,8 +256,8 @@ def main(config):
     for step in range(1, config["total_steps"] + 1):
         step_start = time.time()
 
-        full_state = jnp.concatenate([mjx_data.qpos, mjx_data.qvel])
-        full_states_for_animation.append(np.array(full_state))
+        # full_state = jnp.concatenate([mjx_data.qpos, mjx_data.qvel])
+        # full_states_for_animation.append(np.array(full_state))
 
         # ---- Planning step (MPPI in latent space) ----
         _t0 = time.time()

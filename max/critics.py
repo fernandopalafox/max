@@ -9,8 +9,8 @@ from max.utilities import mish, two_hot_inv
 
 
 class Critic(NamedTuple):
-    value: Callable            # (critic_params, z, a) -> logits  shape (...batch dims...) prepended with (num_ensemble,)
-    subsample_and_min: Callable  # (critic_params, z, a, key) -> scalar Q
+    value: Callable       # (critic_params, z, a) -> logits  shape (...batch dims...) prepended with (num_ensemble,)
+    subsample: Callable   # (critic_params, z, a, key, n=2) -> (n, ...) Q values (raw, no min/mean)
 
 
 def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
@@ -73,22 +73,21 @@ def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
             return q_net.apply(params, z, a)
         return jax.vmap(single_forward)(critic_params["ensemble"])
 
-    def subsample_and_min(
+    def subsample(
         critic_params: Any,
         z: jnp.ndarray,
         a: jnp.ndarray,
         key: jax.Array,
+        n: int = 2,
     ) -> jnp.ndarray:
         """
-        Pick num_subsample random ensemble members, return min of their scalar Q values.
-        Used for TD targets (anti-overestimation).
+        Pick n random ensemble members, return their scalar Q values (no aggregation).
+        z/a unbatched -> returns (n,); z/a batched (B,...) -> returns (n, B).
+        Caller decides how to aggregate (min for TD targets, mean for policy).
         """
-        logits = value(critic_params, z, a)                       # (num_ensemble, num_bins)
-        q_vals = two_hot_inv(logits, vmin, vmax, num_bins)         # (num_ensemble,)
-        keys = jax.random.split(key, num_subsample)
-        idxs = jax.vmap(
-            lambda k: jax.random.randint(k, shape=(), minval=0, maxval=num_ensemble)
-        )(keys)
-        return jnp.min(q_vals[idxs])
+        logits = value(critic_params, z, a)                        # (num_ensemble, [B,] num_bins)
+        q_vals = two_hot_inv(logits, vmin, vmax, num_bins)          # (num_ensemble, [B])
+        idxs = jax.random.choice(key, num_ensemble, shape=(n,), replace=False)
+        return q_vals[idxs]                                         # (n, [B])
 
-    return Critic(value=value, subsample_and_min=subsample_and_min), critic_params
+    return Critic(value=value, subsample=subsample), critic_params
