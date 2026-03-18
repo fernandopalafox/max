@@ -43,46 +43,41 @@ def main(config):
     save_dir = config.get("save_dir", None)
     plot_eval = config.get("plot_eval", False)
 
-    # ---- Initialize environment ----
-    print(f"[{time.time()-t0:.2f}s] Initializing environment...")
+    # ---- Environment ----
     env_params = EnvParams(**config["env_params"])
     reset_fn, step_fn, get_obs_fn = make_cheetah_env(env_params)
-    print(f"[{time.time()-t0:.2f}s] Environment initialized")
 
-    # ---- TDMPC2 component initialization ----
-    print(f"[{time.time()-t0:.2f}s] Initializing components...")
+    # ---- Normalizer ----
     normalizer, norm_params = init_normalizer(config)
 
-    key, enc_key = jax.random.split(key)
-    encoder, enc_params = init_encoder(enc_key, config, normalizer, norm_params)
-
-    key, dyn_key = jax.random.split(key)
-    dynamics, dyn_params = init_dynamics(dyn_key, config, normalizer, norm_params, encoder=encoder)
-
-    key, critic_key = jax.random.split(key)
-    critic, critic_params = init_critic(critic_key, config)
-
-    key, policy_key = jax.random.split(key)
-    policy, policy_params = init_policy(policy_key, config)
-
+    # ---- Model components ----
+    key, enc_key, dyn_key, critic_key, policy_key = jax.random.split(key, 5)
+    encoder,      enc_params    = init_encoder(enc_key, config, normalizer)
+    dynamics,     dyn_params    = init_dynamics(dyn_key, config, normalizer, norm_params)
+    critic,       critic_params = init_critic(critic_key, config)
+    policy,       policy_params = init_policy(policy_key, config)
     reward_model, reward_params = init_reward_model(config, encoder=encoder)
 
-    # ---- Build unified parameters dict ----
+    # ---- Parameters dict ----
     parameters = {
-        "encoder":    enc_params,
-        "dynamics":   dyn_params,
-        "reward":     reward_params,
-        "critic":     critic_params,
-        "ema_critic": copy.deepcopy(critic_params),
-        "policy":     policy_params,
+        "mean": {
+            "encoder":    enc_params,
+            "dynamics":   dyn_params,
+            "reward":     reward_params,
+            "critic":     critic_params,
+            "ema_critic": copy.deepcopy(critic_params),
+            "policy":     policy_params,
+        },
         "normalizer": {**norm_params, "q_scale": jnp.array(1.0)},
     }
 
+    # ---- Trainer ----
     key, trainer_key = jax.random.split(key)
     trainer, train_state = init_trainer(
         trainer_key, config, encoder, dynamics, critic, policy, reward_model, parameters
     )
 
+    # ---- Sampler, evaluator, planner, buffer ----
     sampler = init_sampler(config["sampler"])
 
     evaluator = init_evaluator(
@@ -108,21 +103,10 @@ def main(config):
     buffers = init_buffer(config)
     buffer_idx = 0
 
-    enc_n   = count_parameters(enc_params["encoder"])
-    dyn_n   = count_parameters(dyn_params["mean"])
-    cri_n   = count_parameters(critic_params)
-    pol_n   = count_parameters(policy_params)
-    rew_n   = count_parameters(reward_params)
-    total_n = enc_n + dyn_n + cri_n + pol_n + rew_n
-    wandb.config.update({
-        "num_params_encoder": enc_n,
-        "num_params_dynamics": dyn_n,
-        "num_params_critic": cri_n,
-        "num_params_policy": pol_n,
-        "num_params_reward": rew_n,
-        "num_params_total": total_n,
-    })
-    print(f"[{time.time()-t0:.2f}s] Components ready  (enc={enc_n:,}  dyn={dyn_n:,}  cri={cri_n:,}  pol={pol_n:,}  rew={rew_n:,}  total={total_n:,})")
+    # ---- Parameter count ----
+    total_n = count_parameters(parameters["mean"])
+    wandb.config.update({"num_params_total": total_n})
+    print(f"[{time.time()-t0:.2f}s] Components ready  (total={total_n:,})")
 
     print(f"Starting TDMPC2 cheetah finetuning for {config['max_steps']} steps")
 
@@ -152,6 +136,7 @@ def main(config):
 
     t_planner = 0.0
     t_step = 0.0
+    t_buffer = 0.0
     t_train = 0.0
     t_eval = 0.0
 
@@ -164,7 +149,6 @@ def main(config):
         _t0 = time.time()
         key, planner_key = jax.random.split(key)
         planner_state = planner_state.replace(key=planner_key)
-        # MPPI solve: cost_params = full parameters dict
         actions, planner_state = planner.solve(planner_state, current_obs, parameters)
         action = actions[0][None, :]  # (1, dim_a) with agent dim
         t_planner += time.time() - _t0
@@ -181,6 +165,7 @@ def main(config):
         episode_total_reward += float(rewards[0])
 
         # ---- Buffer update ----
+        _t0 = time.time()
         buffers = update_buffer(
             buffers,
             buffer_idx,
@@ -190,6 +175,7 @@ def main(config):
             float(done),
         )
         buffer_idx += 1
+        t_buffer += time.time() - _t0
         current_obs = next_obs
 
         # ---- Episode reset ----
@@ -260,6 +246,7 @@ def main(config):
     print(f"\n=== TIMING SUMMARY ===")
     print(f"Total planner time: {t_planner:.2f}s")
     print(f"Total step time:    {t_step:.2f}s")
+    print(f"Total buffer time:  {t_buffer:.2f}s")
     print(f"Total train time:   {t_train:.2f}s")
     print(f"Total eval time:    {t_eval:.2f}s")
     print(f"======================\n")

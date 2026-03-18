@@ -136,11 +136,15 @@ def init_tdmpc2_trainer(
     # --- Optimizers ---
     # World-model optimizer: per-component learning rates, EMA/policy/normalizer frozen
     def _make_labels(params: dict) -> dict:
-        """Assign optimizer label to every leaf based on top-level key."""
-        result = {}
-        for top_key, subtree in params.items():
-            result[top_key] = jax.tree_util.tree_map(lambda _: top_key, subtree)
-        return result
+        """Assign optimizer label to every leaf based on component key under params["mean"]."""
+        mean_labels = {
+            k: jax.tree_util.tree_map(lambda _: k, v)
+            for k, v in params["mean"].items()
+        }
+        return {
+            "mean": mean_labels,
+            "normalizer": jax.tree_util.tree_map(lambda _: "normalizer", params["normalizer"]),
+        }
 
     partition_optimizers = {
         "encoder":    optax.chain(optax.clip_by_global_norm(grad_clip_norm), optax.adam(encoder_lr)),
@@ -161,7 +165,7 @@ def init_tdmpc2_trainer(
     )
 
     wm_opt_state = wm_optimizer.init(init_params)
-    pi_opt_state = pi_optimizer.init(init_params["policy"])
+    pi_opt_state = pi_optimizer.init(init_params["mean"]["policy"])
 
     train_state = TrainState(
         opt_state={"world_model": wm_opt_state, "policy": pi_opt_state},
@@ -171,7 +175,7 @@ def init_tdmpc2_trainer(
     # Single obs -> z
     encode_single = encoder.encode
     # Batched: (B, dim_s) -> (B, latent)
-    encode_batch = jax.vmap(encode_single, in_axes=(None, 0))
+    encode_batch = jax.vmap(encode_single, in_axes=(None, None, 0))
 
     # Dynamics: (mean_params, (B, latent), (B, dim_a)) -> (B, latent)
     infer_batch = jax.vmap(dynamics.predict, in_axes=(None, 0, 0))
@@ -213,27 +217,27 @@ def init_tdmpc2_trainer(
         # Flatten to (B*H, dim_s), encode, reshape
         obs_next_flat = obs[:, 1:].reshape(B * H, -1)
         z_next_flat_sg = jax.lax.stop_gradient(
-            encode_batch(params["encoder"], obs_next_flat)
+            encode_batch(params["mean"]["encoder"], params["normalizer"], obs_next_flat)
         )  # (B*H, latent)
 
         # Sample next actions from current policy
         pi_keys_flat = jax.random.split(pi_key, B * H)
         next_actions_flat, _ = sample_batch(
-            params["policy"], z_next_flat_sg, pi_keys_flat
+            params["mean"]["policy"], z_next_flat_sg, pi_keys_flat
         )  # (B*H, dim_a)
 
         # Q target: min of 2 random ensemble members on EMA critic
         q_keys_flat = jax.random.split(q_key, B * H)
         q_sampled_flat = jax.vmap(
             critic.subsample, in_axes=(None, 0, 0, 0)
-        )(params["ema_critic"], z_next_flat_sg, next_actions_flat, q_keys_flat)  # (B*H, num_subsample)
+        )(params["mean"]["ema_critic"], z_next_flat_sg, next_actions_flat, q_keys_flat)  # (B*H, num_subsample)
         q_min_flat = jnp.min(q_sampled_flat, axis=-1)                            # (B*H,)
         q_min = q_min_flat.reshape(B, H)
 
         td_targets = jax.lax.stop_gradient(rewards + discount_factor * q_min)  # (B, H)
 
         # ---- 2. Latent rollout ----
-        z0 = encode_batch(params["encoder"], obs[:, 0])  # (B, latent)
+        z0 = encode_batch(params["mean"]["encoder"], params["normalizer"], obs[:, 0])  # (B, latent)
 
         consistency_loss = jnp.zeros(())
         reward_loss = jnp.zeros(())
@@ -247,20 +251,20 @@ def init_tdmpc2_trainer(
             a_t = actions[:, t]  # (B, dim_a)
 
             # Reward and Q use CURRENT latent z_t (before dynamics step)
-            rew_logits = rew_logits_batch(params["reward"], z, a_t)  # (B, rew_num_bins)
+            rew_logits = rew_logits_batch(params["mean"]["reward"], z, a_t)  # (B, rew_num_bins)
             rew_targets = two_hot_batch_r(symlog(rewards[:, t]))  # (B, rew_num_bins)
             reward_loss = reward_loss + w * jnp.mean(soft_ce(rew_logits, rew_targets))
 
             # Q loss over ALL ensemble members
-            q_logits_all = critic.value(params["critic"], z, a_t)  # (num_ens, B, num_bins)
+            q_logits_all = critic.value(params["mean"]["critic"], z, a_t)  # (num_ens, B, num_bins)
             td_target_th = two_hot_batch_c(symlog(td_targets[:, t]))     # (B, num_bins)
             for qi in range(num_ensemble):
                 q_loss = q_loss + w * jnp.mean(soft_ce(q_logits_all[qi], td_target_th))
 
             # Dynamics step: z_t -> z_{t+1}
-            z_pred = infer_batch(params["dynamics"]["mean"], z, a_t)  # (B, latent)
+            z_pred = infer_batch(params["mean"]["dynamics"], z, a_t)  # (B, latent)
             z_real = jax.lax.stop_gradient(
-                encode_batch(params["encoder"], obs[:, t + 1])
+                encode_batch(params["mean"]["encoder"], params["normalizer"], obs[:, t + 1])
             )  # (B, latent)
 
             # Consistency loss: mean over all elements (matches F.mse_loss semantics)
@@ -343,24 +347,28 @@ def init_tdmpc2_trainer(
 
         # ---- Step 2: Policy backward (separate, detached zs) ----
         zs_sg = jax.lax.stop_gradient(zs)
-        critic_params_sg = jax.lax.stop_gradient(parameters["critic"])
+        critic_params_sg = jax.lax.stop_gradient(parameters["mean"]["critic"])
 
         q_scale = parameters["normalizer"]["q_scale"]
 
         (_, (pi_metrics, avg_qs)), pi_grads = jax.value_and_grad(
             pi_loss_fn, argnums=0, has_aux=True
-        )(parameters["policy"], critic_params_sg, zs_sg, pi_key, q_scale)
+        )(parameters["mean"]["policy"], critic_params_sg, zs_sg, pi_key, q_scale)
 
         pi_updates, new_pi_opt = pi_optimizer.update(
             pi_grads, train_state.opt_state["policy"]
         )
         parameters = parameters | {
-            "policy": optax.apply_updates(parameters["policy"], pi_updates)
+            "mean": parameters["mean"] | {
+                "policy": optax.apply_updates(parameters["mean"]["policy"], pi_updates)
+            }
         }
 
         # ---- Step 3: EMA target critic update ----
         parameters = parameters | {
-            "ema_critic": ema_update(parameters["ema_critic"], parameters["critic"], ema_decay)
+            "mean": parameters["mean"] | {
+                "ema_critic": ema_update(parameters["mean"]["ema_critic"], parameters["mean"]["critic"], ema_decay)
+            }
         }
 
         # ---- Update running Q scale (IQR from t=0 column) ----

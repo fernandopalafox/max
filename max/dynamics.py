@@ -19,7 +19,6 @@ def init_dynamics(
     config: Any,
     normalizer: Normalizer = None,
     normalizer_params: dict = None,
-    encoder=None,  # accepted for API compatibility, unused
 ) -> tuple[Dynamics, dict]:
     """
     Dispatcher — reads config.get("dynamics", "dense").
@@ -27,8 +26,8 @@ def init_dynamics(
     Supported variants: "dense", "dense_lora".
 
     Returns:
-        (Dynamics, dyn_params) where dyn_params = {"mean": <trainable params>}.
-        Dynamics.predict(dyn_params["mean"], z, action) -> z_next
+        (Dynamics, dyn_params) where dyn_params are the trainable params directly.
+        Dynamics.predict(dyn_params, z, action) -> z_next
             action: raw (un-normalized); normalization baked in via closure.
     """
     variant = config["dynamics"]
@@ -59,7 +58,7 @@ def _init_dense_dynamics(
         simnorm_dim_v:     int, simplex dimension V
         simnorm_tau:       float, softmax temperature (default 1.0)
 
-    Returns dyn_params = {"mean": flax_params}.
+    Returns dyn_params = flax_params directly.
     """
     dyn_cfg = config["dynamics_params"]
     features = dyn_cfg["dynamics_features"]
@@ -97,7 +96,7 @@ def _init_dense_dynamics(
         norm_action = normalizer.normalize(action_norm_params, action)
         return dynamics_net.apply(mean_params, jnp.concatenate([z, norm_action], axis=-1))
 
-    return Dynamics(predict=predict), {"mean": mean_params}
+    return Dynamics(predict=predict), mean_params
 
 
 def _init_lora_dynamics(
@@ -122,7 +121,7 @@ def _init_lora_dynamics(
         r_init_std:             float, std for R init (default 1e-5)
         pretrained_params_path: str, path to pretrained latent_dynamics pkl
 
-    Returns dyn_params = {"mean": {"R_0": ..., "R_1": ..., ...}}.
+    Returns dyn_params = {"R_0": ..., "R_1": ..., ...} directly.
     """
     dyn_cfg = config["dynamics_params"]
     features = dyn_cfg["dynamics_features"]
@@ -180,4 +179,4 @@ def _init_lora_dynamics(
         norm_action = normalizer.normalize(action_norm_params, action)
         return _forward(mean_params, jnp.concatenate([z, norm_action], axis=-1))
 
-    return Dynamics(predict=predict), {"mean": R_init}
+    return Dynamics(predict=predict), R_init

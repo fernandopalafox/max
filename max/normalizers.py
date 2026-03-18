@@ -55,12 +55,14 @@ def _initialize_normalization_params(config: Dict) -> Dict:
     """Internal function to initialize normalization parameters."""
     method = config.get("normalization", {}).get("method", "none")
 
+    # TODO: CLEAN THIS UP
+
     if method == "static":
         static_params = config["normalization_params"]
         norm_params = {}
-        state_min = jnp.array(static_params["state"]["min"])
-        state_max = jnp.array(static_params["state"]["max"])
-        norm_params["state"] = compute_static_stats(state_min, state_max)
+        state_min = jnp.array(static_params["encoder"]["min"])
+        state_max = jnp.array(static_params["encoder"]["max"])
+        norm_params["encoder"] = compute_static_stats(state_min, state_max)
         action_min = jnp.array(static_params["action"]["min"])
         action_max = jnp.array(static_params["action"]["max"])
         norm_params["action"] = compute_static_stats(action_min, action_max)
@@ -69,7 +71,7 @@ def _initialize_normalization_params(config: Dict) -> Dict:
             delta_max = jnp.array(static_params["delta"]["max"])
             norm_params["delta"] = compute_static_stats(delta_min, delta_max)
         else:
-            norm_params["delta"] = norm_params["state"]
+            norm_params["delta"] = norm_params["encoder"]
         if "wind" in static_params:
             wind_min = jnp.array(static_params["wind"]["min"])
             wind_max = jnp.array(static_params["wind"]["max"])
@@ -79,7 +81,7 @@ def _initialize_normalization_params(config: Dict) -> Dict:
         return norm_params
 
     elif method == "none":
-        return {"state": {}, "action": {}, "delta": {}}
+        return {"encoder": {}, "action": {}, "delta": {}}
 
     else:
         raise ValueError(f"Unknown normalization method: {method}")

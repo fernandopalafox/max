@@ -164,12 +164,12 @@ def main(config):
         def rollout_one_latent(params, init_state, action_seq, true_states):
             H = action_seq.shape[0]
             norm_true_states = jax.vmap(normalizer.normalize, in_axes=(None, 0))(
-                norm_params["state"], true_states
+                norm_params["encoder"], true_states
             )
             target_zs = jax.vmap(dynamics_model.encode, in_axes=(None, 0))(
                 params, norm_true_states
             )
-            norm_init = normalizer.normalize(norm_params["state"], init_state)
+            norm_init = normalizer.normalize(norm_params["encoder"], init_state)
             z0 = dynamics_model.encode(params, norm_init)
 
             def step(z, t_action):

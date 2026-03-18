@@ -65,7 +65,11 @@ def init_planner(
 def make_tdmpc2_encode_fn(encoder):
     """Returns encode_fn: (cost_params, obs) -> z"""
     def encode_fn(cost_params, obs):
-        return encoder.encode(cost_params["encoder"], obs)
+        return encoder.encode(
+            cost_params["mean"]["encoder"],
+            cost_params["normalizer"],
+            obs,
+        )
     return encode_fn
 
 
@@ -76,12 +80,12 @@ def make_tdmpc2_trajectory_value_fn(dynamics, reward, critic, policy, horizon, d
 
         def eval_traj(actions):
             def step(z, a):
-                r = reward.predict(cost_params["reward"], z, a)
-                z_next = dynamics.predict(cost_params["dynamics"]["mean"], z, a)
+                r = reward.predict(cost_params["mean"]["reward"], z, a)
+                z_next = dynamics.predict(cost_params["mean"]["dynamics"], z, a)
                 return z_next, r
             z_H, rewards = jax.lax.scan(step, z0, actions)
-            pi_a, _ = policy.sample(cost_params["policy"], z_H, key_pi)
-            v = jnp.mean(critic.subsample(cost_params["critic"], z_H, pi_a, key_q))
+            pi_a, _ = policy.sample(cost_params["mean"]["policy"], z_H, key_pi)
+            v = jnp.mean(critic.subsample(cost_params["mean"]["critic"], z_H, pi_a, key_q))
             discounts = discount_factor ** jnp.arange(horizon)
             return jnp.dot(discounts, rewards) + (discount_factor ** horizon) * v
 
@@ -95,8 +99,8 @@ def make_tdmpc2_action_proposal_fn(dynamics, policy, horizon):
     def action_proposal_fn(cost_params, z0, key, n):
         def single_rollout(k):
             def step(z, k_t):
-                a, _ = policy.sample(cost_params["policy"], z, k_t)
-                z_next = dynamics.predict(cost_params["dynamics"]["mean"], z, a)
+                a, _ = policy.sample(cost_params["mean"]["policy"], z, k_t)
+                z_next = dynamics.predict(cost_params["mean"]["dynamics"], z, a)
                 return z_next, a
             _, acts = jax.lax.scan(step, z0, jax.random.split(k, horizon))
             return acts

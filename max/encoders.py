@@ -11,14 +11,13 @@ from max.utilities import mish, simnorm
 
 
 class Encoder(NamedTuple):
-    encode: Callable  # (enc_params, obs) -> z
+    encode: Callable  # (enc_params, norm_params, obs) -> z
 
 
 def init_encoder(
     key: jax.Array,
     config: dict,
     normalizer: Normalizer,
-    normalizer_params: dict,
 ) -> tuple["Encoder", dict]:
     """
     Initialize encoder.
@@ -30,11 +29,7 @@ def init_encoder(
         pretrained_params_path: optional path to load pretrained params (pkl with "model" key)
 
     Returns:
-        (Encoder, enc_params) where:
-            enc_params = {
-                "encoder":    flax_encoder_params,
-                "normalizer": state_norm_params,
-            }
+        (Encoder, enc_params) where enc_params are the NN params only (no embedded normalizer).
     """
     dim_state = config["dim_state"]
     enc_cfg = config["encoder_params"]
@@ -66,18 +61,13 @@ def init_encoder(
     if pretrained_path:
         with open(pretrained_path, "rb") as f:
             pretrained = pickle.load(f)
-        encoder_nn_params = pretrained["encoder"]["encoder"]
+        enc_params = pretrained["encoder"]["encoder"]
     else:
         key, k1 = jax.random.split(key)
-        encoder_nn_params = encoder_net.init(k1, dummy_norm_state)
+        enc_params = encoder_net.init(k1, dummy_norm_state)
 
-    enc_params = {
-        "encoder":    encoder_nn_params,
-        "normalizer": normalizer_params["state"],
-    }
-
-    def encode(enc_params: Any, obs: jnp.ndarray) -> jnp.ndarray:
-        norm_obs = normalizer.normalize(enc_params["normalizer"], obs)
-        return encoder_net.apply(enc_params["encoder"], norm_obs)
+    def encode(enc_params: Any, norm_params: Any, obs: jnp.ndarray) -> jnp.ndarray:
+        norm_obs = normalizer.normalize(norm_params["encoder"], obs)
+        return encoder_net.apply(enc_params, norm_obs)
 
     return Encoder(encode=encode), enc_params

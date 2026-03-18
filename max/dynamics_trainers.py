@@ -207,7 +207,7 @@ def create_latent_trainer(
 
         # Precompute target normalized states and deltas
         norm_true_states = jax.vmap(normalizer.normalize, in_axes=(None, 0))(
-            norm_params["state"], true_states
+            norm_params["encoder"], true_states
         )
         # target latents: encode all true states (stop-gradient applied in loss)
         target_zs = jax.vmap(dynamics_model.encode, in_axes=(None, 0))(
@@ -215,7 +215,7 @@ def create_latent_trainer(
         )
 
         # Initial latent
-        norm_init = normalizer.normalize(norm_params["state"], init_state)
+        norm_init = normalizer.normalize(norm_params["encoder"], init_state)
         z0 = dynamics_model.encode(params, norm_init)
 
         def step(z, t_action):
