@@ -126,7 +126,7 @@ def main(config):
         traj = eval_results["trajectory"]
         full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
         gif_path = create_cheetah_xy_animation(full_states)
-        wandb.log({"eval/animation": wandb.Video(gif_path, fps=50, format="gif")}, step=0)
+        wandb.log({"eval/animation": wandb.Video(gif_path, format="gif")}, step=0)
 
     # ---- Main training loop ----
     print(f"[{time.time()-t0:.2f}s] Starting main loop...")
@@ -151,14 +151,16 @@ def main(config):
         planner_state = planner_state.replace(key=planner_key)
         actions, planner_state = planner.solve(planner_state, current_obs, parameters)
         action = actions[0][None, :]  # (1, dim_a) with agent dim
-        t_planner += time.time() - _t0
+        dt_planner = time.time() - _t0
+        t_planner += dt_planner
 
         # ---- Environment step ----
         _t0 = time.time()
         mjx_data, next_obs, rewards, terminated, truncated, _ = step_fn(
             mjx_data, episode_length, action
         )
-        t_step += time.time() - _t0
+        dt_step = time.time() - _t0
+        t_step += dt_step
         next_obs = next_obs.squeeze()
         done = terminated or truncated
         episode_length += 1
@@ -227,14 +229,14 @@ def main(config):
                 full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
                 gif_path = create_cheetah_xy_animation(full_states)
                 wandb.log(
-                    {"eval/animation": wandb.Video(gif_path, fps=50, format="gif")},
+                    {"eval/animation": wandb.Video(gif_path, format="gif")},
                     step=step
                 )
 
         step_total = time.time() - step_start
         print(
             f"[Step {step}] total={step_total:.3f}s | "
-            f"planner={t_planner/(step):.3f}s avg, "
+            f"planner={dt_planner:.3f}s, step={dt_step:.3f}s, "
             f"buffer={dt_buffer:.3f}s, train={dt_train:.3f}s, eval={dt_eval:.3f}s"
         )
 

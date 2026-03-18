@@ -216,7 +216,7 @@ def create_cheetah_xy_animation(states, max_frames=100, save_path=None, ghost_al
 
     anim = FuncAnimation(
         fig, animate, init_func=init,
-        frames=len(primary_states), interval=effective_dt * 1000, blit=False
+        frames=len(primary_states), interval=effective_dt * 500, blit=False
     )
 
     if save_path is None:
