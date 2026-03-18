@@ -67,13 +67,13 @@
     "dim_action": 6,
     "train_freq": 1,
     "normalize_freq": 1000001,
-    "eval_freq": 1000010,
+    "eval_freq": 50000,
     "buffer_size": 1000010,
 
     "evaluator_params": {
       "seed": 123,
-      "max_steps": 150,
-      "num_episodes": 2,
+      "max_steps": 500,
+      "num_episodes": 10,
       "env_params": {},
       "planner_params": {}
     },
@@ -117,8 +117,7 @@
     "env_params": {
       "num_agents": 1,
       "max_episode_steps": 500,
-      "cheetah_mass_scale": 1.0,
-      "cheetah_n_substeps": 2
+      "cheetah_mass_scale": 1.0
     },
 
     "trainer": "tdmpc2",

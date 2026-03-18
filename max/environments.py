@@ -16,7 +16,6 @@ class EnvParams:
 
     # Specific to cheetah
     cheetah_mass_scale: float = 1.0  # Multiplier for body masses (default 14kg total)
-    cheetah_n_substeps: int = 0      # 0 = use env default; set to 2 to match TDMPC2 50Hz
 
 
 def make_cheetah_env(params: EnvParams):
@@ -34,7 +33,6 @@ def make_cheetah_env(params: EnvParams):
 
     # Load environment and extract models (closed over)
     env = registry.load('CheetahRun')
-    n_substeps = params.cheetah_n_substeps if params.cheetah_n_substeps > 0 else env.n_substeps
 
     # Apply mass scaling if specified
     if params.cheetah_mass_scale != 1.0:
@@ -63,15 +61,19 @@ def make_cheetah_env(params: EnvParams):
         action: jnp.ndarray,
     ):
         """Steps the cheetah environment forward using mjx.Data directly."""
-        # Direct physics step - no reconstruction!
-        next_data = mjx_env.step(mjx_model, data, action.squeeze(), n_substeps)
+        # Two physics steps, reward sampled after each — matches TDMPC2's DMControl wrapper
+        # which calls env.step(action) twice and sums rewards (dmcontrol.py:57-59).
+        # Each call is one mujoco step at sim_dt=0.01s → 50Hz control frequency.
+        a = action.squeeze()
+        mid_data = mjx_env.step(mjx_model, data, a, 1)
+        next_data = mjx_env.step(mjx_model, mid_data, a, 1)
 
         # Get observation
         obs = get_obs_fn(next_data)
 
-        # Reward matches dm_control cheetah-run: tolerance(speed, bounds=(10, inf), margin=10)
-        # Linearly ramps 0→1 over [0, 10 m/s], clamped at [0, 1]
-        reward = jnp.clip(next_data.qvel[0] / 10.0, 0.0, 1.0)
+        # Reward sampled at both substeps and summed (max = 2.0 per agent step, 1000 per episode)
+        reward = (jnp.clip(mid_data.qvel[0] / 10.0, 0.0, 1.0)
+                  + jnp.clip(next_data.qvel[0] / 10.0, 0.0, 1.0))
         rewards = jnp.array([reward])
 
         # Check termination (NaN in state)

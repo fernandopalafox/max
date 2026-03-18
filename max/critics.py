@@ -73,6 +73,7 @@ def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
             return q_net.apply(params, z, a)
         return jax.vmap(single_forward)(critic_params["ensemble"])
 
+    # TODO: CHANGE THIS SO THAT n IS NOT A PARAMETER, BUT INSTEAD ALWAYS SUBSAMPLES num_subsample ENSEMBLE MEMBERS. THIS WAY WE CAN JIT COMPILE THE FUNCTION.
     def subsample(
         critic_params: Any,
         z: jnp.ndarray,
