@@ -27,7 +27,7 @@ def create_cheetah_xy_animation(states, max_frames=100, save_path=None, ghost_al
     import tempfile
 
     states = np.array(states)
-    dt = 0.01
+    dt = 0.02
 
     # Detect if multi-episode: shape (N, T, 18) vs single (T, 18)
     if states.ndim == 3:
@@ -216,13 +216,13 @@ def create_cheetah_xy_animation(states, max_frames=100, save_path=None, ghost_al
 
     anim = FuncAnimation(
         fig, animate, init_func=init,
-        frames=len(primary_states), interval=50, blit=False
+        frames=len(primary_states), interval=effective_dt * 1000, blit=False
     )
 
     if save_path is None:
         save_path = tempfile.mktemp(suffix='.gif')
 
-    anim.save(save_path, writer='pillow', fps=20)
+    anim.save(save_path, writer='pillow')
     plt.close(fig)
 
     return save_path

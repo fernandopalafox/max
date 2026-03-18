@@ -126,7 +126,7 @@ def main(config):
         traj = eval_results["trajectory"]
         full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
         gif_path = create_cheetah_xy_animation(full_states)
-        wandb.log({"eval/animation": wandb.Video(gif_path, fps=20, format="gif")}, step=0)
+        wandb.log({"eval/animation": wandb.Video(gif_path, fps=50, format="gif")}, step=0)
 
     # ---- Main training loop ----
     print(f"[{time.time()-t0:.2f}s] Starting main loop...")
@@ -175,7 +175,8 @@ def main(config):
             float(done),
         )
         buffer_idx += 1
-        t_buffer += time.time() - _t0
+        dt_buffer = time.time() - _t0
+        t_buffer += dt_buffer
         current_obs = next_obs
 
         # ---- Episode reset ----
@@ -226,7 +227,7 @@ def main(config):
                 full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
                 gif_path = create_cheetah_xy_animation(full_states)
                 wandb.log(
-                    {"eval/animation": wandb.Video(gif_path, fps=20, format="gif")},
+                    {"eval/animation": wandb.Video(gif_path, fps=50, format="gif")},
                     step=step
                 )
 
@@ -234,7 +235,7 @@ def main(config):
         print(
             f"[Step {step}] total={step_total:.3f}s | "
             f"planner={t_planner/(step):.3f}s avg, "
-            f"train={dt_train:.3f}s, eval={dt_eval:.3f}s"
+            f"buffer={dt_buffer:.3f}s, train={dt_train:.3f}s, eval={dt_eval:.3f}s"
         )
 
         # Handle buffer overflow
