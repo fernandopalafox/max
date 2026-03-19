@@ -6,7 +6,7 @@ import flax.linen as nn
 import pickle
 from typing import NamedTuple, Callable, Any
 
-from max.normalizers import Normalizer, init_normalizer
+from max.normalizers import Normalizer
 from max.utilities import mish, simnorm
 
 
@@ -18,28 +18,24 @@ def init_dynamics(
     key: jax.Array,
     config: Any,
     normalizer: Normalizer = None,
-    normalizer_params: dict = None,
 ) -> tuple[Dynamics, dict]:
     """
-    Dispatcher — reads config.get("dynamics", "dense").
+    Dispatcher — reads config["dynamics"]["type"].
 
     Supported variants: "dense", "dense_lora".
 
     Returns:
         (Dynamics, dyn_params) where dyn_params are the trainable params directly.
         Dynamics.predict(dyn_params, z, action) -> z_next
-            action: raw (un-normalized); normalization baked in via closure.
+            action: raw (un-normalized).
     """
-    variant = config["dynamics"]
-
-    if normalizer is None:
-        normalizer, normalizer_params = init_normalizer(config)
+    variant = config["dynamics"]["type"]
 
     if variant == "dense":
-        return _init_dense_dynamics(key, config, normalizer, normalizer_params)
+        return _init_dense_dynamics(key, config)
 
     if variant == "dense_lora":
-        return _init_lora_dynamics(key, config, normalizer, normalizer_params)
+        return _init_lora_dynamics(key, config)
 
     raise ValueError(f"Unknown dynamics: {variant!r}")
 
@@ -47,27 +43,25 @@ def init_dynamics(
 def _init_dense_dynamics(
     key: jax.Array,
     config: Any,
-    normalizer: Normalizer,
-    normalizer_params: dict,
 ) -> tuple[Dynamics, dict]:
     """
     Dense MLP dynamics: NormedLinear blocks with SimNorm final activation.
 
-    config["dynamics_params"]:
+    config["dynamics"]:
+        type:              str, "dense"
         dynamics_features: list[int], MLP hidden+output sizes (last = latent_dim)
         simnorm_dim_v:     int, simplex dimension V
         simnorm_tau:       float, softmax temperature (default 1.0)
 
     Returns dyn_params = flax_params directly.
     """
-    dyn_cfg = config["dynamics_params"]
+    dyn_cfg = config["dynamics"]
     features = dyn_cfg["dynamics_features"]
     simnorm_dim_v: int = dyn_cfg["simnorm_dim_v"]
     simnorm_tau: float = dyn_cfg["simnorm_tau"]
 
-    latent_dim: int = config["encoder_params"]["encoder_features"][-1]
+    latent_dim: int = config["encoder"]["encoder_features"][-1]
     dim_action: int = config["dim_action"]
-    action_norm_params = normalizer_params["action"]
 
     assert features[-1] == latent_dim, (
         f"dynamics_features[-1]={features[-1]} must equal latent_dim={latent_dim}"
@@ -93,8 +87,7 @@ def _init_dense_dynamics(
     mean_params = dynamics_net.init(k1, dummy_x)
 
     def predict(mean_params: Any, z: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
-        norm_action = normalizer.normalize(action_norm_params, action)
-        return dynamics_net.apply(mean_params, jnp.concatenate([z, norm_action], axis=-1))
+        return dynamics_net.apply(mean_params, jnp.concatenate([z, action], axis=-1))
 
     return Dynamics(predict=predict), mean_params
 
@@ -102,8 +95,6 @@ def _init_dense_dynamics(
 def _init_lora_dynamics(
     key: jax.Array,
     config: Any,
-    normalizer: Normalizer,
-    normalizer_params: dict,
 ) -> tuple[Dynamics, dict]:
     """
     LoRA-XS dynamics: frozen pretrained MLP with trainable low-rank R matrices.
@@ -114,7 +105,8 @@ def _init_lora_dynamics(
 
     Param count: num_layers * r^2 (e.g. 3 layers, r=16 → 768 params).
 
-    config["dynamics_params"]:
+    config["dynamics"]:
+        type:                   str, "dense_lora"
         dynamics_features:      list[int], must match pretrained architecture
         simnorm_dim_v, simnorm_tau: same as dense variant
         svd_rank:               int, LoRA rank r (default 32)
@@ -123,7 +115,7 @@ def _init_lora_dynamics(
 
     Returns dyn_params = {"R_0": ..., "R_1": ..., ...} directly.
     """
-    dyn_cfg = config["dynamics_params"]
+    dyn_cfg = config["dynamics"]
     features = dyn_cfg["dynamics_features"]
     simnorm_dim_v: int = dyn_cfg["simnorm_dim_v"]
     simnorm_tau: float = dyn_cfg["simnorm_tau"]
@@ -131,9 +123,7 @@ def _init_lora_dynamics(
     r_init_std: float = dyn_cfg["r_init_std"]
     pretrained_path: str = dyn_cfg["pretrained_params_path"]
 
-    latent_dim: int = config["encoder_params"]["encoder_features"][-1]
-    dim_action: int = config["dim_action"]
-    action_norm_params = normalizer_params["action"]
+    latent_dim: int = config["encoder"]["encoder_features"][-1]
 
     assert features[-1] == latent_dim, (
         f"dynamics_features[-1]={features[-1]} must equal latent_dim={latent_dim}"
@@ -176,7 +166,6 @@ def _init_lora_dynamics(
         return x
 
     def predict(mean_params: Any, z: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
-        norm_action = normalizer.normalize(action_norm_params, action)
-        return _forward(mean_params, jnp.concatenate([z, norm_action], axis=-1))
+        return _forward(mean_params, jnp.concatenate([z, action], axis=-1))
 
     return Dynamics(predict=predict), R_init

@@ -15,7 +15,7 @@ import wandb
 from max.normalizers import init_normalizer
 from max.buffers import init_buffer, update_buffer
 from max.utilities import count_parameters
-from max.environments import make_cheetah_env, EnvParams
+from max.environments import init_env
 from max.dynamics import init_dynamics
 from max.encoders import init_encoder
 from max.critics import init_critic
@@ -44,31 +44,30 @@ def main(config):
     plot_eval = config.get("plot_eval", False)
 
     # ---- Environment ----
-    env_params = EnvParams(**config["env_params"])
-    reset_fn, step_fn, get_obs_fn = make_cheetah_env(env_params)
+    reset_fn, step_fn, get_obs_fn = init_env(config)
 
     # ---- Normalizer ----
-    normalizer, norm_params = init_normalizer(config)
+    normalizer, norm_parameters = init_normalizer(config)
 
     # ---- Model components ----
     key, enc_key, dyn_key, critic_key, policy_key = jax.random.split(key, 5)
-    encoder,      enc_params    = init_encoder(enc_key, config, normalizer)
-    dynamics,     dyn_params    = init_dynamics(dyn_key, config, normalizer, norm_params)
-    critic,       critic_params = init_critic(critic_key, config)
-    policy,       policy_params = init_policy(policy_key, config)
-    reward_model, reward_params = init_reward_model(config, encoder=encoder)
+    encoder,      enc_parameters    = init_encoder(enc_key, config, normalizer)
+    dynamics,     dyn_parameters    = init_dynamics(dyn_key, config, normalizer)
+    critic,       critic_parameters = init_critic(critic_key, config)
+    policy,       policy_parameters = init_policy(policy_key, config)
+    reward_model, reward_parameters = init_reward_model(config)
 
     # ---- Parameters dict ----
     parameters = {
         "mean": {
-            "encoder":    enc_params,
-            "dynamics":   dyn_params,
-            "reward":     reward_params,
-            "critic":     critic_params,
-            "ema_critic": copy.deepcopy(critic_params),
-            "policy":     policy_params,
+            "encoder":    enc_parameters,
+            "dynamics":   dyn_parameters,
+            "reward":     reward_parameters,
+            "critic":     critic_parameters,
+            "ema_critic": copy.deepcopy(critic_parameters),
+            "policy":     policy_parameters,
         },
-        "normalizer": {**norm_params, "q_scale": jnp.array(1.0)},
+        "normalizer": {**norm_parameters, "q_scale": jnp.array(1.0)},
     }
 
     # ---- Trainer ----

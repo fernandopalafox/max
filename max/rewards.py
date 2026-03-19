@@ -20,11 +20,12 @@ class Reward(NamedTuple):
     logits: Callable   # (reward_params, z, action) -> (num_bins,)
 
 
-def init_reward_model(config: dict, encoder=None) -> tuple["Reward", dict]:
+def init_reward_model(config: dict) -> tuple["Reward", dict]:
     """
     Initialize the TDMPC2 learned reward head.
 
-    config["reward_params"]:
+    config["reward"]:
+        type:      str, reward type (e.g. "mlp")
         features:  list[int], MLP hidden sizes
         num_bins:  int, distributional bins
         vmin:      float, minimum reward value
@@ -33,13 +34,21 @@ def init_reward_model(config: dict, encoder=None) -> tuple["Reward", dict]:
     Returns:
         (Reward, reward_params) where reward_params are flat Flax params.
     """
-    rp = config["reward_params"]
+    reward_type = config["reward"]["type"]
+    if reward_type == "mlp":
+        return _init_mlp_reward(config)
+    else:
+        raise ValueError(f"Unknown reward type: {reward_type!r}")
+
+
+def _init_mlp_reward(config: dict) -> tuple["Reward", dict]:
+    rp = config["reward"]
     features = rp["features"]
     num_bins: int = rp["num_bins"]
     vmin: float = rp["vmin"]
     vmax: float = rp["vmax"]
 
-    latent_dim: int = config["encoder_params"]["encoder_features"][-1]
+    latent_dim: int = config["encoder"]["encoder_features"][-1]
     dim_a: int = config["dim_action"]
 
     class _RewardHead(nn.Module):

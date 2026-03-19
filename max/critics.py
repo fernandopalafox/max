@@ -17,7 +17,8 @@ def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
     """
     Initialize Q-function ensemble.
 
-    config["critic_params"]:
+    config["critic"]:
+        type:          str, critic type (e.g. "ensemble")
         features:      list[int], MLP hidden sizes
         num_ensemble:  int, number of Q-network ensemble members
         num_bins:      int, distributional bins
@@ -29,7 +30,15 @@ def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
     Returns:
         (Critic, critic_params) where critic_params = {"ensemble": vmapped_flax_params}
     """
-    critic_cfg = config["critic_params"]
+    critic_type = config["critic"]["type"]
+    if critic_type == "ensemble":
+        return _init_ensemble_critic(key, config)
+    else:
+        raise ValueError(f"Unknown critic type: {critic_type!r}")
+
+
+def _init_ensemble_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
+    critic_cfg = config["critic"]
     features = critic_cfg["features"]
     num_ensemble: int = critic_cfg["num_ensemble"]
     num_bins: int = critic_cfg["num_bins"]
@@ -37,6 +46,8 @@ def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
     vmax: float = critic_cfg["vmax"]
     dropout: float = critic_cfg["dropout"]
     num_subsample: int = critic_cfg["num_subsample"]
+
+    # TODO: fix dropout!
 
     class _QNet(nn.Module):
         @nn.compact
@@ -52,7 +63,7 @@ def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
 
     q_net = _QNet()
 
-    latent_dim: int = config["encoder_params"]["encoder_features"][-1]
+    latent_dim: int = config["encoder"]["encoder_features"][-1]
     dim_a: int = config["dim_action"]
     dummy_z = jnp.ones((latent_dim,))
     dummy_a = jnp.ones((dim_a,))

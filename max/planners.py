@@ -44,10 +44,10 @@ def init_planner(
 
     For MPPI planner: pass encoder, dynamics, reward, critic, policy, and key.
     """
-    planner_type = config["planner_type"]
+    planner_type = config["planner"]["type"]
 
     if planner_type == "mppi":
-        pp = config["planner_params"]
+        pp = config["planner"]
         horizon = pp["horizon"]
         discount = pp.get("discount_factor", 0.99)
         encode_fn = make_tdmpc2_encode_fn(encoder)
@@ -67,7 +67,6 @@ def make_tdmpc2_encode_fn(encoder):
     def encode_fn(cost_params, obs):
         return encoder.encode(
             cost_params["mean"]["encoder"],
-            cost_params["normalizer"],
             obs,
         )
     return encode_fn
@@ -118,7 +117,7 @@ def create_mppi_planner(
     """
     Generic MPPI planner. Reward/value logic is fully decoupled via callbacks.
 
-    config["planner_params"]:
+    config["planner"]:
         horizon:      int
         dim_control:  int (= dim_action)
         batch_size:   int, number of trajectory samples
@@ -129,7 +128,7 @@ def create_mppi_planner(
         num_elites:   int
         max_std:      float
     """
-    pp = config["planner_params"]
+    pp = config["planner"]
     horizon: int = pp["horizon"]
     dim_a: int = pp["dim_control"]
     num_samples: int = pp["batch_size"]

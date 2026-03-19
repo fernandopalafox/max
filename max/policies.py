@@ -14,9 +14,10 @@ class Policy(NamedTuple):
 
 def init_policy(key: jax.Array, config: dict) -> tuple["Policy", dict]:
     """
-    Initialize squashed Gaussian policy.
+    Initialize policy.
 
-    config["policy_params"]:
+    config["policy"]:
+        type:         str, policy type (e.g. "squashed_gaussian")
         features:     list[int], MLP hidden sizes
         log_std_min:  float, minimum log std (default -10)
         log_std_max:  float, maximum log std (default 2)
@@ -24,12 +25,20 @@ def init_policy(key: jax.Array, config: dict) -> tuple["Policy", dict]:
     Returns:
         (Policy, policy_params) where policy_params = {"policy_net": flax_params}
     """
-    policy_cfg = config["policy_params"]
+    policy_type = config["policy"]["type"]
+    if policy_type == "squashed_gaussian":
+        return _init_squashed_gaussian_policy(key, config)
+    else:
+        raise ValueError(f"Unknown policy type: {policy_type!r}")
+
+
+def _init_squashed_gaussian_policy(key: jax.Array, config: dict) -> tuple["Policy", dict]:
+    policy_cfg = config["policy"]
     features = policy_cfg["features"]
     log_std_min: float = policy_cfg["log_std_min"]
     log_std_max: float = policy_cfg["log_std_max"]
 
-    latent_dim: int = config["encoder_params"]["encoder_features"][-1]
+    latent_dim: int = config["encoder"]["encoder_features"][-1]
     dim_a: int = config["dim_action"]
 
     class _PolicyNet(nn.Module):

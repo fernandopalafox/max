@@ -69,35 +69,34 @@ def _create_evaluator(
     directly to the MPPI planner as cost_params.
 
     Evaluation config is read from evaluator_params (or falls back to top-level):
-        max_steps, num_episodes, seed, env_params, planner_params
+        max_steps, num_episodes, seed, environment, planner
     """
     evaluator_params = config.get("evaluator_params", {})
     seed = evaluator_params.get("seed", config.get("seed", 42))
     max_steps = evaluator_params.get(
         "max_steps",
-        config.get("env_params", {}).get("max_episode_steps", 200),
+        config.get("environment", {}).get("max_episode_steps", 200),
     )
     num_episodes = evaluator_params.get("num_episodes", 1)
 
     # Build env config — evaluator_params overrides take priority
     env_config = {**config}
-    ep = evaluator_params.get("env_params")
-    if ep:
-        env_config["env_params"] = ep
+    env_overrides = evaluator_params.get("environment", {})
+    if env_overrides:
+        env_config["environment"] = {**config["environment"], **env_overrides}
 
     reset_fn, step_fn, get_obs_fn = init_env(env_config)
 
-    # Build MPPI planner config — evaluator_params.planner_params overrides top-level
+    # Build MPPI planner config — evaluator_params.planner overrides top-level
     mppi_config = {**config}
-    ep_pp = evaluator_params.get("planner_params")
-    if ep_pp:
-        mppi_config["planner_params"] = ep_pp
-    mppi_config["planner_type"] = "mppi"
+    planner_overrides = evaluator_params.get("planner", {})
+    if planner_overrides:
+        mppi_config["planner"] = {**config["planner"], **planner_overrides}
 
     key = jax.random.key(seed)
     key, planner_key = jax.random.split(key)
 
-    pp = mppi_config.get("planner_params", {})
+    pp = mppi_config["planner"]
     horizon = pp["horizon"]
     discount = pp.get("discount_factor", 0.99)
     encode_fn = make_tdmpc2_encode_fn(encoder)

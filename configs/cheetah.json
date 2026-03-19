@@ -58,7 +58,6 @@
     "wandb_project": "cheetah_ft_latent",
     "seed": 43,
     "save_dir": null,
-    "env_name": "cheetah",
     "num_agents": 1,
     "max_steps": 1000000,
     "buffer_size": 1000010,
@@ -73,24 +72,26 @@
       "seed": 123,
       "max_steps": 500,
       "num_episodes": 10,
-      "env_params": {},
-      "planner_params": {}
+      "environment": {},
+      "planner": {}
     },
 
-    "encoder_params": {
+    "encoder": {
+      "type": "proprioceptive",
       "encoder_features": [256, 128],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0
     },
 
-    "dynamics": "dense",
-    "dynamics_params": {
+    "dynamics": {
+      "type": "dense",
       "dynamics_features": [512, 512, 128],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0
     },
 
-    "critic_params": {
+    "critic": {
+      "type": "ensemble",
       "features": [512, 512],
       "num_ensemble": 5,
       "num_bins": 101,
@@ -100,27 +101,30 @@
       "num_subsample": 2
     },
 
-    "policy_params": {
+    "policy": {
+      "type": "squashed_gaussian",
       "features": [512, 512],
       "log_std_min": -10,
       "log_std_max": 2
     },
 
-    "reward_params": {
+    "reward": {
+      "type": "mlp",
       "features": [512, 512],
       "num_bins": 101,
       "vmin": -10.0,
       "vmax": 10.0
     },
 
-    "env_params": {
+    "environment": {
+      "type": "cheetah",
       "num_agents": 1,
       "max_episode_steps": 500,
       "cheetah_mass_scale": 1.0
     },
 
-    "trainer": "tdmpc2",
-    "trainer_params": {
+    "trainer": {
+      "type": "tdmpc2",
       "lr": 3e-4,
       "encoder_lr": 9e-5,
       "policy_lr": 3e-4,
@@ -164,8 +168,8 @@
       "vel_fthigh", "vel_fshin", "vel_ffoot"
     ],
 
-    "planner_type": "mppi",
-    "planner_params": {
+    "planner": {
+      "type": "mppi",
       "horizon": 3,
       "num_iterations": 6,
       "dim_control": 6,

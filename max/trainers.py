@@ -64,7 +64,7 @@ def init_trainer(
 
     Currently supported: "tdmpc2"
     """
-    trainer_type = config["trainer"]
+    trainer_type = config["trainer"]["type"]
 
     if trainer_type == "tdmpc2":
         return init_tdmpc2_trainer(
@@ -91,7 +91,7 @@ def init_tdmpc2_trainer(
     """
     Initialize TD-MPC2 trainer.
 
-    config["trainer_params"]:
+    config["trainer"]:
         lr:               float, world-model LR (dynamics, reward, critic)
         encoder_lr:       float, encoder LR (default 0.3 * lr)
         policy_lr:        float, policy LR
@@ -105,7 +105,7 @@ def init_tdmpc2_trainer(
         value_coef:       float
         entropy_coef:     float
     """
-    tp = config["trainer_params"]
+    tp = config["trainer"]
     lr: float = tp["lr"]
     encoder_lr: float = tp["encoder_lr"]
     policy_lr: float = tp["policy_lr"]
@@ -122,13 +122,13 @@ def init_tdmpc2_trainer(
     dim_action: int = config["dim_action"]
 
     # critic distributional params
-    critic_cfg = config["critic_params"]
+    critic_cfg = config["critic"]
     num_bins: int = critic_cfg["num_bins"]
     vmin: float = critic_cfg["vmin"]
     vmax: float = critic_cfg["vmax"]
     num_ensemble: int = critic_cfg["num_ensemble"]
 
-    reward_cfg = config["reward_params"]
+    reward_cfg = config["reward"]
     rew_num_bins: int = reward_cfg["num_bins"]
     rew_vmin: float = reward_cfg["vmin"]
     rew_vmax: float = reward_cfg["vmax"]
@@ -175,7 +175,7 @@ def init_tdmpc2_trainer(
     # Single obs -> z
     encode_single = encoder.encode
     # Batched: (B, dim_s) -> (B, latent)
-    encode_batch = jax.vmap(encode_single, in_axes=(None, None, 0))
+    encode_batch = jax.vmap(encode_single, in_axes=(None, 0))
 
     # Dynamics: (mean_params, (B, latent), (B, dim_a)) -> (B, latent)
     infer_batch = jax.vmap(dynamics.predict, in_axes=(None, 0, 0))
@@ -217,7 +217,7 @@ def init_tdmpc2_trainer(
         # Flatten to (B*H, dim_s), encode, reshape
         obs_next_flat = obs[:, 1:].reshape(B * H, -1)
         z_next_flat_sg = jax.lax.stop_gradient(
-            encode_batch(params["mean"]["encoder"], params["normalizer"], obs_next_flat)
+            encode_batch(params["mean"]["encoder"], obs_next_flat)
         )  # (B*H, latent)
 
         # Sample next actions from current policy
@@ -237,7 +237,7 @@ def init_tdmpc2_trainer(
         td_targets = jax.lax.stop_gradient(rewards + discount_factor * q_min)  # (B, H)
 
         # ---- 2. Latent rollout ----
-        z0 = encode_batch(params["mean"]["encoder"], params["normalizer"], obs[:, 0])  # (B, latent)
+        z0 = encode_batch(params["mean"]["encoder"], obs[:, 0])  # (B, latent)
 
         consistency_loss = jnp.zeros(())
         reward_loss = jnp.zeros(())
@@ -264,7 +264,7 @@ def init_tdmpc2_trainer(
             # Dynamics step: z_t -> z_{t+1}
             z_pred = infer_batch(params["mean"]["dynamics"], z, a_t)  # (B, latent)
             z_real = jax.lax.stop_gradient(
-                encode_batch(params["mean"]["encoder"], params["normalizer"], obs[:, t + 1])
+                encode_batch(params["mean"]["encoder"], obs[:, t + 1])
             )  # (B, latent)
 
             # Consistency loss: mean over all elements (matches F.mse_loss semantics)

@@ -3,22 +3,20 @@
 import jax
 import jax.numpy as jnp
 from typing import Dict, Any
-from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
-class EnvParams:
-    """Environment parameters."""
+def init_env(config: Dict[str, Any]):
+    """
+    Initialize environment functions based on config["environment"]["type"].
+    """
+    env_type = config["environment"]["type"]
+    if env_type == "cheetah":
+        return _make_cheetah_env(config)
+    else:
+        raise ValueError(f"Unknown environment: {env_type!r}")
 
-    num_agents: int = 1
-    max_episode_steps: int = 200
-    dt: float = 0.1
 
-    # Specific to cheetah
-    cheetah_mass_scale: float = 1.0  # Multiplier for body masses (default 14kg total)
-
-
-def make_cheetah_env(params: EnvParams):
+def _make_cheetah_env(config: Dict[str, Any]):
     """
     Factory function that wraps mujoco_playground CheetahRun environment.
 
@@ -31,16 +29,22 @@ def make_cheetah_env(params: EnvParams):
     from mujoco_playground._src import mjx_env
     from mujoco import mjx
 
+    env_cfg = config["environment"]
+    max_episode_steps = env_cfg.get("max_episode_steps", 200)
+    cheetah_mass_scale = env_cfg.get("cheetah_mass_scale", 1.0)
+
+    print(f"Initializing environment: cheetah")
+
     # Load environment and extract models (closed over)
     env = registry.load('CheetahRun')
 
     # Apply mass scaling if specified
-    if params.cheetah_mass_scale != 1.0:
+    if cheetah_mass_scale != 1.0:
         import mujoco
         mj_model = env.mj_model
         # Scale both mass and inertia (inertia scales linearly with mass for uniform density)
-        mj_model.body_mass[:] *= params.cheetah_mass_scale
-        mj_model.body_inertia[:] *= params.cheetah_mass_scale
+        mj_model.body_mass[:] *= cheetah_mass_scale
+        mj_model.body_inertia[:] *= cheetah_mass_scale
         # Recalculate dependent constants (invweight, actuator_acc0, etc.)
         mj_data = mujoco.MjData(mj_model)
         mujoco.mj_setConst(mj_model, mj_data)
@@ -81,7 +85,7 @@ def make_cheetah_env(params: EnvParams):
         terminated = done
 
         # Truncation based on max steps
-        truncated = step_count >= params.max_episode_steps
+        truncated = step_count >= max_episode_steps
 
         info = {
             "forward_vel": next_data.qvel[0],
@@ -96,25 +100,3 @@ def make_cheetah_env(params: EnvParams):
         return obs[None, :]  # Add agent dimension
 
     return reset_fn, step_fn, get_obs_fn
-
-
-def init_env(config: Dict[str, Any]):
-    """
-    Initialize environment functions based on configuration.
-    Only supports cheetah.
-    """
-    env_name = config.get("env_name", None)
-    env_params_dict = config.get("env_params", {})
-
-    # Filter to only EnvParams fields
-    valid_fields = {f for f in EnvParams.__dataclass_fields__}
-    filtered = {k: v for k, v in env_params_dict.items() if k in valid_fields}
-
-    params = EnvParams(**filtered)
-
-    print(f"Initializing environment: {env_name}")
-
-    if env_name == "cheetah":
-        return make_cheetah_env(params)
-    else:
-        raise ValueError(f"Unknown environment name: '{env_name}'")
