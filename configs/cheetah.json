@@ -57,7 +57,9 @@
   "finetuning": {
     "wandb_project": "cheetah_ft_latent",
     "seed": 43,
-    "save_dir": null,
+    "save_dir": "./data/models/cheetah",
+    "checkpoint_enabled": true,
+    "checkpoint_freq": 100000,
     "num_agents": 1,
     "max_steps": 1000000,
     "buffer_size": 1000010,

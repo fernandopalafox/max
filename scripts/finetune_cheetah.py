@@ -29,6 +29,7 @@ import copy
 import os
 import pickle
 import json
+from datetime import datetime
 
 from max.visualizers import create_cheetah_xy_animation
 
@@ -41,6 +42,17 @@ def main(config):
 
     save_dir = config.get("save_dir", None)
     plot_eval = config.get("plot_eval", False)
+    checkpoint_enabled = config.get("checkpoint_enabled", False)
+    checkpoint_freq = config.get("checkpoint_freq", 100000)
+
+    # Create timestamped run directory
+    run_dir = None
+    if save_dir:
+        run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = os.path.join(save_dir, run_timestamp)
+        os.makedirs(run_dir, exist_ok=True)
+        if checkpoint_enabled:
+            print(f"Checkpointing every {checkpoint_freq} steps to {run_dir}/")
 
     # ---- Environment ----
     reset_fn, step_fn, get_obs_fn = init_env(config)
@@ -235,6 +247,13 @@ def main(config):
             f"buffer={dt_buffer:.3f}s, train={dt_train:.3f}s, eval={dt_eval:.3f}s"
         )
 
+        # ---- Checkpoint ----
+        if checkpoint_enabled and run_dir and step % checkpoint_freq == 0:
+            ckpt_path = os.path.join(run_dir, f"step_{step}.pkl")
+            with open(ckpt_path, "wb") as f:
+                pickle.dump(jax.device_get(parameters), f)
+            print(f"Checkpoint saved: {ckpt_path}")
+
         # Handle buffer overflow
         if buffer_idx >= config["buffer_size"]:
             buffers = init_buffer(config)
@@ -249,16 +268,12 @@ def main(config):
     print(f"Total eval time:    {t_eval:.2f}s")
     print(f"======================\n")
 
-    # ---- Save parameters ----
-    if save_dir:
-        run_name = config.get("wandb_run_name", f"cheetah_tdmpc2_{config['seed']}")
-        save_path = os.path.join(save_dir, run_name)
-        os.makedirs(save_path, exist_ok=True)
-        print(f"\nSaving parameters to {save_path}...")
-        params_np = jax.device_get(parameters)
-        file_path = os.path.join(save_path, "parameters.pkl")
+    # ---- Save final parameters ----
+    if run_dir:
+        file_path = os.path.join(run_dir, "final.pkl")
+        print(f"\nSaving final parameters to {file_path}...")
         with open(file_path, "wb") as f:
-            pickle.dump(params_np, f)
+            pickle.dump(jax.device_get(parameters), f)
         print(f"Parameters saved to {file_path}")
 
     print("Run complete.")
