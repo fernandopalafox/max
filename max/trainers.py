@@ -257,9 +257,9 @@ def init_tdmpc2_trainer(
 
             # Q loss over ALL ensemble members
             q_logits_all = critic.value(params["mean"]["critic"], z, a_t)  # (num_ens, B, num_bins)
-            td_target_th = two_hot_batch_c(symlog(td_targets[:, t]))     # (B, num_bins)
-            for qi in range(num_ensemble):
-                q_loss = q_loss + w * jnp.mean(soft_ce(q_logits_all[qi], td_target_th))
+            td_target_th = two_hot_batch_c(symlog(td_targets[:, t]))  # (B, num_bins)
+            q_loss_all = jax.vmap(soft_ce, in_axes=(0, None))(q_logits_all, td_target_th)  # (num_ensemble, B)
+            q_loss = q_loss + w * jnp.sum(jnp.mean(q_loss_all, axis=-1))
 
             # Dynamics step: z_t -> z_{t+1}
             z_pred = infer_batch(params["mean"]["dynamics"], z, a_t)  # (B, latent)
@@ -291,7 +291,7 @@ def init_tdmpc2_trainer(
         }
         return total_loss, (metrics, zs_stacked)
 
-    def pi_loss_fn(
+    def policy_loss_fn(
         policy_params: dict,
         critic_params_sg: dict,
         zs_sg: jnp.ndarray,
@@ -307,22 +307,22 @@ def init_tdmpc2_trainer(
         avg_qs = []
 
         for t in range(H + 1):
-            z_t = zs_sg[:, t, :]                                    # (B, latent_dim)
+            z_t = zs_sg[:, t, :]  # (B, latent_dim)
             key, sample_key, subkey = jax.random.split(key, 3)
             sample_keys = jax.random.split(sample_key, B)
 
             actions, log_probs = sample_batch(policy_params, z_t, sample_keys)  # (B, dim_a), (B,)
 
             q_sampled = critic.subsample(critic_params_sg, z_t, actions, subkey)  # (num_subsample, B)
-            avg_q = jnp.mean(q_sampled, axis=0)                                   # (B,)
+            avg_q = jnp.mean(q_sampled, axis=0)  # (B,)
             avg_qs.append(avg_q)
 
-            entropy = -log_probs                                     # (B,)
-            scaled_entropy = entropy * dim_action                    # scale by action_dim
+            entropy = -log_probs  # (B,)
+            scaled_entropy = entropy * dim_action  # scale by action_dim
             step_objective = (avg_q + entropy_coef * scaled_entropy) / q_scale  # (B,)
             policy_loss = policy_loss - (temporal_decay ** t) * jnp.mean(step_objective)
 
-        avg_qs_stacked = jnp.stack(avg_qs, axis=1)                  # (B, H+1)
+        avg_qs_stacked = jnp.stack(avg_qs, axis=1)  # (B, H+1)
         metrics = {"losses/policy": policy_loss, "losses/entropy": jnp.mean(-log_probs)}
         return policy_loss, (metrics, avg_qs_stacked)
 
@@ -352,7 +352,7 @@ def init_tdmpc2_trainer(
         q_scale = parameters["normalizer"]["q_scale"]
 
         (_, (pi_metrics, avg_qs)), pi_grads = jax.value_and_grad(
-            pi_loss_fn, argnums=0, has_aux=True
+            policy_loss_fn, argnums=0, has_aux=True
         )(parameters["mean"]["policy"], critic_params_sg, zs_sg, pi_key, q_scale)
 
         pi_updates, new_pi_opt = pi_optimizer.update(
