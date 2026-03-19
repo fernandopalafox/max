@@ -4,11 +4,11 @@ import jax
 import jax.numpy as jnp
 import optax
 from typing import Callable, Any, NamedTuple, Optional
-from max.dynamics import DynamicsModel, PETSDynamicsModel
+from max.dynamics import DynamicsModel
 from flax import struct
 from flax.traverse_util import path_aware_map
 import jax.flatten_util
-from max.estimators import EKFCovArgs
+from max.estimators import EKFCovArgs, EKFEfficient
 from max.normalizers import STANDARD_NORMALIZER
 
 
@@ -49,13 +49,17 @@ def init_trainer(
         trainer, train_state = create_gradient_descent_trainer(
             config, dynamics_model, init_params
         )
+    elif trainer_type == "latent_gd":
+        trainer, train_state = create_latent_trainer(
+            config, dynamics_model, init_params
+        )
     elif trainer_type == "ekf":
         trainer, train_state = create_EKF_trainer(
             config, dynamics_model, init_params
         )
-    elif trainer_type == "pets":
-        trainer, train_state = create_probabilistic_ensemble_trainer(
-            config, dynamics_model, init_params, key
+    elif trainer_type == "ekf_efficient":
+        trainer, train_state = create_EKF_efficient_trainer(
+            config, dynamics_model, init_params
         )
     else:
         raise ValueError(f"Unknown trainer type: {trainer_type}")
@@ -71,9 +75,12 @@ def create_gradient_descent_trainer(
     """
     Creates a trainer that updates 'model' parameters with Adam and freezes
     'normalizer' parameters using optax.multi_transform.
+
+    Supports multi-step autoregressive loss via trainer_params.multistep_horizon.
     """
     trainer_params = config.get("trainer_params", {})
     learning_rate = trainer_params.get("learning_rate", 3e-4)
+    multistep_horizon = trainer_params.get("multistep_horizon", 1)
 
     partition_optimizers = {
         "model": optax.adam(learning_rate),
@@ -87,31 +94,172 @@ def create_gradient_descent_trainer(
     opt_state = optimizer.init(init_params)
     train_state = TrainState(params=init_params, opt_state=opt_state)
 
-    vmap_pred_norm_delta = jax.vmap(
-        dynamics_model.pred_norm_delta, in_axes=(None, 0, 0)
-    )
     normalizer = STANDARD_NORMALIZER
     vmap_normalize = jax.vmap(normalizer.normalize, in_axes=(None, 0))
 
-    @jax.jit
-    def loss_fn(params: Any, data: dict) -> float:
-        """Computes Mean Squared Error loss with normalized targets"""
-        states, actions, true_next_states = (
-            data["states"],
-            data["actions"],
-            data["next_states"],
+    if multistep_horizon == 1:
+        # Single-step loss (original behavior)
+        vmap_pred_norm_delta = jax.vmap(
+            dynamics_model.pred_norm_delta, in_axes=(None, 0, 0)
         )
-        pred_norm_deltas = vmap_pred_norm_delta(params, states, actions)
-        true_deltas = true_next_states - states
-        norm_params = params["normalizer"]
-        true_norm_deltas = vmap_normalize(norm_params["delta"], true_deltas)
-        return jnp.mean((true_norm_deltas - pred_norm_deltas) ** 2)
+
+        @jax.jit
+        def loss_fn(params: Any, data: dict) -> float:
+            """Computes Mean Squared Error loss in normalized delta space."""
+            states, actions, true_next_states = (
+                data["states"],
+                data["actions"],
+                data["next_states"],
+            )
+            pred_norm_delta = vmap_pred_norm_delta(params, states, actions)
+            target_delta = true_next_states - states
+            norm_params = params["normalizer"]["delta"]
+            target_norm_delta = vmap_normalize(norm_params, target_delta)
+            return jnp.mean((pred_norm_delta - target_norm_delta) ** 2)
+    else:
+        # Multi-step autoregressive loss
+        print(f"  Using multi-step loss with horizon={multistep_horizon}")
+
+        def rollout_one(params, init_state, action_seq, true_states):
+            """Autoregressive rollout for single sample, returns MSE."""
+            def step(state, action):
+                next_state = dynamics_model.pred_one_step(params, state, action)
+                return next_state, next_state
+
+            _, pred_states = jax.lax.scan(step, init_state, action_seq)
+
+            # Compute deltas: pred vs true
+            all_states = jnp.concatenate([init_state[None], pred_states], axis=0)
+            pred_deltas = all_states[1:] - all_states[:-1]
+            true_deltas = true_states[1:] - true_states[:-1]
+
+            # Normalize and compute MSE
+            pred_norm = vmap_normalize(params["normalizer"]["delta"], pred_deltas)
+            true_norm = vmap_normalize(params["normalizer"]["delta"], true_deltas)
+            return jnp.mean((pred_norm - true_norm) ** 2)
+
+        vmap_rollout = jax.vmap(rollout_one, in_axes=(None, 0, 0, 0))
+
+        @jax.jit
+        def loss_fn(params: Any, data: dict) -> float:
+            """Multi-step autoregressive loss in normalized delta space."""
+            states = data["states"]    # (batch, H+1, dim_s)
+            actions = data["actions"]  # (batch, H, dim_a)
+            init_states = states[:, 0]
+            losses = vmap_rollout(params, init_states, actions, states)
+            return jnp.mean(losses)
 
     @jax.jit
     def train_step(
         train_state: TrainState, data: dict
     ) -> tuple[TrainState, float]:
         """Performs a single gradient descent update"""
+        loss, grads = jax.value_and_grad(loss_fn)(train_state.params, data)
+        updates, new_opt_state = optimizer.update(
+            grads, train_state.opt_state, train_state.params
+        )
+        new_params = optax.apply_updates(train_state.params, updates)
+        new_train_state = train_state.replace(
+            params=new_params, opt_state=new_opt_state
+        )
+        return new_train_state, loss
+
+    def train_fn(
+        train_state: TrainState, data: dict, **kwargs
+    ) -> tuple[TrainState, float]:
+        return train_step(train_state, data)
+
+    return Trainer(train_fn=train_fn), train_state
+
+
+def create_latent_trainer(
+    config: Any,
+    dynamics_model: DynamicsModel,
+    init_params: Any,
+) -> tuple[Trainer, TrainState]:
+    """
+    Trains encoder+dynamics via a consistency loss (predicted latent vs. stop-gradient
+    target latent) and the decoder in isolation (stop-gradient latent input).
+    Uses temporal decay λ^t to weight near-horizon errors more.
+    """
+    trainer_params = config.get("trainer_params", {})
+    learning_rate = trainer_params.get("learning_rate", 3e-4)
+    temporal_coefficient = trainer_params.get("temporal_coefficient", 0.5)
+
+    partition_optimizers = {
+        "model": optax.adam(learning_rate),
+        "normalizer": optax.set_to_zero(),
+    }
+    mask = path_aware_map(lambda path, _: path[0], init_params)
+    optimizer = optax.multi_transform(partition_optimizers, mask)
+    opt_state = optimizer.init(init_params)
+    train_state = TrainState(params=init_params, opt_state=opt_state)
+
+    normalizer = STANDARD_NORMALIZER
+
+    def rollout_one(params, init_state, action_seq, true_states):
+        """
+        Autoregressive rollout for a single sample.
+        Returns combined consistency + decoder loss with temporal decay.
+        """
+        norm_params = params["normalizer"]
+        H = action_seq.shape[0]
+
+        # Precompute target normalized states and deltas
+        norm_true_states = jax.vmap(normalizer.normalize, in_axes=(None, 0))(
+            norm_params["encoder"], true_states
+        )
+        # target latents: encode all true states (stop-gradient applied in loss)
+        target_zs = jax.vmap(dynamics_model.encode, in_axes=(None, 0))(
+            params, norm_true_states
+        )
+
+        # Initial latent
+        norm_init = normalizer.normalize(norm_params["encoder"], init_state)
+        z0 = dynamics_model.encode(params, norm_init)
+
+        def step(z, t_action):
+            t, action = t_action
+            norm_action = normalizer.normalize(norm_params["action"], action)
+            z_next = dynamics_model.infer_dynamics(params, z, norm_action)
+            return z_next, (t, z_next)
+
+        _, (timesteps, pred_zs) = jax.lax.scan(
+            step, z0, (jnp.arange(H), action_seq)
+        )
+
+        # Temporal decay weights: λ^(t+1) for t in 0..H-1
+        weights = temporal_coefficient ** (timesteps + 1)  # (H,)
+
+        # Consistency loss: (pred_z - sg(target_z))^2 * λ^t
+        sg_target_zs = jax.lax.stop_gradient(target_zs[1:])  # (H, latent_dim)
+        consistency_errs = jnp.mean((pred_zs - sg_target_zs) ** 2, axis=-1)  # (H,)
+        consistency_loss = jnp.sum(weights * consistency_errs) / jnp.sum(weights)
+
+        # Decoder loss: (decode(sg(pred_z)) - norm_true_state)^2 * λ^t
+        sg_pred_zs = jax.lax.stop_gradient(pred_zs)  # (H, latent_dim)
+        pred_norm_next_states = jax.vmap(dynamics_model.decode, in_axes=(None, 0))(
+            params, sg_pred_zs
+        )
+        decoder_errs = jnp.mean((pred_norm_next_states - norm_true_states[1:]) ** 2, axis=-1)  # (H,)
+        decoder_loss = jnp.sum(weights * decoder_errs) / jnp.sum(weights)
+
+        return consistency_loss + decoder_loss
+
+    vmap_rollout = jax.vmap(rollout_one, in_axes=(None, 0, 0, 0))
+
+    @jax.jit
+    def loss_fn(params: Any, data: dict) -> float:
+        states = data["states"]    # (batch, H+1, dim_s)
+        actions = data["actions"]  # (batch, H, dim_a)
+        init_states = states[:, 0]
+        losses = vmap_rollout(params, init_states, actions, states)
+        return jnp.mean(losses)
+
+    @jax.jit
+    def train_step(
+        train_state: TrainState, data: dict
+    ) -> tuple[TrainState, float]:
         loss, grads = jax.value_and_grad(loss_fn)(train_state.params, data)
         updates, new_opt_state = optimizer.update(
             grads, train_state.opt_state, train_state.params
@@ -254,113 +402,114 @@ def create_EKF_trainer(
     return Trainer(train_fn=train_fn), train_state
 
 
-def create_probabilistic_ensemble_trainer(
+def create_EKF_efficient_trainer(
     config: Any,
-    dynamics_model: PETSDynamicsModel,
+    dynamics_model: DynamicsModel,
     init_params: Any,
-    key: jax.Array,
 ) -> tuple[Trainer, TrainState]:
     """
-    Creates a trainer for the Probabilistic Ensemble (PE) model.
+    Creates a trainer that updates model parameters using an EKFEfficient for
+    online learning (batch size of 1).
 
-    This trainer uses:
-    1. Bootstrapping to create unique datasets for each model in the ensemble.
-    2. Gaussian Negative Log-Likelihood loss to train the probabilistic outputs.
+    This is a simplified EKF that assumes identity dynamics (no process noise)
+    and uses a fixed measurement covariance.
     """
-    trainer_params = config.get("trainer_params", {})
-    learning_rate = trainer_params.get("learning_rate", 1e-3)
-    ensemble_size = config["dynamics_params"]["ensemble_size"]
+    dim_state = config["dim_state"]
+    dim_action = config["dim_action"]
+    learning_params = config.get("trainer_params", {})
+    learning_rate = learning_params.get("learning_rate", 3e-4)
+    jitter = learning_params.get("jitter", 1e-6)
+    init_cov_scale = learning_params.get("init_cov_scale", 1.0)
 
-    partition_optimizers = {
-        "model": optax.adam(learning_rate),
-        "normalizer": optax.set_to_zero(),
-    }
-    mask = path_aware_map(lambda path, _: path[0], init_params)
-    optimizer = optax.multi_transform(partition_optimizers, mask)
-    opt_state = optimizer.init(init_params)
-    train_state = TrainState(params=init_params, opt_state=opt_state, key=key)
-
-    vmap_pred_dist = jax.vmap(
-        dynamics_model.pred_norm_delta_dist, in_axes=(None, 0, 0)
+    flat_params_model, unflatten_fn_model = jax.flatten_util.ravel_pytree(
+        init_params["model"]
     )
-    normalizer = STANDARD_NORMALIZER
-    vmap_normalize = jax.vmap(normalizer.normalize, in_axes=(None, 0))
+    _, unflatten_fn_norm = jax.flatten_util.ravel_pytree(
+        init_params["normalizer"]
+    )
+    dim_params_model = flat_params_model.shape[0]
 
-    def loss_fn(model_params: Any, static_params: Any, data: dict) -> float:
-        """
-        Computes the Gaussian NLL loss for a SINGLE model.
-        """
-        params = {
-            "model": model_params,
-            "normalizer": static_params["normalizer"],
-        }
+    init_covariance = jnp.eye(dim_params_model) * init_cov_scale
+    train_state = TrainState(params=init_params, covariance=init_covariance)
 
-        states, actions, true_next_states = (
-            data["states"],
-            data["actions"],
-            data["next_states"],
+    @jax.jit
+    def parameter_dynamics_fn(params, _):
+        """Identity parameter dynamics (no weight decay)."""
+        return params
+
+    @jax.jit
+    def observation_fn(params, x):
+        state = x[:dim_state]
+        action = x[dim_state : dim_state + dim_action]
+        flat_params_norm = x[dim_state + dim_action :]
+        params_model = unflatten_fn_model(params)
+        params_norm = unflatten_fn_norm(flat_params_norm)
+        params_pytree = {"model": params_model, "normalizer": params_norm}
+        pred_next_state = dynamics_model.pred_one_step(
+            params_pytree, state, action
         )
-        pred_means, pred_log_vars = vmap_pred_dist(params, states, actions)
-        true_deltas = true_next_states - states
-        norm_params = params["normalizer"]
-        true_norm_deltas = vmap_normalize(norm_params["delta"], true_deltas)
-        inv_vars = jnp.exp(-pred_log_vars)
-        mse_term = jnp.sum(
-            jnp.square(pred_means - true_norm_deltas) * inv_vars, axis=-1
-        )
-        log_det_term = jnp.sum(pred_log_vars, axis=-1)
-        loss = jnp.mean(mse_term + log_det_term)
-        return loss
+        return pred_next_state - state
 
-    grad_fn = jax.value_and_grad(loss_fn, argnums=0)
-    vmap_grad_fn = jax.vmap(
-        grad_fn,
-        in_axes=(0, None, {"states": 0, "actions": 0, "next_states": 0}),
+    meas_cov = jnp.eye(dim_state) / learning_rate
+
+    estimator = EKFEfficient(
+        dynamics_fn=parameter_dynamics_fn,
+        observation_fn=observation_fn,
+        meas_cov=meas_cov,
+        jitter=jitter,
     )
 
     @jax.jit
     def train_step(
-        train_state: TrainState, bootstrapped_data: dict
+        train_state: TrainState, data: dict
     ) -> tuple[TrainState, float]:
-        """Performs a single gradient descent update for the entire ensemble."""
-        model_params = train_state.params["model"]
-        static_params = {"normalizer": train_state.params["normalizer"]}
+        """Performs a single EKF update on one data point."""
 
-        losses, model_grads = vmap_grad_fn(
-            model_params, static_params, bootstrapped_data
+        state = jnp.squeeze(data["states"], axis=0)
+        action = jnp.squeeze(data["actions"], axis=0)
+        next_state = jnp.squeeze(data["next_states"], axis=0)
+
+        flat_params_norm, _ = jax.flatten_util.ravel_pytree(
+            train_state.params["normalizer"]
         )
 
-        grads = {
-            "model": model_grads,
+        ekf_inp = jnp.concatenate([state, action, flat_params_norm], axis=-1)
+        ekf_out = next_state - state
+
+        flat_params_model, _ = jax.flatten_util.ravel_pytree(
+            train_state.params["model"]
+        )
+        flat_params_model_new, cov_params_model_new, _ = estimator.estimate(
+            flat_params_model,
+            train_state.covariance,
+            ekf_inp,
+            ekf_out,
+        )
+
+        # Prequential Error
+        pre_fit_pred = observation_fn(flat_params_model, ekf_inp)
+        pre_fit_loss = jnp.mean((ekf_out - pre_fit_pred) ** 2)
+
+        params_new = {
+            "model": unflatten_fn_model(flat_params_model_new),
             "normalizer": train_state.params["normalizer"],
         }
-
-        updates, new_opt_state = optimizer.update(
-            grads, train_state.opt_state, train_state.params
-        )
-        new_params = optax.apply_updates(train_state.params, updates)
         new_train_state = train_state.replace(
-            params=new_params, opt_state=new_opt_state
+            params=params_new, covariance=cov_params_model_new
         )
-
-        total_loss = jnp.mean(losses)
-        return new_train_state, total_loss
+        return new_train_state, pre_fit_loss
 
     def train_fn(
         train_state: TrainState, data: dict, **kwargs
     ) -> tuple[TrainState, float]:
-        """The public training function that handles bootstrapping."""
-        key, bootstrap_key = jax.random.split(train_state.key)
         batch_size = data["states"].shape[0]
+        if batch_size != 1:
+            raise ValueError(
+                f"EKF efficient trainer only supports a batch size of 1 for online learning. "
+                f"Received batch of size {batch_size}."
+            )
 
-        bootstrap_indices = jax.random.randint(
-            bootstrap_key,
-            shape=(ensemble_size, batch_size),
-            minval=0,
-            maxval=batch_size,
-        )
-        bootstrapped_data = jax.tree_map(lambda x: x[bootstrap_indices], data)
-        new_train_state, loss = train_step(train_state, bootstrapped_data)
-        return new_train_state.replace(key=key), loss
+        return train_step(train_state, data)
 
     return Trainer(train_fn=train_fn), train_state
+
