@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
 
-def create_cheetah_xy_animation(states, max_frames=100, save_path=None, ghost_alpha=0.3):
+def create_cheetah_xy_animation(states, max_frames=300, save_path=None, ghost_alpha=0.3):
     """
     Creates an animated GIF showing the cheetah as a stick-figure mesh.
 
@@ -216,7 +216,7 @@ def create_cheetah_xy_animation(states, max_frames=100, save_path=None, ghost_al
 
     anim = FuncAnimation(
         fig, animate, init_func=init,
-        frames=len(primary_states), interval=effective_dt * 300, blit=False
+        frames=len(primary_states), interval=effective_dt * 1000, blit=False
     )
 
     if save_path is None:
