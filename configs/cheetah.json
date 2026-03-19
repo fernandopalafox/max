@@ -64,7 +64,6 @@
     "dim_state": 17,
     "dim_action": 6,
     "train_freq": 1,
-    "normalize_freq": 1000001,
     "eval_freq": 10000,
     "plot_eval": true,
 
@@ -144,22 +143,6 @@
       "batch_size": 256,
       "horizon": 3,
       "min_buffer_size": 259
-    },
-
-    "normalization": { "method": "static" },
-    "normalization_params": {
-        "encoder": {
-        "min": [-1, -4, -1, -2, -2, -2, -2, -1, -4, -5, -10, -27, -33, -28, -19, -36, -25],
-        "max": [1, 18, 2, 1, 1, 1, 2, 1, 13, 5, 15, 24, 30, 30, 29, 33, 29]
-      },
-      "action": {
-        "min": [-1, -1, -1, -1, -1, -1],
-        "max": [1, 1, 1, 1, 1, 1]
-      },
-      "delta": {
-        "min": [-1, -17, -2, -1, -1, -1, -2, -1, -13, -4, -11, -28, -26, -34, -32, -30, -35],
-        "max": [1, 4, 1, 2, 1, 2, 1, 1, 4, 8, 9, 25, 35, 30, 30, 34, 35]
-      }
     },
 
     "state_labels": [

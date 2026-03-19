@@ -12,7 +12,6 @@ jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 import jax.numpy as jnp
 import numpy as np
 import wandb
-from max.normalizers import init_normalizer
 from max.buffers import init_buffer, update_buffer
 from max.utilities import count_parameters
 from max.environments import init_env
@@ -46,13 +45,10 @@ def main(config):
     # ---- Environment ----
     reset_fn, step_fn, get_obs_fn = init_env(config)
 
-    # ---- Normalizer ----
-    normalizer, norm_parameters = init_normalizer(config)
-
     # ---- Model components ----
     key, enc_key, dyn_key, critic_key, policy_key = jax.random.split(key, 5)
-    encoder,      enc_parameters    = init_encoder(enc_key, config, normalizer)
-    dynamics,     dyn_parameters    = init_dynamics(dyn_key, config, normalizer)
+    encoder,      enc_parameters    = init_encoder(enc_key, config)
+    dynamics,     dyn_parameters    = init_dynamics(dyn_key, config)
     critic,       critic_parameters = init_critic(critic_key, config)
     policy,       policy_parameters = init_policy(policy_key, config)
     reward_model, reward_parameters = init_reward_model(config)
@@ -67,7 +63,7 @@ def main(config):
             "ema_critic": copy.deepcopy(critic_parameters),
             "policy":     policy_parameters,
         },
-        "normalizer": {**norm_parameters, "q_scale": jnp.array(1.0)},
+        "normalizer": {"q_scale": jnp.array(1.0)},
     }
 
     # ---- Trainer ----
