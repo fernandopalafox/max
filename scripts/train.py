@@ -1,4 +1,4 @@
-# finetune_cheetah.py
+# train.py
 
 import os
 os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
@@ -22,7 +22,7 @@ from max.policies import init_policy
 from max.rewards import init_reward_model
 from max.trainers import init_trainer
 from max.samplers import init_sampler
-from max.dynamics_evaluators import init_evaluator
+from max.evaluators import init_evaluator
 from max.planners import init_planner
 import argparse
 import copy
@@ -289,7 +289,7 @@ def run_sweep():
     with open(config_path, "r") as f:
         full_config = json.load(f)
 
-    run_config = copy.deepcopy(full_config["finetuning"])
+    run_config = copy.deepcopy(full_config["training"])
 
     for key, value in wandb.config.items():
         keys = key.split(".")
@@ -303,7 +303,7 @@ def run_sweep():
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run TDMPC2 cheetah finetuning.")
+    parser = argparse.ArgumentParser(description="Run TDMPC2 training.")
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--num-seeds", type=int, default=1)
     parser.add_argument(
@@ -322,7 +322,7 @@ if __name__ == "__main__":
         )
         with open(config_path, "r") as f:
             full_config = json.load(f)
-        CONFIG = full_config["finetuning"]
+        CONFIG = full_config["training"]
 
         run_name_base = args.run_name or "cheetah_tdmpc2"
 

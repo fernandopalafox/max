@@ -16,7 +16,7 @@ Core Modules:
 - normalizers: State/action/reward normalization
 - buffers: JAX-based replay buffers
 - planners: Model-based planning (CEM, iCEM, MPPI)
-- evaluation: Dynamics model evaluation
+- evaluators: Rollout evaluation
 """
 
 __version__ = "0.1.0"
@@ -38,7 +38,7 @@ from max.normalizers import (
 )
 from max.buffers import init_buffer, update_buffer
 from max.planners import Planner, PlannerState, init_planner
-from max.dynamics_evaluators import init_evaluator
+from max.evaluators import init_evaluator
 
 __all__ = [
     # Version

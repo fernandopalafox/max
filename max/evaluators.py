@@ -1,4 +1,4 @@
-# dynamics_evaluators.py
+# evaluators.py
 """
 TDMPC2 rollout evaluator using MPPI in latent space.
 """
