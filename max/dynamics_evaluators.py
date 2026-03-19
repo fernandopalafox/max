@@ -68,10 +68,10 @@ def _create_evaluator(
     evaluate(parameters) accepts the full unified parameters dict and passes it
     directly to the MPPI planner as cost_params.
 
-    Evaluation config is read from evaluator_params (or falls back to top-level):
+    Evaluation config is read from evaluator (or falls back to top-level):
         max_steps, num_episodes, seed, environment, planner
     """
-    evaluator_params = config.get("evaluator_params", {})
+    evaluator_params = config.get("evaluator", {})
     seed = evaluator_params.get("seed", config.get("seed", 42))
     max_steps = evaluator_params.get(
         "max_steps",

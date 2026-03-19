@@ -63,7 +63,7 @@ def main(config):
             "ema_critic": copy.deepcopy(critic_parameters),
             "policy":     policy_parameters,
         },
-        "normalizer": {"q_scale": jnp.array(1.0)},
+        "normalizer": {"q_scale": jnp.array(config["normalizer"]["critic"]["q_scale_init"])},
     }
 
     # ---- Trainer ----

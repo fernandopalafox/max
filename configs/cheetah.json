@@ -67,12 +67,18 @@
     "eval_freq": 10000,
     "plot_eval": true,
 
-    "evaluator_params": {
+    "evaluator": {
       "seed": 123,
       "max_steps": 500,
       "num_episodes": 10,
       "environment": {},
       "planner": {}
+    },
+
+    "normalizer": {
+      "critic": {
+        "q_scale_init": 1.0
+      }
     },
 
     "encoder": {
