@@ -3,6 +3,7 @@
 import os
 os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.45"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 import time
 
