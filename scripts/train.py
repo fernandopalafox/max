@@ -172,24 +172,22 @@ def main(config):
             rollout.step_fn, rollout_state, None, length=chunk_size
         )
         jax.block_until_ready(chunk_out)
-        step = chunk_idx * chunk_size
         dt = time.time() - t_chunk
+        step = chunk_idx * chunk_size
 
-        # ---- Log training metrics (mean over chunk) ----
-        wandb.log(
-            {k: float(jnp.mean(v)) for k, v in chunk_out.train_metrics.items()},
-            step=step,
-        )
-
-        # ---- Log episode metrics for completed episodes ----
-        ep_mask = chunk_out.episode_done
-        if bool(ep_mask.any()):
-            ep_rewards = chunk_out.episode_reward[ep_mask]
-            ep_lens = chunk_out.episode_len[ep_mask]
-            wandb.log({
-                "episodes/reward": float(jnp.mean(ep_rewards)),
-                "episodes/length": float(jnp.mean(ep_lens)),
-            }, step=step)
+        # ---- Log per-step metrics ----
+        chunk_start = (chunk_idx - 1) * chunk_size
+        for i in range(chunk_size):
+            s = chunk_start + i + 1
+            wandb.log(
+                {k: float(v[i]) for k, v in chunk_out.train_metrics.items()},
+                step=s,
+            )
+            if chunk_out.episode_done[i]:
+                wandb.log({
+                    "episodes/reward": float(chunk_out.episode_reward[i]),
+                    "episodes/length": float(chunk_out.episode_len[i]),
+                }, step=s)
 
         # ---- Evaluation ----
         t_eval = time.time()
