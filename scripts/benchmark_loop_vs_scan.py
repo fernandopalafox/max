@@ -1,14 +1,19 @@
 """
-Benchmark: Python for-loop dispatch vs jax.lax.scan for the full training step.
+Three-way benchmark for the TDMPC2 training loop.
+
+Trial 1 — original: Python for-loop, individually JIT-compiled components
+  (planner.solve, env step_fn, update_buffer, sampler, trainer.train called
+  separately from Python — exactly what the old train.py did)
+
+Trial 2 — jit step + loop: entire step compiled as one jax.jit, Python for-loop
+  (isolates the benefit of fusing the step vs dispatching 5 separate JIT calls)
+
+Trial 3 — jit step + scan: entire step inside jax.lax.scan
+  (eliminates Python between steps entirely)
 
 Usage:
     conda run -n max python scripts/benchmark_loop_vs_scan.py \\
-        --config cheetah.json \\
-        --n-steps 1000 \\
-        --chunk-size 100
-
-The first chunk/loop warmup triggers JIT compilation; reported throughput
-excludes it so only steady-state performance is measured.
+        --config cheetah.json --n-steps 200 --chunk-size 20
 """
 
 import argparse
@@ -23,9 +28,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import jax
 import jax.numpy as jnp
 
-# jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
-
-from max.buffers import init_buffer
+from max.buffers import init_buffer, update_buffer
 from max.critics import init_critic
 from max.dynamics import init_dynamics
 from max.encoders import init_encoder
@@ -33,23 +36,24 @@ from max.environments import init_env
 from max.planners import init_planner
 from max.policies import init_policy
 from max.rewards import init_reward_model
-from max.rollouts import init_rollout, prefill_buffer
+from max.rollouts import init_rollout, prefill_buffer, RolloutState
 from max.samplers import init_sampler
 from max.trainers import init_trainer
 
 
-def build_rollout(config, seed_override=None):
+def build_components(config, seed_override=None):
+    """Initialize all components and return a Rollout, RolloutState, and raw component dict."""
     seed = seed_override if seed_override is not None else config["seed"]
     key = jax.random.key(seed)
 
-    reset_fn, step_fn, get_obs_fn = init_env(config)
+    reset_fn, env_step_fn, get_obs_fn = init_env(config)
 
     key, enc_key, dyn_key, critic_key, policy_key = jax.random.split(key, 5)
-    encoder,      enc_params    = init_encoder(enc_key, config)
-    dynamics,     dyn_params    = init_dynamics(dyn_key, config)
-    critic,       crit_params   = init_critic(critic_key, config)
-    policy,       pol_params    = init_policy(policy_key, config)
-    reward_model, rew_params    = init_reward_model(config)
+    encoder,      enc_params  = init_encoder(enc_key, config)
+    dynamics,     dyn_params  = init_dynamics(dyn_key, config)
+    critic,       crit_params = init_critic(critic_key, config)
+    policy,       pol_params  = init_policy(policy_key, config)
+    reward_model, rew_params  = init_reward_model(config)
 
     parameters = {
         "mean": {
@@ -72,79 +76,163 @@ def build_rollout(config, seed_override=None):
 
     key, planner_key = jax.random.split(key)
     planner, planner_state = init_planner(
-        config,
-        key=planner_key,
-        encoder=encoder,
-        dynamics=dynamics,
-        reward=reward_model,
-        critic=critic,
-        policy=policy,
+        config, key=planner_key, encoder=encoder, dynamics=dynamics,
+        reward=reward_model, critic=critic, policy=policy,
     )
 
     buffers = init_buffer(config)
 
     key, rollout_key = jax.random.split(key)
     rollout, rollout_state = init_rollout(
-        rollout_key, config,
-        reset_fn, step_fn, get_obs_fn,
-        planner, planner_state,
-        trainer, train_state,
-        sampler,
-        parameters, buffers,
+        rollout_key, config, reset_fn, env_step_fn, get_obs_fn,
+        planner, planner_state, trainer, train_state, sampler, parameters, buffers,
     )
 
     sampler_cfg = config["sampler"]
     min_buffer_size = sampler_cfg.get(
-        "min_buffer_size",
-        sampler_cfg["batch_size"] + sampler_cfg["horizon"],
+        "min_buffer_size", sampler_cfg["batch_size"] + sampler_cfg["horizon"],
     )
     rollout_state = prefill_buffer(
-        rollout_state,
-        reset_fn, step_fn, get_obs_fn,
+        rollout_state, reset_fn, env_step_fn, get_obs_fn,
         dim_a=config["dim_action"],
         min_buffer_size=min_buffer_size,
         buffer_size=config["buffer_size"],
     )
 
-    return rollout, rollout_state
+    raw = dict(
+        reset_fn=reset_fn, env_step_fn=env_step_fn, get_obs_fn=get_obs_fn,
+        planner=planner, trainer=trainer, sampler=sampler,
+        buffer_size=config["buffer_size"],
+    )
+    return rollout, rollout_state, raw
 
 
 def _block(x):
     jax.block_until_ready(jax.tree_util.tree_leaves(x))
 
 
-def bench_python_loop(rollout, rollout_state, n_steps):
-    """Run n_steps via Python for-loop dispatch. First step is warmup (JIT compile)."""
+def _progress(label, i, total, t0, unit_size=1):
+    elapsed = time.perf_counter() - t0
+    sps = (i + 1) * unit_size / elapsed
+    print(f"\n  [{label}]   {i+1}/{total}  ({sps:.1f} steps/s)", end="", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Trial 1: original — individually JIT-compiled components, Python for-loop
+# ---------------------------------------------------------------------------
+
+def _original_step(state: RolloutState, reset_fn, env_step_fn, get_obs_fn,
+                   planner, trainer, sampler, buffer_size):
+    """One step calling each JIT-compiled component separately from Python."""
+    key, planner_key, train_key, sample_key, reset_key = jax.random.split(state.key, 5)
+
+    # Plan (planner.solve_fn is @jax.jit)
+    actions, new_planner_state = planner.solve(
+        state.planner_state.replace(key=planner_key), state.obs, state.parameters
+    )
+    action = actions[0][None, :]
+
+    # Env step (@jax.jit)
+    new_mjx_data, next_obs, rewards, terminated, truncated, _ = env_step_fn(
+        state.mjx_data, state.episode_len, action
+    )
+    next_obs = next_obs.squeeze()
+    done = bool(terminated) or bool(truncated)
+
+    # Buffer update (@jax.jit)
+    write_idx = int(state.buffer_idx) % buffer_size
+    new_buffers = update_buffer(
+        state.buffers, write_idx, state.obs[None, :], action, rewards, float(done)
+    )
+    new_buffer_idx = state.buffer_idx + jnp.int32(1)
+
+    # Sample + train (each calls @jax.jit internally)
+    train_data = sampler.sample_jit(sample_key, new_buffers, new_buffer_idx)
+    new_train_state, new_parameters, _ = trainer.train(
+        state.train_state, train_data, state.parameters, train_key
+    )
+
+    # Episode reset in Python
+    if done:
+        new_mjx_data = reset_fn(reset_key)
+        final_obs = get_obs_fn(new_mjx_data).squeeze()
+        new_planner_state = new_planner_state.replace(mean=jnp.zeros_like(new_planner_state.mean))
+        new_episode_len = jnp.int32(0)
+        new_episode_reward = jnp.float32(0.0)
+    else:
+        final_obs = next_obs
+        new_episode_len = state.episode_len + jnp.int32(1)
+        new_episode_reward = state.episode_reward + rewards[0]
+
+    return state._replace(
+        key=key, mjx_data=new_mjx_data, obs=final_obs,
+        train_state=new_train_state, parameters=new_parameters,
+        planner_state=new_planner_state, buffers=new_buffers,
+        buffer_idx=new_buffer_idx, episode_len=new_episode_len,
+        episode_reward=new_episode_reward,
+    )
+
+
+def bench_original(rollout_state, raw, n_steps):
     state = rollout_state
 
-    print(f"  [loop] step 1/{n_steps}: JIT compiling full step... ", end="", flush=True)
+    print(f"  [original] step 1/{n_steps}: warming up individual components... ",
+          end="", flush=True)
     t_compile = time.perf_counter()
-    state, _ = rollout.step_fn(state, None)
+    state = _original_step(state, **raw)
     _block(state.parameters)
     print(f"{time.perf_counter() - t_compile:.1f}s")
 
     remaining = n_steps - 1
-    print(f"  [loop] running {remaining} steps... ", end="", flush=True)
+    print(f"  [original] running {remaining} steps... ", end="", flush=True)
     t0 = time.perf_counter()
     for i in range(remaining):
-        state, _ = rollout.step_fn(state, None)
+        state = _original_step(state, **raw)
         if (i + 1) % 50 == 0:
             _block(state.parameters)
-            elapsed = time.perf_counter() - t0
-            sps = (i + 1) / elapsed
-            print(f"\n  [loop]   {i+1}/{remaining} steps  ({sps:.1f} steps/s)", end="", flush=True)
+            _progress("original", i, remaining, t0)
     _block(state.parameters)
     elapsed = time.perf_counter() - t0
-    print(f"\n  [loop] done in {elapsed:.2f}s")
-
+    print(f"\n  [original] done in {elapsed:.2f}s")
     return remaining / elapsed
 
 
-def bench_scan(rollout, rollout_state, n_steps, chunk_size):
-    """Run n_steps via jax.lax.scan in chunks. First chunk is warmup (JIT compile)."""
+# ---------------------------------------------------------------------------
+# Trial 2: fused jax.jit step + Python for-loop
+# ---------------------------------------------------------------------------
+
+def bench_jit_loop(rollout, rollout_state, n_steps):
+    step_jit = jax.jit(rollout.step_fn)
     state = rollout_state
 
-    print(f"  [scan] chunk 1 (size={chunk_size}): JIT compiling full scan... ", end="", flush=True)
+    print(f"  [jit+loop] step 1/{n_steps}: JIT compiling full step... ", end="", flush=True)
+    t_compile = time.perf_counter()
+    state, _ = step_jit(state, None)
+    _block(state.parameters)
+    print(f"{time.perf_counter() - t_compile:.1f}s")
+
+    remaining = n_steps - 1
+    print(f"  [jit+loop] running {remaining} steps... ", end="", flush=True)
+    t0 = time.perf_counter()
+    for i in range(remaining):
+        state, _ = step_jit(state, None)
+        if (i + 1) % 50 == 0:
+            _block(state.parameters)
+            _progress("jit+loop", i, remaining, t0)
+    _block(state.parameters)
+    elapsed = time.perf_counter() - t0
+    print(f"\n  [jit+loop] done in {elapsed:.2f}s")
+    return remaining / elapsed
+
+
+# ---------------------------------------------------------------------------
+# Trial 3: fused step inside jax.lax.scan
+# ---------------------------------------------------------------------------
+
+def bench_scan(rollout, rollout_state, n_steps, chunk_size):
+    state = rollout_state
+
+    print(f"  [scan] chunk 1 (size={chunk_size}): JIT compiling... ", end="", flush=True)
     t_compile = time.perf_counter()
     state, _ = jax.lax.scan(rollout.step_fn, state, None, length=chunk_size)
     _block(state.parameters)
@@ -154,27 +242,29 @@ def bench_scan(rollout, rollout_state, n_steps, chunk_size):
     remaining_chunks = remaining_steps // chunk_size
     actual_steps = remaining_chunks * chunk_size
 
-    print(f"  [scan] running {remaining_chunks} chunks ({actual_steps} steps)... ", end="", flush=True)
+    print(f"  [scan] running {remaining_chunks} chunks ({actual_steps} steps)... ",
+          end="", flush=True)
     t0 = time.perf_counter()
     for i in range(remaining_chunks):
         state, _ = jax.lax.scan(rollout.step_fn, state, None, length=chunk_size)
         if (i + 1) % 5 == 0:
             _block(state.parameters)
-            elapsed = time.perf_counter() - t0
-            sps = (i + 1) * chunk_size / elapsed
-            print(f"\n  [scan]   chunk {i+1}/{remaining_chunks}  ({sps:.1f} steps/s)", end="", flush=True)
+            _progress("scan", i, remaining_chunks, t0, unit_size=chunk_size)
     _block(state.parameters)
     elapsed = time.perf_counter() - t0
     print(f"\n  [scan] done in {elapsed:.2f}s")
-
     return actual_steps / elapsed
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="cheetah.json")
-    parser.add_argument("--n-steps", type=int, default=1000)
-    parser.add_argument("--chunk-size", type=int, default=100)
+    parser.add_argument("--n-steps", type=int, default=200)
+    parser.add_argument("--chunk-size", type=int, default=20)
     parser.add_argument("--log-compiles", action="store_true",
                         help="Print a line each time JAX triggers a compilation")
     args = parser.parse_args()
@@ -182,9 +272,7 @@ def main():
     if args.log_compiles:
         jax.config.update("jax_log_compiles", True)
 
-    config_path = os.path.join(
-        os.path.dirname(__file__), "..", "configs", args.config
-    )
+    config_path = os.path.join(os.path.dirname(__file__), "..", "configs", args.config)
     with open(config_path) as f:
         config = json.load(f)["training"]
 
@@ -192,32 +280,31 @@ def main():
     chunk_size = args.chunk_size
 
     if n_steps <= chunk_size:
-        raise ValueError(f"--n-steps ({n_steps}) must be greater than --chunk-size ({chunk_size})")
+        raise ValueError(f"--n-steps ({n_steps}) must be > --chunk-size ({chunk_size})")
 
-    print(f"Config: {args.config}  |  n_steps={n_steps}  |  chunk_size={chunk_size}")
+    print(f"Config: {args.config}  |  n_steps={n_steps}  |  chunk_size={chunk_size}\n")
 
     t0 = time.perf_counter()
-    print("\n[1/4] Building rollout state for loop trial...")
-    rollout, state_loop = build_rollout(config, seed_override=0)
-    print(f"      done in {time.perf_counter()-t0:.1f}s")
+    print("Initializing components (x3, one per trial)...")
+    rollout, state_orig, raw  = build_components(config, seed_override=0)
+    _,       state_jit,  _    = build_components(config, seed_override=0)
+    _,       state_scan, _    = build_components(config, seed_override=0)
+    print(f"done in {time.perf_counter()-t0:.1f}s\n")
 
-    t1 = time.perf_counter()
-    print("[2/4] Building rollout state for scan trial...")
-    _, state_scan = build_rollout(config, seed_override=0)
-    print(f"      done in {time.perf_counter()-t1:.1f}s")
+    print("[Trial 1] Original: individual JIT components, Python loop")
+    sps_orig = bench_original(state_orig, raw, n_steps)
 
-    print("\n[3/4] Python loop benchmark:")
-    sps_loop = bench_python_loop(rollout, state_loop, n_steps)
+    print("\n[Trial 2] Fused jax.jit step + Python loop")
+    sps_jit = bench_jit_loop(rollout, state_jit, n_steps)
 
-    print("\n[4/4] Scan benchmark:")
+    print("\n[Trial 3] Fused jax.lax.scan")
     sps_scan = bench_scan(rollout, state_scan, n_steps, chunk_size)
 
-    speedup = sps_scan / sps_loop
     print()
     print("=" * 60)
-    print(f"Python loop:  {sps_loop:>10.1f} steps/sec  (N={n_steps})")
-    print(f"Scan chunks:  {sps_scan:>10.1f} steps/sec  (N={n_steps}, chunk={chunk_size})")
-    print(f"Speedup:      {speedup:>10.2f}x")
+    print(f"Trial 1 (original):  {sps_orig:>8.1f} steps/s")
+    print(f"Trial 2 (jit+loop):  {sps_jit:>8.1f} steps/s  ({sps_jit/sps_orig:.2f}x vs original)")
+    print(f"Trial 3 (jit+scan):  {sps_scan:>8.1f} steps/s  ({sps_scan/sps_orig:.2f}x vs original)")
     print("=" * 60)
 
 
