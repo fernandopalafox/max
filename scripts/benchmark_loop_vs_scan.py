@@ -23,7 +23,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import jax
 import jax.numpy as jnp
 
-jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+# jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 
 from max.buffers import init_buffer
 from max.critics import init_critic
@@ -175,7 +175,12 @@ def main():
     parser.add_argument("--config", type=str, default="cheetah.json")
     parser.add_argument("--n-steps", type=int, default=1000)
     parser.add_argument("--chunk-size", type=int, default=100)
+    parser.add_argument("--log-compiles", action="store_true",
+                        help="Print a line each time JAX triggers a compilation")
     args = parser.parse_args()
+
+    if args.log_compiles:
+        jax.config.update("jax_log_compiles", True)
 
     config_path = os.path.join(
         os.path.dirname(__file__), "..", "configs", args.config
