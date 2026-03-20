@@ -109,41 +109,63 @@ def build_rollout(config, seed_override=None):
     return rollout, rollout_state
 
 
-def bench_python_loop(rollout, rollout_state, n_steps):
-    """Run n_steps via Python for-loop dispatch. First step is warmup."""
-    # Warmup: trigger JIT compilation
-    state = rollout_state
-    state, _ = rollout.step_fn(state, None)
-    jax.block_until_ready(jax.tree_util.tree_leaves(state.parameters))
+def _block(x):
+    jax.block_until_ready(jax.tree_util.tree_leaves(x))
 
-    # Measure remaining steps
+
+def bench_python_loop(rollout, rollout_state, n_steps):
+    """Run n_steps via Python for-loop dispatch. First step is warmup (JIT compile)."""
+    state = rollout_state
+
+    print(f"  [loop] step 1/{n_steps}: JIT compiling full step... ", end="", flush=True)
+    t_compile = time.perf_counter()
+    state, _ = rollout.step_fn(state, None)
+    _block(state.parameters)
+    print(f"{time.perf_counter() - t_compile:.1f}s")
+
     remaining = n_steps - 1
+    print(f"  [loop] running {remaining} steps... ", end="", flush=True)
     t0 = time.perf_counter()
-    for _ in range(remaining):
+    for i in range(remaining):
         state, _ = rollout.step_fn(state, None)
-    jax.block_until_ready(jax.tree_util.tree_leaves(state.parameters))
+        if (i + 1) % 50 == 0:
+            _block(state.parameters)
+            elapsed = time.perf_counter() - t0
+            sps = (i + 1) / elapsed
+            print(f"\n  [loop]   {i+1}/{remaining} steps  ({sps:.1f} steps/s)", end="", flush=True)
+    _block(state.parameters)
     elapsed = time.perf_counter() - t0
+    print(f"\n  [loop] done in {elapsed:.2f}s")
 
     return remaining / elapsed
 
 
 def bench_scan(rollout, rollout_state, n_steps, chunk_size):
-    """Run n_steps via jax.lax.scan in chunks. First chunk is warmup."""
-    # Warmup: first chunk triggers JIT compilation
+    """Run n_steps via jax.lax.scan in chunks. First chunk is warmup (JIT compile)."""
     state = rollout_state
-    state, _ = jax.lax.scan(rollout.step_fn, state, None, length=chunk_size)
-    jax.block_until_ready(jax.tree_util.tree_leaves(state.parameters))
 
-    # Measure remaining chunks
+    print(f"  [scan] chunk 1 (size={chunk_size}): JIT compiling full scan... ", end="", flush=True)
+    t_compile = time.perf_counter()
+    state, _ = jax.lax.scan(rollout.step_fn, state, None, length=chunk_size)
+    _block(state.parameters)
+    print(f"{time.perf_counter() - t_compile:.1f}s")
+
     remaining_steps = n_steps - chunk_size
     remaining_chunks = remaining_steps // chunk_size
     actual_steps = remaining_chunks * chunk_size
 
+    print(f"  [scan] running {remaining_chunks} chunks ({actual_steps} steps)... ", end="", flush=True)
     t0 = time.perf_counter()
-    for _ in range(remaining_chunks):
+    for i in range(remaining_chunks):
         state, _ = jax.lax.scan(rollout.step_fn, state, None, length=chunk_size)
-    jax.block_until_ready(jax.tree_util.tree_leaves(state.parameters))
+        if (i + 1) % 5 == 0:
+            _block(state.parameters)
+            elapsed = time.perf_counter() - t0
+            sps = (i + 1) * chunk_size / elapsed
+            print(f"\n  [scan]   chunk {i+1}/{remaining_chunks}  ({sps:.1f} steps/s)", end="", flush=True)
+    _block(state.parameters)
     elapsed = time.perf_counter() - t0
+    print(f"\n  [scan] done in {elapsed:.2f}s")
 
     return actual_steps / elapsed
 
@@ -168,23 +190,30 @@ def main():
         raise ValueError(f"--n-steps ({n_steps}) must be greater than --chunk-size ({chunk_size})")
 
     print(f"Config: {args.config}  |  n_steps={n_steps}  |  chunk_size={chunk_size}")
-    print("Building components and pre-filling buffer...")
 
-    # Build two independent rollout states (so they start from the same point)
+    t0 = time.perf_counter()
+    print("\n[1/4] Building rollout state for loop trial...")
     rollout, state_loop = build_rollout(config, seed_override=0)
-    _,       state_scan = build_rollout(config, seed_override=0)
+    print(f"      done in {time.perf_counter()-t0:.1f}s")
 
-    print("Benchmarking Python loop (first step = warmup)...")
+    t1 = time.perf_counter()
+    print("[2/4] Building rollout state for scan trial...")
+    _, state_scan = build_rollout(config, seed_override=0)
+    print(f"      done in {time.perf_counter()-t1:.1f}s")
+
+    print("\n[3/4] Python loop benchmark:")
     sps_loop = bench_python_loop(rollout, state_loop, n_steps)
 
-    print("Benchmarking scan chunks (first chunk = warmup)...")
+    print("\n[4/4] Scan benchmark:")
     sps_scan = bench_scan(rollout, state_scan, n_steps, chunk_size)
 
     speedup = sps_scan / sps_loop
     print()
-    print(f"Python loop:  {sps_loop:>10.1f} steps/sec  (N={n_steps}, chunk_size=N/A)")
-    print(f"Scan chunks:  {sps_scan:>10.1f} steps/sec  (N={n_steps}, chunk_size={chunk_size})")
-    print(f"Speedup: {speedup:.2f}x")
+    print("=" * 60)
+    print(f"Python loop:  {sps_loop:>10.1f} steps/sec  (N={n_steps})")
+    print(f"Scan chunks:  {sps_scan:>10.1f} steps/sec  (N={n_steps}, chunk={chunk_size})")
+    print(f"Speedup:      {speedup:>10.2f}x")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
