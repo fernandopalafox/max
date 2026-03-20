@@ -111,12 +111,6 @@ def _block(x):
     jax.block_until_ready(jax.tree_util.tree_leaves(x))
 
 
-def _progress(label, i, total, t0, unit_size=1):
-    elapsed = time.perf_counter() - t0
-    sps = (i + 1) * unit_size / elapsed
-    print(f"\n  [{label}]   {i+1}/{total}  ({sps:.1f} steps/s)", end="", flush=True)
-
-
 # ---------------------------------------------------------------------------
 # Trial 1: original — individually JIT-compiled components, Python for-loop
 # ---------------------------------------------------------------------------
@@ -174,27 +168,30 @@ def _original_step(state: RolloutState, reset_fn, env_step_fn, get_obs_fn,
 
 
 def bench_original(rollout_state, raw, n_steps):
+    """Trial 1: bool() inside _original_step forces a CPU-GPU sync after every
+    step, so this is truly sequential — exactly what the old train.py did."""
     state = rollout_state
+    dot_every = max(1, n_steps // 10)
 
-    print(f"  [original] step 1/{n_steps}: warming up individual components... ",
+    print(f"  [original] warmup (1 step, compiles individual components)... ",
           end="", flush=True)
-    t_compile = time.perf_counter()
+    t = time.perf_counter()
     state = _original_step(state, **raw)
     _block(state.parameters)
-    print(f"{time.perf_counter() - t_compile:.1f}s")
+    print(f"{time.perf_counter()-t:.1f}s")
 
     remaining = n_steps - 1
-    print(f"  [original] running {remaining} steps... ", end="", flush=True)
+    print(f"  [original] timing {remaining} steps ", end="", flush=True)
     t0 = time.perf_counter()
     for i in range(remaining):
-        state = _original_step(state, **raw)
-        if (i + 1) % 50 == 0:
-            _block(state.parameters)
-            _progress("original", i, remaining, t0)
+        state = _original_step(state, **raw)  # bool() inside syncs every step
+        if (i + 1) % dot_every == 0:
+            print(".", end="", flush=True)
     _block(state.parameters)
     elapsed = time.perf_counter() - t0
-    print(f"\n  [original] done in {elapsed:.2f}s")
-    return remaining / elapsed
+    sps = remaining / elapsed
+    print(f" {elapsed:.2f}s  →  {sps:.1f} steps/s")
+    return sps
 
 
 # ---------------------------------------------------------------------------
@@ -202,27 +199,30 @@ def bench_original(rollout_state, raw, n_steps):
 # ---------------------------------------------------------------------------
 
 def bench_jit_loop(rollout, rollout_state, n_steps):
+    """Trial 2: full step fused into one jax.jit, called in a Python loop.
+    No mid-loop syncs — dispatch all steps, block once at the end."""
     step_jit = jax.jit(rollout.step_fn)
     state = rollout_state
+    dot_every = max(1, n_steps // 10)
 
-    print(f"  [jit+loop] step 1/{n_steps}: JIT compiling full step... ", end="", flush=True)
-    t_compile = time.perf_counter()
+    print(f"  [jit+loop] warmup (1 step, compiles fused step)... ", end="", flush=True)
+    t = time.perf_counter()
     state, _ = step_jit(state, None)
     _block(state.parameters)
-    print(f"{time.perf_counter() - t_compile:.1f}s")
+    print(f"{time.perf_counter()-t:.1f}s")
 
     remaining = n_steps - 1
-    print(f"  [jit+loop] running {remaining} steps... ", end="", flush=True)
+    print(f"  [jit+loop] timing {remaining} steps ", end="", flush=True)
     t0 = time.perf_counter()
     for i in range(remaining):
         state, _ = step_jit(state, None)
-        if (i + 1) % 50 == 0:
-            _block(state.parameters)
-            _progress("jit+loop", i, remaining, t0)
+        if (i + 1) % dot_every == 0:
+            print(".", end="", flush=True)
     _block(state.parameters)
     elapsed = time.perf_counter() - t0
-    print(f"\n  [jit+loop] done in {elapsed:.2f}s")
-    return remaining / elapsed
+    sps = remaining / elapsed
+    print(f" {elapsed:.2f}s  →  {sps:.1f} steps/s")
+    return sps
 
 
 # ---------------------------------------------------------------------------
@@ -230,30 +230,34 @@ def bench_jit_loop(rollout, rollout_state, n_steps):
 # ---------------------------------------------------------------------------
 
 def bench_scan(rollout, rollout_state, n_steps, chunk_size):
+    """Trial 3: full step inside jax.lax.scan, called in chunks from Python.
+    Block between chunks (natural boundary), block once at end."""
     state = rollout_state
+    dot_every = max(1, (n_steps // chunk_size) // 10)
 
-    print(f"  [scan] chunk 1 (size={chunk_size}): JIT compiling... ", end="", flush=True)
-    t_compile = time.perf_counter()
+    print(f"  [scan] warmup (1 chunk of {chunk_size} steps, compiles scan body)... ",
+          end="", flush=True)
+    t = time.perf_counter()
     state, _ = jax.lax.scan(rollout.step_fn, state, None, length=chunk_size)
     _block(state.parameters)
-    print(f"{time.perf_counter() - t_compile:.1f}s")
+    print(f"{time.perf_counter()-t:.1f}s")
 
     remaining_steps = n_steps - chunk_size
     remaining_chunks = remaining_steps // chunk_size
     actual_steps = remaining_chunks * chunk_size
 
-    print(f"  [scan] running {remaining_chunks} chunks ({actual_steps} steps)... ",
+    print(f"  [scan] timing {remaining_chunks} chunks ({actual_steps} steps) ",
           end="", flush=True)
     t0 = time.perf_counter()
     for i in range(remaining_chunks):
         state, _ = jax.lax.scan(rollout.step_fn, state, None, length=chunk_size)
-        if (i + 1) % 5 == 0:
-            _block(state.parameters)
-            _progress("scan", i, remaining_chunks, t0, unit_size=chunk_size)
+        if dot_every > 0 and (i + 1) % dot_every == 0:
+            print(".", end="", flush=True)
     _block(state.parameters)
     elapsed = time.perf_counter() - t0
-    print(f"\n  [scan] done in {elapsed:.2f}s")
-    return actual_steps / elapsed
+    sps = actual_steps / elapsed
+    print(f" {elapsed:.2f}s  →  {sps:.1f} steps/s")
+    return sps
 
 
 # ---------------------------------------------------------------------------
@@ -291,13 +295,13 @@ def main():
     _,       state_scan, _    = build_components(config, seed_override=0)
     print(f"done in {time.perf_counter()-t0:.1f}s\n")
 
-    print("[Trial 1] Original: individual JIT components, Python loop")
+    print("[Trial 1] Original: individual JIT components, Python loop  (bool() syncs every step)")
     sps_orig = bench_original(state_orig, raw, n_steps)
 
-    print("\n[Trial 2] Fused jax.jit step + Python loop")
+    print("\n[Trial 2] Fused jax.jit step + Python loop  (async dispatch, block at end)")
     sps_jit = bench_jit_loop(rollout, state_jit, n_steps)
 
-    print("\n[Trial 3] Fused jax.lax.scan")
+    print("\n[Trial 3] Fused jax.lax.scan  (block between chunks)")
     sps_scan = bench_scan(rollout, state_scan, n_steps, chunk_size)
 
     print()
