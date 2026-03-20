@@ -28,6 +28,8 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import jax
 import jax.numpy as jnp
 
+jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+
 from max.buffers import init_buffer, update_buffer
 from max.critics import init_critic
 from max.dynamics import init_dynamics
