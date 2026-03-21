@@ -13,7 +13,7 @@ jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 import jax.numpy as jnp
 import numpy as np
 import wandb
-from max.buffers import init_buffer
+from max.buffers import init_buffer, episodes_from_buffer
 from max.utilities import count_parameters
 from max.environments import init_env
 from max.dynamics import init_dynamics
@@ -170,21 +170,6 @@ def main(config):
 
     buffer_size = config["buffer_size"]
 
-    def episodes_from_buffer(buffers, prev_idx, curr_idx):
-        n = curr_idx - prev_idx
-        indices = (np.arange(n) + prev_idx) % buffer_size
-        dones = np.array(buffers["dones"][indices])
-        rewards = np.array(buffers["rewards"][0, indices])
-        episodes, ep_start = [], 0
-        for i, done in enumerate(dones):
-            if done == 1.0:
-                episodes.append({
-                    "episodes/reward": float(rewards[ep_start:i+1].sum()),
-                    "episodes/length": int(i - ep_start + 1),
-                })
-                ep_start = i + 1
-        return episodes
-
     for chunk_idx in range(1, num_chunks + 1):
         prev_idx = int(rollout_state.buffer_idx)
         t_chunk = time.time()
@@ -201,7 +186,7 @@ def main(config):
 
         # ---- Log episode stats from buffer ----
         curr_idx = int(rollout_state.buffer_idx)
-        for ep in episodes_from_buffer(rollout_state.buffers, prev_idx, curr_idx):
+        for ep in episodes_from_buffer(rollout_state.buffers, prev_idx, curr_idx, buffer_size):
             wandb.log(ep, step=step)
 
         # ---- Evaluation ----

@@ -25,7 +25,7 @@ import jax.numpy as jnp
 
 jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 
-from max.buffers import init_buffer, update_buffer
+from max.buffers import init_buffer, update_buffer, episodes_from_buffer
 from max.critics import init_critic
 from max.dynamics import init_dynamics
 from max.encoders import init_encoder
@@ -237,24 +237,6 @@ def bench_original(s, config, n_steps):
 # Trial 2: jax.lax.scan + episodes_from_buffer (mirrors train.py exactly)
 # ---------------------------------------------------------------------------
 
-import numpy as np
-
-def _episodes_from_buffer(buffers, prev_idx, curr_idx, buffer_size):
-    n = curr_idx - prev_idx
-    indices = (np.arange(n) + prev_idx) % buffer_size
-    dones = np.array(buffers["dones"][indices])
-    rewards = np.array(buffers["rewards"][0, indices])
-    episodes, ep_start = [], 0
-    for i, done in enumerate(dones):
-        if done == 1.0:
-            episodes.append({
-                "episodes/reward": float(rewards[ep_start:i+1].sum()),
-                "episodes/length": int(i - ep_start + 1),
-            })
-            ep_start = i + 1
-    return episodes
-
-
 def bench_scan(rollout, rollout_state, n_steps, chunk_size, buffer_size):
     state = rollout_state
     n_chunks = n_steps // chunk_size
@@ -265,7 +247,7 @@ def bench_scan(rollout, rollout_state, n_steps, chunk_size, buffer_size):
         prev_idx = int(state.buffer_idx)
         state, chunk_out = jax.lax.scan(rollout.step_fn, state, None, length=chunk_size)
         _block(chunk_out)
-        _ = _episodes_from_buffer(state.buffers, prev_idx, int(state.buffer_idx), buffer_size)
+        _ = episodes_from_buffer(state.buffers, prev_idx, int(state.buffer_idx), buffer_size)
         print(f"{time.perf_counter()-t:.1f}s", end=" ", flush=True)
     print()
 
@@ -276,7 +258,7 @@ def bench_scan(rollout, rollout_state, n_steps, chunk_size, buffer_size):
         prev_idx = int(state.buffer_idx)
         state, chunk_out = jax.lax.scan(rollout.step_fn, state, None, length=chunk_size)
         _block(chunk_out)
-        _ = _episodes_from_buffer(state.buffers, prev_idx, int(state.buffer_idx), buffer_size)
+        _ = episodes_from_buffer(state.buffers, prev_idx, int(state.buffer_idx), buffer_size)
     elapsed = time.perf_counter() - t0
     sps = actual_steps / elapsed
     print(f"{elapsed:.1f}s  →  {sps:.1f} steps/s")
