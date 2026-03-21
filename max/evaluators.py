@@ -153,6 +153,7 @@ def _create_evaluator(
         )
         return {
             "eval/episode_reward": float(jnp.mean(all_rewards)),
+            "episode_rewards": jax.device_get(all_rewards),
             "trajectory": jax.device_get(all_trajs),
             "actions": jax.device_get(all_acts),
             "num_episodes": num_episodes,
