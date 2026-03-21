@@ -2,6 +2,7 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from typing import Dict
 
 
@@ -72,3 +73,23 @@ def update_buffer(
             buffers["dones"], done_s, (buffer_idx,)
         ),
     }
+
+
+def episodes_from_buffer(buffers: Dict, prev_idx: int, curr_idx: int, buffer_size: int) -> list:
+    """
+    Return episode stats for transitions written in [prev_idx, curr_idx).
+    Each entry is {"episodes/reward": float, "episodes/length": int}.
+    """
+    n = curr_idx - prev_idx
+    indices = (np.arange(n) + prev_idx) % buffer_size
+    dones = np.array(buffers["dones"][indices])
+    rewards = np.array(buffers["rewards"][0, indices])
+    episodes, ep_start = [], 0
+    for i, done in enumerate(dones):
+        if done == 1.0:
+            episodes.append({
+                "episodes/reward": float(rewards[ep_start:i+1].sum()),
+                "episodes/length": int(i - ep_start + 1),
+            })
+            ep_start = i + 1
+    return episodes

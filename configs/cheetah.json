@@ -12,6 +12,7 @@
     "dim_action": 6,
     "train_freq": 1,
     "eval_freq": 10000,
+    "chunk_size": 1000,
     "plot_eval": true,
 
     "evaluator": {

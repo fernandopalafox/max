@@ -3,6 +3,7 @@
 import os
 os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.45"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 import time
 
@@ -12,7 +13,7 @@ jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 import jax.numpy as jnp
 import numpy as np
 import wandb
-from max.buffers import init_buffer, update_buffer
+from max.buffers import init_buffer, episodes_from_buffer
 from max.utilities import count_parameters
 from max.environments import init_env
 from max.dynamics import init_dynamics
@@ -24,6 +25,7 @@ from max.trainers import init_trainer
 from max.samplers import init_sampler
 from max.evaluators import init_evaluator
 from max.planners import init_planner
+from max.rollouts import init_rollout, prefill_buffer
 import argparse
 import copy
 import os
@@ -32,7 +34,6 @@ import json
 from datetime import datetime
 
 from max.visualizers import create_cheetah_xy_animation
-
 
 
 def main(config):
@@ -108,19 +109,15 @@ def main(config):
     )
 
     buffers = init_buffer(config)
-    buffer_idx = 0
 
     # ---- Parameter count ----
     total_n = count_parameters(parameters["mean"])
     wandb.config.update({"num_params_total": total_n})
     print(f"[{time.time()-t0:.2f}s] Components ready  (total={total_n:,})")
 
-    print(f"Starting TDMPC2 cheetah finetuning for {config['max_steps']} steps")
+    print(f"Starting TDMPC2 cheetah training for {config['max_steps']} steps")
 
-    episode_length = 0
-    episode_total_reward = 0.0
-
-    # Initial evaluation
+    # ---- Initial evaluation ----
     print(f"[{time.time()-t0:.2f}s] Running initial evaluation...")
     eval_results = evaluator.evaluate(parameters)
     initial_metrics = {
@@ -135,96 +132,69 @@ def main(config):
         gif_path = create_cheetah_xy_animation(full_states)
         wandb.log({"eval/animation": wandb.Video(gif_path, format="gif")}, step=0)
 
-    # ---- Main training loop ----
-    print(f"[{time.time()-t0:.2f}s] Starting main loop...")
-    key, reset_key = jax.random.split(key)
-    mjx_data = reset_fn(reset_key)
-    current_obs = get_obs_fn(mjx_data).squeeze()
+    # ---- Build rollout ----
+    key, rollout_key = jax.random.split(key)
+    rollout, rollout_state = init_rollout(
+        rollout_key, config,
+        reset_fn, step_fn, get_obs_fn,
+        planner, planner_state,
+        trainer, train_state,
+        sampler,
+        parameters, buffers,
+    )
 
-    t_planner = 0.0
-    t_step = 0.0
-    t_buffer = 0.0
-    t_train = 0.0
-    t_eval = 0.0
+    # ---- Pre-fill buffer with random actions ----
+    sampler_cfg = config["sampler"]
+    min_buffer_size = sampler_cfg.get(
+        "min_buffer_size",
+        sampler_cfg["batch_size"] + sampler_cfg["horizon"],
+    )
+    print(f"[{time.time()-t0:.2f}s] Pre-filling buffer ({min_buffer_size} steps)...")
+    rollout_state = prefill_buffer(
+        rollout_state,
+        reset_fn, step_fn, get_obs_fn,
+        dim_a=config["dim_action"],
+        min_buffer_size=min_buffer_size,
+        buffer_size=config["buffer_size"],
+    )
+    print(f"[{time.time()-t0:.2f}s] Buffer pre-filled (buffer_idx={int(rollout_state.buffer_idx)})")
 
-    train_freq = config.get("train_freq", 1)
+    # ---- Chunk loop (jax.lax.scan per chunk) ----
+    chunk_size = config["chunk_size"]
+    num_chunks = config["max_steps"] // chunk_size
+    eval_every = config["eval_freq"] // chunk_size
+    checkpoint_chunk_freq = max(1, checkpoint_freq // chunk_size)
 
-    for step in range(1, config["max_steps"] + 1):
-        step_start = time.time()
+    print(f"[{time.time()-t0:.2f}s] Starting scan loop ({num_chunks} chunks of {chunk_size} steps)...")
+    print(f"  First chunk triggers JIT compilation — expect a delay.")
 
-        # ---- Planning step (MPPI in latent space) ----
-        _t0 = time.time()
-        key, planner_key = jax.random.split(key)
-        planner_state = planner_state.replace(key=planner_key)
-        actions, planner_state = planner.solve(planner_state, current_obs, parameters)
-        action = actions[0][None, :]  # (1, dim_a) with agent dim
-        dt_planner = time.time() - _t0
-        t_planner += dt_planner
+    buffer_size = config["buffer_size"]
 
-        # ---- Environment step ----
-        _t0 = time.time()
-        mjx_data, next_obs, rewards, terminated, truncated, _ = step_fn(
-            mjx_data, episode_length, action
+    for chunk_idx in range(1, num_chunks + 1):
+        prev_idx = int(rollout_state.buffer_idx)
+        t_chunk = time.time()
+        rollout_state, chunk_out = jax.lax.scan(
+            rollout.step_fn, rollout_state, None, length=chunk_size
         )
-        dt_step = time.time() - _t0
-        t_step += dt_step
-        next_obs = next_obs.squeeze()
-        done = terminated or truncated
-        episode_length += 1
-        episode_total_reward += float(rewards[0])
+        jax.block_until_ready(chunk_out)
+        dt = time.time() - t_chunk
+        step = chunk_idx * chunk_size
 
-        # ---- Buffer update ----
-        _t0 = time.time()
-        buffers = update_buffer(
-            buffers,
-            buffer_idx,
-            current_obs[None, :],
-            action,
-            rewards,
-            float(done),
-        )
-        buffer_idx += 1
-        dt_buffer = time.time() - _t0
-        t_buffer += dt_buffer
-        current_obs = next_obs
+        # ---- Log mean train metrics for this chunk ----
+        mean_metrics = {k: float(jnp.mean(v)) for k, v in chunk_out.train_metrics.items()}
+        wandb.log(mean_metrics, step=step)
 
-        # ---- Episode reset ----
-        if done:
-            key, reset_key = jax.random.split(key)
-            mjx_data = reset_fn(reset_key)
-            current_obs = get_obs_fn(mjx_data).squeeze()
-            wandb.log({
-                "episodes/length": episode_length,
-                "episodes/reward": episode_total_reward,
-            }, step=step)
-            episode_length = 0
-            episode_total_reward = 0.0
-
-        # ---- Training step ----
-        dt_train = 0.0
-        if step % train_freq == 0:
-            _t0 = time.time()
-            key, sample_key = jax.random.split(key)
-            train_data = sampler.sample(sample_key, buffers, buffer_idx)
-            if train_data is not None:
-                key, train_key = jax.random.split(key)
-                train_state, parameters, metrics = trainer.train(
-                    train_state, train_data, parameters, train_key
-                )
-                wandb.log(
-                    {k: float(v) for k, v in metrics.items()},
-                    step=step
-                )
-            dt_train = time.time() - _t0
-            t_train += dt_train
+        # ---- Log episode stats from buffer ----
+        curr_idx = int(rollout_state.buffer_idx)
+        for ep in episodes_from_buffer(rollout_state.buffers, prev_idx, curr_idx, buffer_size):
+            wandb.log(ep, step=step)
 
         # ---- Evaluation ----
-        dt_eval = 0.0
-        if step % config["eval_freq"] == 0:
-            _t0 = time.time()
-            eval_results = evaluator.evaluate(parameters)
-            dt_eval = time.time() - _t0
-            t_eval += dt_eval
+        sps = chunk_size / dt
+        if chunk_idx % eval_every == 0:
+            t_eval = time.time()
+            eval_results = evaluator.evaluate(rollout_state.parameters)
+            dt_eval = time.time() - t_eval
 
             metrics_to_log = {
                 k: v for k, v in eval_results.items() if isinstance(v, (int, float))
@@ -237,43 +207,28 @@ def main(config):
                 gif_path = create_cheetah_xy_animation(full_states)
                 wandb.log(
                     {"eval/animation": wandb.Video(gif_path, format="gif")},
-                    step=step
+                    step=step,
                 )
 
-        step_total = time.time() - step_start
-        print(
-            f"[Step {step}] total={step_total:.3f}s | "
-            f"planner={dt_planner:.3f}s, step={dt_step:.3f}s, "
-            f"buffer={dt_buffer:.3f}s, train={dt_train:.3f}s, eval={dt_eval:.3f}s"
-        )
+            print(
+                f"[Step {step}] chunk={dt:.2f}s ({sps:.0f} steps/s) | eval={dt_eval:.2f}s"
+            )
+        else:
+            print(f"[Step {step}] chunk={dt:.2f}s ({sps:.0f} steps/s)")
 
         # ---- Checkpoint ----
-        if checkpoint_enabled and run_dir and step % checkpoint_freq == 0:
+        if checkpoint_enabled and run_dir and chunk_idx % checkpoint_chunk_freq == 0:
             ckpt_path = os.path.join(run_dir, f"step_{step}.pkl")
             with open(ckpt_path, "wb") as f:
-                pickle.dump(jax.device_get(parameters), f)
+                pickle.dump(jax.device_get(rollout_state.parameters), f)
             print(f"Checkpoint saved: {ckpt_path}")
-
-        # Handle buffer overflow
-        if buffer_idx >= config["buffer_size"]:
-            buffers = init_buffer(config)
-            buffer_idx = 0
-
-    # ---- Final timing summary ----
-    print(f"\n=== TIMING SUMMARY ===")
-    print(f"Total planner time: {t_planner:.2f}s")
-    print(f"Total step time:    {t_step:.2f}s")
-    print(f"Total buffer time:  {t_buffer:.2f}s")
-    print(f"Total train time:   {t_train:.2f}s")
-    print(f"Total eval time:    {t_eval:.2f}s")
-    print(f"======================\n")
 
     # ---- Save final parameters ----
     if run_dir:
         file_path = os.path.join(run_dir, "final.pkl")
         print(f"\nSaving final parameters to {file_path}...")
         with open(file_path, "wb") as f:
-            pickle.dump(jax.device_get(parameters), f)
+            pickle.dump(jax.device_get(rollout_state.parameters), f)
         print(f"Parameters saved to {file_path}")
 
     print("Run complete.")

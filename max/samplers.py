@@ -7,6 +7,7 @@ from typing import Callable, NamedTuple, Optional
 
 class Sampler(NamedTuple):
     sample_fn: Callable
+    sample_jit: Optional[Callable] = None  # JAX-pure callable for use inside jax.lax.scan
 
     def sample(self, key, buffer, buffer_idx) -> Optional[dict]:
         return self.sample_fn(key, buffer, buffer_idx)
@@ -58,11 +59,11 @@ def _create_trajectory_batch_sampler(batch_size: int, horizon: int, min_buffer_s
         actions:  (batch_size, horizon,   dim_a)
         rewards:  (batch_size, horizon)
 
-    Episode boundaries (dones == 1) are never spanned.
-    Training is skipped until buffer_idx >= min_buffer_size (default: batch_size + horizon)
-    to ensure all batch samples come from distinct windows.
+    Episode boundaries (dones == 1) are never spanned. The probs vector weights
+    only valid windows, so a sparse buffer is handled gracefully. Callers are
+    responsible for ensuring the buffer has enough data before calling (use
+    prefill_buffer in rollouts.py before starting jax.lax.scan).
     """
-    _min_buffer_size = min_buffer_size if min_buffer_size is not None else batch_size + horizon
 
     @jax.jit
     def _sample_jit(key, states, actions, rewards, dones, buffer_idx):
@@ -100,8 +101,6 @@ def _create_trajectory_batch_sampler(batch_size: int, horizon: int, min_buffer_s
         }
 
     def sample_fn(key, buffer, buffer_idx):
-        if buffer_idx < _min_buffer_size:
-            return None
         return _sample_jit(
             key,
             buffer["states"][0],
@@ -111,4 +110,14 @@ def _create_trajectory_batch_sampler(batch_size: int, horizon: int, min_buffer_s
             buffer_idx,
         )
 
-    return Sampler(sample_fn=sample_fn)
+    def sample_jit_fn(key, buffer, buffer_idx):
+        return _sample_jit(
+            key,
+            buffer["states"][0],
+            buffer["actions"][0],
+            buffer["rewards"][0],
+            buffer["dones"],
+            buffer_idx,
+        )
+
+    return Sampler(sample_fn=sample_fn, sample_jit=sample_jit_fn)
