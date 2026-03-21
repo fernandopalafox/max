@@ -34,7 +34,7 @@ import pickle
 import json
 from datetime import datetime
 
-from max.visualizers import create_cheetah_xy_animation
+from max.visualizers import create_cheetah_xy_animation, create_cheetah_xy_video
 
 
 def main(config):
@@ -133,8 +133,8 @@ def main(config):
         #     best = int(np.argmax(eval_results["episode_rewards"]))
         #     traj = jax.tree.map(lambda x: x[best], traj)
         full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
-        gif_path = create_cheetah_xy_animation(full_states)
-        wandb.log({"eval/animation": wandb.Video(gif_path, format="gif")}, step=0)
+        video_path = create_cheetah_xy_video(full_states)
+        wandb.log({"eval/animation": wandb.Video(video_path, format="mp4")}, step=0)
         print(f"[{time.time()-t0:.2f}s] Animation logged")
 
     # ---- Build rollout ----
@@ -208,9 +208,9 @@ def main(config):
             if plot_eval and "trajectory" in eval_results:
                 traj = eval_results["trajectory"]
                 full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
-                gif_path = create_cheetah_xy_animation(full_states)
+                video_path = create_cheetah_xy_video(full_states)
                 wandb.log(
-                    {"eval/animation": wandb.Video(gif_path, format="gif")},
+                    {"eval/animation": wandb.Video(video_path, format="mp4")},
                     step=step,
                 )
 

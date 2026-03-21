@@ -4,6 +4,152 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
+_TORSO_LENGTH = 1.0
+_THIGH_LENGTH = 0.23
+_SHIN_LENGTH  = 0.23
+_FOOT_LENGTH  = 0.14
+_TORSO_Z      = 0.7
+
+
+def _batch_kinematics(states):
+    """Vectorized forward kinematics for all frames at once.
+
+    Args:
+        states: (T, 9) qpos array
+    Returns:
+        pts: (T, 10, 2) joint [x, z] positions
+            indices: 0=torso_back, 1=torso_front,
+                     2=back_hip, 3=back_knee, 4=back_ankle, 5=back_toe,
+                     6=front_hip, 7=front_knee, 8=front_ankle, 9=front_toe
+        rootx: (T,)
+        rootz: (T,)
+    """
+    rootx  = states[:, 0]
+    rootz  = _TORSO_Z + states[:, 1]
+    rooty  = states[:, 2]
+    cx, sx = np.cos(rooty), np.sin(rooty)
+
+    tbx = rootx - _TORSO_LENGTH / 2 * cx;  tbz = rootz - _TORSO_LENGTH / 2 * sx
+    tfx = rootx + _TORSO_LENGTH / 2 * cx;  tfz = rootz + _TORSO_LENGTH / 2 * sx
+
+    a   = rooty - np.pi / 2 + states[:, 3]
+    bkx = tbx + _THIGH_LENGTH * np.cos(a); bkz = tbz + _THIGH_LENGTH * np.sin(a)
+    a   = a + states[:, 4]
+    bax = bkx + _SHIN_LENGTH  * np.cos(a); baz = bkz + _SHIN_LENGTH  * np.sin(a)
+    a   = a + states[:, 5]
+    btx = bax + _FOOT_LENGTH  * np.cos(a); btz = baz + _FOOT_LENGTH  * np.sin(a)
+
+    a   = rooty - np.pi / 2 + states[:, 6]
+    fkx = tfx + _THIGH_LENGTH * np.cos(a); fkz = tfz + _THIGH_LENGTH * np.sin(a)
+    a   = a + states[:, 7]
+    fax = fkx + _SHIN_LENGTH  * np.cos(a); faz = fkz + _SHIN_LENGTH  * np.sin(a)
+    a   = a + states[:, 8]
+    ftx = fax + _FOOT_LENGTH  * np.cos(a); ftz = faz + _FOOT_LENGTH  * np.sin(a)
+
+    def p(x, z): return np.stack([x, z], axis=1)
+
+    pts = np.stack([
+        p(tbx, tbz), p(tfx, tfz),          # torso back, front
+        p(tbx, tbz), p(bkx, bkz), p(bax, baz), p(btx, btz),  # back leg
+        p(tfx, tfz), p(fkx, fkz), p(fax, faz), p(ftx, ftz),  # front leg
+    ], axis=1)  # (T, 10, 2)
+    return pts, rootx, rootz
+
+
+def create_cheetah_xy_video(states, max_frames=300, save_path=None, fps=50):
+    """
+    Creates an MP4 video showing the cheetah as a stick figure.
+
+    Uses vectorized kinematics, blit=True, and ffmpeg for fast encoding.
+    The cheetah is kept centered (x-coords normalized per frame) so axis
+    limits never change — this is what enables blit=True.
+
+    Args:
+        states: (T, 18) or (N, T, 18) array of [qpos(9), qvel(9)]
+        max_frames: subsample to at most this many frames
+        save_path: path for the .mp4 file (temp file if None)
+        fps: frames per second
+    Returns:
+        Path to the saved MP4.
+    """
+    import tempfile
+
+    states = np.array(states)
+    if states.ndim == 3:
+        primary_states = states[0]
+    else:
+        primary_states = states
+
+    # Subsample
+    if len(primary_states) > max_frames:
+        idx = np.linspace(0, len(primary_states) - 1, max_frames, dtype=int)
+        primary_states = primary_states[idx]
+
+    # Pre-compute all joint positions at once
+    pts, rootx, rootz = _batch_kinematics(primary_states[:, :9])
+
+    # Normalize x so the cheetah is always centered — enables blit=True
+    pts_c = pts.copy()
+    pts_c[:, :, 0] -= rootx[:, None]   # (T, 10, 2), x relative to torso
+
+    fig, ax = plt.subplots(figsize=(8, 4), dpi=72)
+    ax.set_xlim(-2.5, 2.5)
+    ax.set_ylim(-0.3, 1.5)
+    ax.set_aspect('equal')
+    ax.set_xlabel('X (m, cheetah-relative)')
+    ax.set_ylabel('Z (m)')
+    ax.grid(True, alpha=0.3)
+    ax.axhspan(-0.5, 0, color='#8B4513', alpha=0.3)
+    ground_line, = ax.plot([-2.5, 2.5], [0, 0], 'k-', linewidth=2)
+
+    torso_line,  = ax.plot([], [], 'b-',  linewidth=6, solid_capstyle='round')
+    back_thigh,  = ax.plot([], [], 'r-',  linewidth=4, solid_capstyle='round')
+    back_shin,   = ax.plot([], [], 'r-',  linewidth=3, solid_capstyle='round')
+    back_foot,   = ax.plot([], [], 'r-',  linewidth=2, solid_capstyle='round')
+    front_thigh, = ax.plot([], [], 'g-',  linewidth=4, solid_capstyle='round')
+    front_shin,  = ax.plot([], [], 'g-',  linewidth=3, solid_capstyle='round')
+    front_foot,  = ax.plot([], [], 'g-',  linewidth=2, solid_capstyle='round')
+    joints,      = ax.plot([], [], 'ko',  markersize=4, zorder=5)
+    info_text    = ax.text(0.02, 0.95, '', transform=ax.transAxes,
+                           verticalalignment='top', fontsize=8)
+
+    artists = [torso_line, back_thigh, back_shin, back_foot,
+               front_thigh, front_shin, front_foot, joints, info_text]
+
+    def init():
+        for a in artists:
+            if hasattr(a, 'set_data'):
+                a.set_data([], [])
+        info_text.set_text('')
+        return tuple(artists)
+
+    def animate(frame):
+        p = pts_c[frame]  # (10, 2) — already centered
+        torso_line.set_data( [p[0,0], p[1,0]], [p[0,1], p[1,1]])
+        back_thigh.set_data( [p[2,0], p[3,0]], [p[2,1], p[3,1]])
+        back_shin.set_data(  [p[3,0], p[4,0]], [p[3,1], p[4,1]])
+        back_foot.set_data(  [p[4,0], p[5,0]], [p[4,1], p[5,1]])
+        front_thigh.set_data([p[6,0], p[7,0]], [p[6,1], p[7,1]])
+        front_shin.set_data( [p[7,0], p[8,0]], [p[7,1], p[8,1]])
+        front_foot.set_data( [p[8,0], p[9,0]], [p[8,1], p[9,1]])
+        jx = p[[2,3,4,5,6,7,8,9], 0]
+        jz = p[[2,3,4,5,6,7,8,9], 1]
+        joints.set_data(jx, jz)
+        vel = primary_states[frame, 9]
+        info_text.set_text(f't={frame/fps:.2f}s  x={rootx[frame]:.1f}m  vel={vel:.2f}m/s')
+        return tuple(artists)
+
+    anim = FuncAnimation(fig, animate, init_func=init,
+                         frames=len(primary_states), interval=1000/fps, blit=True)
+
+    if save_path is None:
+        save_path = tempfile.mktemp(suffix='.mp4')
+
+    anim.save(save_path, writer='ffmpeg', fps=fps,
+              extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
+    plt.close(fig)
+    return save_path
+
 
 def create_cheetah_xy_animation(states, max_frames=300, save_path=None, ghost_alpha=0.3):
     """
