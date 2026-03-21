@@ -20,14 +20,10 @@ class RolloutState(NamedTuple):
     buffers: dict              # {states, actions, rewards, dones}
     buffer_idx: jnp.int32      # monotonically increasing; write at buffer_idx % buffer_size
     episode_len: jnp.int32
-    episode_reward: jnp.float32
 
 
 class StepOutputs(NamedTuple):
     train_metrics: dict
-    episode_done: jax.Array    # bool scalar; valid every step
-    episode_reward: jax.Array  # float; valid only when episode_done
-    episode_len: jax.Array     # int; valid only when episode_done
 
 
 class Rollout(NamedTuple):
@@ -61,7 +57,6 @@ def _make_scan_step(
         next_obs = next_obs.squeeze()
         done = terminated | truncated
         new_episode_len = carry.episode_len + jnp.int32(1)
-        new_episode_reward = carry.episode_reward + rewards[0]
 
         # ---- Buffer update (ring buffer) ----
         write_idx = carry.buffer_idx % buffer_size
@@ -97,7 +92,6 @@ def _make_scan_step(
 
         final_planner_state = new_planner_state.replace(mean=final_planner_mean)
         final_episode_len = jnp.where(done, jnp.int32(0), new_episode_len)
-        final_episode_reward = jnp.where(done, jnp.float32(0.0), new_episode_reward)
 
         new_carry = RolloutState(
             key=key,
@@ -109,15 +103,9 @@ def _make_scan_step(
             buffers=new_buffers,
             buffer_idx=new_buffer_idx,
             episode_len=final_episode_len,
-            episode_reward=final_episode_reward,
         )
 
-        step_out = StepOutputs(
-            train_metrics=train_metrics,
-            episode_done=done,
-            episode_reward=new_episode_reward,
-            episode_len=new_episode_len,
-        )
+        step_out = StepOutputs(train_metrics=train_metrics)
 
         return new_carry, step_out
 
@@ -160,7 +148,6 @@ def init_rollout(
         buffers=init_buffers,
         buffer_idx=jnp.int32(0),
         episode_len=jnp.int32(0),
-        episode_reward=jnp.float32(0.0),
     )
 
     step_fn = _make_scan_step(
@@ -205,13 +192,11 @@ def prefill_buffer(
         )
         new_buffer_idx = rollout_state.buffer_idx + jnp.int32(1)
         new_episode_len = rollout_state.episode_len + jnp.int32(1)
-        new_episode_reward = rollout_state.episode_reward + rewards[0]
 
         if done:
             new_mjx_data = reset_fn(reset_key)
             final_obs = get_obs_fn(new_mjx_data).squeeze()
             new_episode_len = jnp.int32(0)
-            new_episode_reward = jnp.float32(0.0)
         else:
             final_obs = next_obs_sq
 
@@ -222,7 +207,6 @@ def prefill_buffer(
             buffers=new_buffers,
             buffer_idx=new_buffer_idx,
             episode_len=new_episode_len,
-            episode_reward=new_episode_reward,
         )
 
     return rollout_state

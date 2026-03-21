@@ -160,14 +160,33 @@ def main(config):
     print(f"[{time.time()-t0:.2f}s] Buffer pre-filled (buffer_idx={int(rollout_state.buffer_idx)})")
 
     # ---- Chunk loop (jax.lax.scan per chunk) ----
-    chunk_size = config["eval_freq"]
+    chunk_size = config["chunk_size"]
     num_chunks = config["max_steps"] // chunk_size
+    eval_every = config["eval_freq"] // chunk_size
     checkpoint_chunk_freq = max(1, checkpoint_freq // chunk_size)
 
     print(f"[{time.time()-t0:.2f}s] Starting scan loop ({num_chunks} chunks of {chunk_size} steps)...")
     print(f"  First chunk triggers JIT compilation — expect a delay.")
 
+    buffer_size = config["buffer_size"]
+
+    def episodes_from_buffer(buffers, prev_idx, curr_idx):
+        n = curr_idx - prev_idx
+        indices = (np.arange(n) + prev_idx) % buffer_size
+        dones = np.array(buffers["dones"][indices])
+        rewards = np.array(buffers["rewards"][0, indices])
+        episodes, ep_start = [], 0
+        for i, done in enumerate(dones):
+            if done == 1.0:
+                episodes.append({
+                    "episodes/reward": float(rewards[ep_start:i+1].sum()),
+                    "episodes/length": int(i - ep_start + 1),
+                })
+                ep_start = i + 1
+        return episodes
+
     for chunk_idx in range(1, num_chunks + 1):
+        prev_idx = int(rollout_state.buffer_idx)
         t_chunk = time.time()
         rollout_state, chunk_out = jax.lax.scan(
             rollout.step_fn, rollout_state, None, length=chunk_size
@@ -176,43 +195,41 @@ def main(config):
         dt = time.time() - t_chunk
         step = chunk_idx * chunk_size
 
-        # ---- Log per-step metrics ----
-        chunk_start = (chunk_idx - 1) * chunk_size
-        for i in range(chunk_size):
-            s = chunk_start + i + 1
-            wandb.log(
-                {k: float(v[i]) for k, v in chunk_out.train_metrics.items()},
-                step=s,
-            )
-            if chunk_out.episode_done[i]:
-                wandb.log({
-                    "episodes/reward": float(chunk_out.episode_reward[i]),
-                    "episodes/length": float(chunk_out.episode_len[i]),
-                }, step=s)
+        # ---- Log mean train metrics for this chunk ----
+        mean_metrics = {k: float(jnp.mean(v)) for k, v in chunk_out.train_metrics.items()}
+        wandb.log(mean_metrics, step=step)
+
+        # ---- Log episode stats from buffer ----
+        curr_idx = int(rollout_state.buffer_idx)
+        for ep in episodes_from_buffer(rollout_state.buffers, prev_idx, curr_idx):
+            wandb.log(ep, step=step)
 
         # ---- Evaluation ----
-        t_eval = time.time()
-        eval_results = evaluator.evaluate(rollout_state.parameters)
-        dt_eval = time.time() - t_eval
-
-        metrics_to_log = {
-            k: v for k, v in eval_results.items() if isinstance(v, (int, float))
-        }
-        wandb.log(metrics_to_log, step=step)
-
-        if plot_eval and "trajectory" in eval_results:
-            traj = eval_results["trajectory"]
-            full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
-            gif_path = create_cheetah_xy_animation(full_states)
-            wandb.log(
-                {"eval/animation": wandb.Video(gif_path, format="gif")},
-                step=step,
-            )
-
         sps = chunk_size / dt
-        print(
-            f"[Step {step}] chunk={dt:.2f}s ({sps:.0f} steps/s) | eval={dt_eval:.2f}s"
-        )
+        if chunk_idx % eval_every == 0:
+            t_eval = time.time()
+            eval_results = evaluator.evaluate(rollout_state.parameters)
+            dt_eval = time.time() - t_eval
+
+            metrics_to_log = {
+                k: v for k, v in eval_results.items() if isinstance(v, (int, float))
+            }
+            wandb.log(metrics_to_log, step=step)
+
+            if plot_eval and "trajectory" in eval_results:
+                traj = eval_results["trajectory"]
+                full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
+                gif_path = create_cheetah_xy_animation(full_states)
+                wandb.log(
+                    {"eval/animation": wandb.Video(gif_path, format="gif")},
+                    step=step,
+                )
+
+            print(
+                f"[Step {step}] chunk={dt:.2f}s ({sps:.0f} steps/s) | eval={dt_eval:.2f}s"
+            )
+        else:
+            print(f"[Step {step}] chunk={dt:.2f}s ({sps:.0f} steps/s)")
 
         # ---- Checkpoint ----
         if checkpoint_enabled and run_dir and chunk_idx % checkpoint_chunk_freq == 0:
