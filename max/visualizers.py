@@ -56,19 +56,21 @@ def _batch_kinematics(states):
     return pts, rootx, rootz
 
 
-def create_cheetah_xy_video(states, max_frames=300, save_path=None, fps=50):
+def create_cheetah_xy_video(states, max_frames=300, save_path=None, fps=50, ghost_alpha=0.3):
     """
     Creates an MP4 video showing the cheetah as a stick figure.
 
     Uses vectorized kinematics, blit=True, and ffmpeg for fast encoding.
-    The cheetah is kept centered (x-coords normalized per frame) so axis
-    limits never change — this is what enables blit=True.
+    The primary cheetah is kept centered (x-coords normalized per frame) so
+    axis limits never change — this is what enables blit=True. Ghost cheetahs
+    are drawn relative to the same origin.
 
     Args:
         states: (T, 18) or (N, T, 18) array of [qpos(9), qvel(9)]
         max_frames: subsample to at most this many frames
         save_path: path for the .mp4 file (temp file if None)
         fps: frames per second
+        ghost_alpha: transparency for ghost cheetahs when N > 1
     Returns:
         Path to the saved MP4.
     """
@@ -77,20 +79,33 @@ def create_cheetah_xy_video(states, max_frames=300, save_path=None, fps=50):
     states = np.array(states)
     if states.ndim == 3:
         primary_states = states[0]
+        ghost_states_raw = states[1:] if states.shape[0] > 1 else None
     else:
         primary_states = states
+        ghost_states_raw = None
 
     # Subsample
     if len(primary_states) > max_frames:
         idx = np.linspace(0, len(primary_states) - 1, max_frames, dtype=int)
         primary_states = primary_states[idx]
+        if ghost_states_raw is not None:
+            ghost_states_raw = ghost_states_raw[:, idx, :]
 
     # Pre-compute all joint positions at once
-    pts, rootx, rootz = _batch_kinematics(primary_states[:, :9])
+    pts, rootx, _ = _batch_kinematics(primary_states[:, :9])
 
-    # Normalize x so the cheetah is always centered — enables blit=True
+    # Normalize x so the primary cheetah is always centered — enables blit=True
     pts_c = pts.copy()
-    pts_c[:, :, 0] -= rootx[:, None]   # (T, 10, 2), x relative to torso
+    pts_c[:, :, 0] -= rootx[:, None]   # (T, 10, 2), x relative to primary torso
+
+    # Pre-compute ghost kinematics (same x reference frame as primary)
+    ghost_pts_c = []
+    if ghost_states_raw is not None:
+        for gs in ghost_states_raw:
+            gpts, _, _ = _batch_kinematics(gs[:, :9])
+            gpts_c = gpts.copy()
+            gpts_c[:, :, 0] -= rootx[:, None]  # same origin as primary
+            ghost_pts_c.append(gpts_c)
 
     fig, ax = plt.subplots(figsize=(8, 4), dpi=72)
     ax.set_xlim(-2.5, 2.5)
@@ -100,7 +115,20 @@ def create_cheetah_xy_video(states, max_frames=300, save_path=None, fps=50):
     ax.set_ylabel('Z (m)')
     ax.grid(True, alpha=0.3)
     ax.axhspan(-0.5, 0, color='#8B4513', alpha=0.3)
-    ground_line, = ax.plot([-2.5, 2.5], [0, 0], 'k-', linewidth=2)
+    ax.plot([-2.5, 2.5], [0, 0], 'k-', linewidth=2)
+
+    # Ghost artists
+    ghost_lines = []
+    for _ in ghost_pts_c:
+        ghost_lines.append({
+            'torso':  ax.plot([], [], color=(0.6, 0.6, 0.9), linewidth=4, alpha=ghost_alpha, solid_capstyle='round')[0],
+            'bthigh': ax.plot([], [], color=(0.9, 0.6, 0.6), linewidth=3, alpha=ghost_alpha, solid_capstyle='round')[0],
+            'bshin':  ax.plot([], [], color=(0.9, 0.6, 0.6), linewidth=2, alpha=ghost_alpha, solid_capstyle='round')[0],
+            'bfoot':  ax.plot([], [], color=(0.9, 0.6, 0.6), linewidth=1.5, alpha=ghost_alpha, solid_capstyle='round')[0],
+            'fthigh': ax.plot([], [], color=(0.6, 0.9, 0.6), linewidth=3, alpha=ghost_alpha, solid_capstyle='round')[0],
+            'fshin':  ax.plot([], [], color=(0.6, 0.9, 0.6), linewidth=2, alpha=ghost_alpha, solid_capstyle='round')[0],
+            'ffoot':  ax.plot([], [], color=(0.6, 0.9, 0.6), linewidth=1.5, alpha=ghost_alpha, solid_capstyle='round')[0],
+        })
 
     torso_line,  = ax.plot([], [], 'b-',  linewidth=6, solid_capstyle='round')
     back_thigh,  = ax.plot([], [], 'r-',  linewidth=4, solid_capstyle='round')
@@ -113,17 +141,30 @@ def create_cheetah_xy_video(states, max_frames=300, save_path=None, fps=50):
     info_text    = ax.text(0.02, 0.95, '', transform=ax.transAxes,
                            verticalalignment='top', fontsize=8)
 
-    artists = [torso_line, back_thigh, back_shin, back_foot,
-               front_thigh, front_shin, front_foot, joints, info_text]
+    primary_artists = [torso_line, back_thigh, back_shin, back_foot,
+                       front_thigh, front_shin, front_foot, joints, info_text]
+    ghost_artist_list = [line for gs in ghost_lines for line in gs.values()]
+    all_artists = ghost_artist_list + primary_artists
 
     def init():
-        for a in artists:
+        for a in all_artists:
             if hasattr(a, 'set_data'):
                 a.set_data([], [])
         info_text.set_text('')
-        return tuple(artists)
+        return tuple(all_artists)
 
     def animate(frame):
+        # Draw ghosts first (behind primary)
+        for glines, gpts in zip(ghost_lines, ghost_pts_c):
+            p = gpts[frame]
+            glines['torso'].set_data( [p[0,0], p[1,0]], [p[0,1], p[1,1]])
+            glines['bthigh'].set_data([p[2,0], p[3,0]], [p[2,1], p[3,1]])
+            glines['bshin'].set_data( [p[3,0], p[4,0]], [p[3,1], p[4,1]])
+            glines['bfoot'].set_data( [p[4,0], p[5,0]], [p[4,1], p[5,1]])
+            glines['fthigh'].set_data([p[6,0], p[7,0]], [p[6,1], p[7,1]])
+            glines['fshin'].set_data( [p[7,0], p[8,0]], [p[7,1], p[8,1]])
+            glines['ffoot'].set_data( [p[8,0], p[9,0]], [p[8,1], p[9,1]])
+
         p = pts_c[frame]  # (10, 2) — already centered
         torso_line.set_data( [p[0,0], p[1,0]], [p[0,1], p[1,1]])
         back_thigh.set_data( [p[2,0], p[3,0]], [p[2,1], p[3,1]])
@@ -137,7 +178,7 @@ def create_cheetah_xy_video(states, max_frames=300, save_path=None, fps=50):
         joints.set_data(jx, jz)
         vel = primary_states[frame, 9]
         info_text.set_text(f't={frame/fps:.2f}s  x={rootx[frame]:.1f}m  vel={vel:.2f}m/s')
-        return tuple(artists)
+        return tuple(all_artists)
 
     anim = FuncAnimation(fig, animate, init_func=init,
                          frames=len(primary_states), interval=1000/fps, blit=True)
