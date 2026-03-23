@@ -107,7 +107,7 @@ def create_cheetah_xy_video(states, max_frames=300, save_path=None, fps=50, ghos
             gpts_c[:, :, 0] -= rootx[:, None]  # same origin as primary
             ghost_pts_c.append(gpts_c)
 
-    fig, ax = plt.subplots(figsize=(8, 4), dpi=72)
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
     ax.set_xlim(-2.5, 2.5)
     ax.set_ylim(-0.3, 1.5)
     ax.set_aspect('equal')
