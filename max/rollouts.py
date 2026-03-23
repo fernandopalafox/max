@@ -27,7 +27,8 @@ class StepOutputs(NamedTuple):
 
 
 class Rollout(NamedTuple):
-    step_fn: Callable  # (RolloutState, None) -> (RolloutState, StepOutputs)
+    step_fn: Callable   # (RolloutState, None) -> (RolloutState, StepOutputs)
+    scan_fn: Callable   # jit-wrapped scan over chunk_size steps
 
 
 def _make_scan_step(
@@ -150,11 +151,15 @@ def init_rollout(
         episode_len=jnp.int32(0),
     )
 
+    chunk_size = config["chunk_size"]
     step_fn = _make_scan_step(
         reset_fn, env_step_fn, get_obs_fn, planner, trainer, sampler, buffer_size
     )
+    scan_fn = jax.jit(
+        lambda state: jax.lax.scan(step_fn, state, None, length=chunk_size)
+    )
 
-    return Rollout(step_fn=step_fn), init_state
+    return Rollout(step_fn=step_fn, scan_fn=scan_fn), init_state
 
 
 def prefill_buffer(

@@ -1,14 +1,15 @@
 # train.py
 
 import os
-os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.45"
+# os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
+# os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.45"
+os.environ["JAX_COMPILATION_CACHE_DIR"] = "/tmp/jax_cache"
+os.environ["JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] = "0"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 import time
 
 import jax
-jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 
 import jax.numpy as jnp
 import numpy as np
@@ -33,7 +34,7 @@ import pickle
 import json
 from datetime import datetime
 
-from max.visualizers import create_cheetah_xy_animation
+from max.visualizers import create_cheetah_xy_animation, create_cheetah_xy_video
 
 
 def main(config):
@@ -76,7 +77,7 @@ def main(config):
             "ema_critic": copy.deepcopy(critic_parameters),
             "policy":     policy_parameters,
         },
-        "normalizer": {"q_scale": jnp.array(config["normalizer"]["critic"]["q_scale_init"])},
+        "normalizer": {"q_scale": jnp.array(config["normalizer"]["critic"]["q_scale_init"], dtype=jnp.float32)},
     }
 
     # ---- Trainer ----
@@ -128,9 +129,13 @@ def main(config):
 
     if plot_eval and "trajectory" in eval_results:
         traj = eval_results["trajectory"]
+        # if "episode_rewards" in eval_results:
+        #     best = int(np.argmax(eval_results["episode_rewards"]))
+        #     traj = jax.tree.map(lambda x: x[best], traj)
         full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
-        gif_path = create_cheetah_xy_animation(full_states)
-        wandb.log({"eval/animation": wandb.Video(gif_path, format="gif")}, step=0)
+        video_path = create_cheetah_xy_video(full_states)
+        wandb.log({"eval/animation": wandb.Video(video_path, format="mp4")}, step=0)
+        print(f"[{time.time()-t0:.2f}s] Animation logged")
 
     # ---- Build rollout ----
     key, rollout_key = jax.random.split(key)
@@ -142,6 +147,7 @@ def main(config):
         sampler,
         parameters, buffers,
     )
+    print(f"[{time.time()-t0:.2f}s] Rollout initialized")
 
     # ---- Pre-fill buffer with random actions ----
     sampler_cfg = config["sampler"]
@@ -173,9 +179,7 @@ def main(config):
     for chunk_idx in range(1, num_chunks + 1):
         prev_idx = int(rollout_state.buffer_idx)
         t_chunk = time.time()
-        rollout_state, chunk_out = jax.lax.scan(
-            rollout.step_fn, rollout_state, None, length=chunk_size
-        )
+        rollout_state, chunk_out = rollout.scan_fn(rollout_state)
         jax.block_until_ready(chunk_out)
         dt = time.time() - t_chunk
         step = chunk_idx * chunk_size
@@ -204,9 +208,9 @@ def main(config):
             if plot_eval and "trajectory" in eval_results:
                 traj = eval_results["trajectory"]
                 full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
-                gif_path = create_cheetah_xy_animation(full_states)
+                video_path = create_cheetah_xy_video(full_states)
                 wandb.log(
-                    {"eval/animation": wandb.Video(gif_path, format="gif")},
+                    {"eval/animation": wandb.Video(video_path, format="mp4")},
                     step=step,
                 )
 
