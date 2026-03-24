@@ -62,7 +62,7 @@ def init_trainer(
     """
     Initialize a trainer based on config["trainer"].
 
-    Currently supported: "tdmpc2"
+    Currently supported: "tdmpc2", "ogd"
     """
     trainer_type = config["trainer"]["type"]
 
@@ -70,8 +70,10 @@ def init_trainer(
         return init_tdmpc2_trainer(
             key, config, encoder, dynamics, critic, policy, reward, init_params
         )
-    else:
-        raise ValueError(f"Unknown trainer: {trainer_type!r}")
+    if trainer_type == "ogd":
+        return init_ogd_trainer(key, config, encoder, dynamics, init_params)
+
+    raise ValueError(f"Unknown trainer: {trainer_type!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -389,4 +391,70 @@ def init_tdmpc2_trainer(
         return train_step(train_state, batch, parameters, key)
 
     trainer = Trainer(train_fn=train_fn)
+    return trainer, train_state
+
+
+# ---------------------------------------------------------------------------
+# OGD (online gradient descent) trainer
+# ---------------------------------------------------------------------------
+
+def init_ogd_trainer(
+    key: jax.Array,
+    config: dict,
+    encoder: Encoder,
+    dynamics,
+    init_params: dict,
+) -> tuple[Trainer, TrainState]:
+    """
+    Online gradient descent trainer: one Adam step on dynamics params per call,
+    using consistency loss only.
+
+    config["trainer"]:
+        lr:             float, Adam learning rate
+        horizon:        int, rollout horizon H
+        temporal_decay: float, λ^t weight per timestep
+        grad_clip_norm: float, gradient clipping (default 20)
+    """
+    tp = config["trainer"]
+    lr: float = tp["lr"]
+    H: int = tp["horizon"]
+    temporal_decay: float = tp["temporal_decay"]
+    grad_clip_norm: float = tp.get("grad_clip_norm", 20.0)
+
+    encode_batch = jax.vmap(encoder.encode, in_axes=(None, 0))
+    infer_batch = jax.vmap(dynamics.predict, in_axes=(None, 0, 0))
+
+    optimizer = optax.chain(optax.clip_by_global_norm(grad_clip_norm), optax.adam(lr))
+    opt_state = optimizer.init(init_params["mean"]["dynamics"])
+    train_state = TrainState(opt_state=opt_state)
+
+    def consistency_loss_fn(dyn_params, enc_params, batch):
+        obs = batch["states"]      # (B, H+1, dim_s)
+        actions = batch["actions"]  # (B, H, dim_a)
+
+        z = encode_batch(enc_params, obs[:, 0])
+        loss = jnp.zeros(())
+        for t in range(H):
+            w = temporal_decay ** t
+            z_pred = infer_batch(dyn_params, z, actions[:, t])
+            z_real = jax.lax.stop_gradient(encode_batch(enc_params, obs[:, t + 1]))
+            loss = loss + w * jnp.mean((z_pred - z_real) ** 2)
+            z = z_pred
+        return loss / H
+
+    @jax.jit
+    def train_step(train_state, batch, parameters, key):
+        enc_params = jax.lax.stop_gradient(parameters["mean"]["encoder"])
+        loss, grads = jax.value_and_grad(consistency_loss_fn)(
+            parameters["mean"]["dynamics"], enc_params, batch
+        )
+        updates, new_opt = optimizer.update(grads, train_state.opt_state)
+        new_dyn_params = optax.apply_updates(parameters["mean"]["dynamics"], updates)
+        new_parameters = parameters | {
+            "mean": parameters["mean"] | {"dynamics": new_dyn_params}
+        }
+        new_train_state = train_state.replace(opt_state=new_opt)
+        return new_train_state, new_parameters, {"losses/consistency": loss}
+
+    trainer = Trainer(train_fn=train_step)
     return trainer, train_state
