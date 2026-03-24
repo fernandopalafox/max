@@ -13,7 +13,7 @@ class Critic(NamedTuple):
     subsample: Callable   # (critic_params, z, a, key, n=2) -> (n, ...) Q values (raw, no min/mean)
 
 
-def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
+def init_critic(key: jax.Array, config: dict, pretrained: dict = None) -> tuple["Critic", dict]:
     """
     Initialize Q-function ensemble.
 
@@ -29,15 +29,17 @@ def init_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
 
     Returns:
         (Critic, critic_params) where critic_params = {"ensemble": vmapped_flax_params}
+
+    If pretrained is provided, it is used as the initial parameters (fully trainable).
     """
     critic_type = config["critic"]["type"]
     if critic_type == "ensemble":
-        return _init_ensemble_critic(key, config)
+        return _init_ensemble_critic(key, config, pretrained=pretrained)
     else:
         raise ValueError(f"Unknown critic type: {critic_type!r}")
 
 
-def _init_ensemble_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]:
+def _init_ensemble_critic(key: jax.Array, config: dict, pretrained: dict = None) -> tuple["Critic", dict]:
     critic_cfg = config["critic"]
     features = critic_cfg["features"]
     num_ensemble: int = critic_cfg["num_ensemble"]
@@ -68,11 +70,13 @@ def _init_ensemble_critic(key: jax.Array, config: dict) -> tuple["Critic", dict]
     dummy_z = jnp.ones((latent_dim,))
     dummy_a = jnp.ones((dim_a,))
 
-    # Initialize num_ensemble independent Q-networks
-    ens_keys = jax.random.split(key, num_ensemble)
-    ensemble_params = jax.vmap(lambda k: q_net.init(k, dummy_z, dummy_a))(ens_keys)
-
-    critic_params = {"ensemble": ensemble_params}
+    if pretrained is not None:
+        critic_params = pretrained
+    else:
+        # Initialize num_ensemble independent Q-networks
+        ens_keys = jax.random.split(key, num_ensemble)
+        ensemble_params = jax.vmap(lambda k: q_net.init(k, dummy_z, dummy_a))(ens_keys)
+        critic_params = {"ensemble": ensemble_params}
 
     def value(critic_params: Any, z: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
         """

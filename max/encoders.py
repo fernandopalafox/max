@@ -3,7 +3,6 @@
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-import pickle
 from typing import NamedTuple, Callable, Any, Sequence
 
 from max.normalizers import Normalizer
@@ -18,6 +17,7 @@ def init_encoder(
     key: jax.Array,
     config: dict,
     normalizer: Normalizer = None,
+    pretrained: dict = None,
 ) -> tuple["Encoder", dict]:
     """
     Initialize encoder.
@@ -27,19 +27,19 @@ def init_encoder(
         encoder_features: list[int], e.g. [256, 128] (last entry = latent_dim)
         simnorm_dim_v:    int, simplex dimension V (latent_dim must be divisible by V)
         simnorm_tau:      float, softmax temperature (default 1.0)
-        pretrained_params_path: optional path to load pretrained params (pkl with "model" key)
-
     Returns:
         (Encoder, enc_parameters) where enc_parameters are the NN params only.
+
+    If pretrained is provided, it is used as the initial parameters (fully trainable).
     """
     enc_type = config["encoder"]["type"]
     if enc_type == "proprioceptive":
-        return _init_proprioceptive_encoder(key, config)
+        return _init_proprioceptive_encoder(key, config, pretrained=pretrained)
     else:
         raise ValueError(f"Unknown encoder type: {enc_type!r}")
 
 
-def _init_proprioceptive_encoder(key: jax.Array, config: dict) -> tuple["Encoder", dict]:
+def _init_proprioceptive_encoder(key: jax.Array, config: dict, pretrained: dict = None) -> tuple["Encoder", dict]:
     dim_state = config["dim_state"]
     enc_cfg = config["encoder"]
     encoder_features: Sequence[int] = enc_cfg["encoder_features"]
@@ -64,14 +64,10 @@ def _init_proprioceptive_encoder(key: jax.Array, config: dict) -> tuple["Encoder
 
     encoder_net = _Encoder()
 
-    dummy_state = jnp.ones((dim_state,))
-
-    pretrained_path = enc_cfg.get("pretrained_params_path")
-    if pretrained_path:
-        with open(pretrained_path, "rb") as f:
-            pretrained = pickle.load(f)
-        enc_parameters = pretrained["encoder"]["encoder"]
+    if pretrained is not None:
+        enc_parameters = pretrained
     else:
+        dummy_state = jnp.ones((dim_state,))
         key, k1 = jax.random.split(key)
         enc_parameters = encoder_net.init(k1, dummy_state)
 

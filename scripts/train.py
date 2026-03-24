@@ -60,12 +60,18 @@ def main(config):
     reset_fn, step_fn, get_obs_fn = init_env(config)
 
     # ---- Model components ----
+    pretrained_params = {}
+    if path := config.get("pretrained_path"):
+        with open(path, "rb") as f:
+            pretrained_params = pickle.load(f)["mean"]
+        print(f"Loaded pretrained parameters from {path}")
+
     key, enc_key, dyn_key, critic_key, policy_key = jax.random.split(key, 5)
-    encoder,      enc_parameters    = init_encoder(enc_key, config)
-    dynamics,     dyn_parameters    = init_dynamics(dyn_key, config)
-    critic,       critic_parameters = init_critic(critic_key, config)
-    policy,       policy_parameters = init_policy(policy_key, config)
-    reward_model, reward_parameters = init_reward_model(config)
+    encoder,      enc_parameters    = init_encoder(enc_key, config,    pretrained=pretrained_params.get("encoder"))
+    dynamics,     dyn_parameters    = init_dynamics(dyn_key, config,   pretrained=pretrained_params.get("dynamics"))
+    critic,       critic_parameters = init_critic(critic_key, config,  pretrained=pretrained_params.get("critic"))
+    policy,       policy_parameters = init_policy(policy_key, config,  pretrained=pretrained_params.get("policy"))
+    reward_model, reward_parameters = init_reward_model(config,        pretrained=pretrained_params.get("reward"))
 
     # ---- Parameters dict ----
     parameters = {
