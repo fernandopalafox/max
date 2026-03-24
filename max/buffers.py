@@ -75,21 +75,43 @@ def update_buffer(
     }
 
 
-def episodes_from_buffer(buffers: Dict, prev_idx: int, curr_idx: int, buffer_size: int) -> list:
+def episodes_from_buffer(
+    buffers: Dict,
+    prev_idx: int,
+    curr_idx: int,
+    buffer_size: int,
+    partial_reward: float = 0.0,
+    partial_len: int = 0,
+) -> tuple[list, float, int]:
     """
-    Return episode stats for transitions written in [prev_idx, curr_idx).
-    Each entry is {"episodes/reward": float, "episodes/length": int}.
+    Return completed episode stats for transitions written in [prev_idx, curr_idx).
+
+    partial_reward, partial_len: running totals for the episode that was
+    in-progress at prev_idx. Pass 0 / 0 at the start of training.
+
+    Returns:
+        episodes:           list of {"episodes/reward": float, "episodes/length": int}
+        new_partial_reward: reward accumulated so far in the still-incomplete episode
+        new_partial_len:    steps accumulated so far in the still-incomplete episode
     """
     n = curr_idx - prev_idx
     indices = (np.arange(n) + prev_idx) % buffer_size
     dones = np.array(buffers["dones"][indices])
     rewards = np.array(buffers["rewards"][0, indices])
-    episodes, ep_start = [], 0
-    for i, done in enumerate(dones):
+
+    episodes = []
+    ep_reward = partial_reward
+    ep_len = partial_len
+
+    for done, reward in zip(dones, rewards):
+        ep_reward += float(reward)
+        ep_len += 1
         if done == 1.0:
             episodes.append({
-                "episodes/reward": float(rewards[ep_start:i+1].sum()),
-                "episodes/length": int(i - ep_start + 1),
+                "episodes/reward": ep_reward,
+                "episodes/length": ep_len,
             })
-            ep_start = i + 1
-    return episodes
+            ep_reward = 0.0
+            ep_len = 0
+
+    return episodes, ep_reward, ep_len

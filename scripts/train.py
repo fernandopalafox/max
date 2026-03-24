@@ -181,6 +181,8 @@ def main(config):
     print(f"  First chunk triggers JIT compilation — expect a delay.")
 
     buffer_size = config["buffer_size"]
+    ep_partial_reward = 0.0
+    ep_partial_len = 0
 
     for chunk_idx in range(1, num_chunks + 1):
         prev_idx = int(rollout_state.buffer_idx)
@@ -196,8 +198,18 @@ def main(config):
 
         # ---- Log episode stats from buffer ----
         curr_idx = int(rollout_state.buffer_idx)
-        for ep in episodes_from_buffer(rollout_state.buffers, prev_idx, curr_idx, buffer_size):
-            wandb.log(ep, step=step)
+        episodes, ep_partial_reward, ep_partial_len = episodes_from_buffer(
+            rollout_state.buffers, prev_idx, curr_idx, buffer_size,
+            ep_partial_reward, ep_partial_len,
+        )
+        if episodes:
+            wandb.log(
+                {
+                    "episodes/reward": float(np.mean([ep["episodes/reward"] for ep in episodes])),
+                    "episodes/length": float(np.mean([ep["episodes/length"] for ep in episodes])),
+                },
+                step=step,
+            )
 
         # ---- Evaluation ----
         sps = chunk_size / dt
