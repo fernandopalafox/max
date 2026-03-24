@@ -12,7 +12,7 @@ class Policy(NamedTuple):
     sample: Callable  # (policy_params, z, key) -> (tanh_action, log_prob)
 
 
-def init_policy(key: jax.Array, config: dict) -> tuple["Policy", dict]:
+def init_policy(key: jax.Array, config: dict, pretrained: dict = None) -> tuple["Policy", dict]:
     """
     Initialize policy.
 
@@ -24,15 +24,17 @@ def init_policy(key: jax.Array, config: dict) -> tuple["Policy", dict]:
 
     Returns:
         (Policy, policy_params) where policy_params = {"policy_net": flax_params}
+
+    If pretrained is provided, it is used as the initial parameters (fully trainable).
     """
     policy_type = config["policy"]["type"]
     if policy_type == "squashed_gaussian":
-        return _init_squashed_gaussian_policy(key, config)
+        return _init_squashed_gaussian_policy(key, config, pretrained=pretrained)
     else:
         raise ValueError(f"Unknown policy type: {policy_type!r}")
 
 
-def _init_squashed_gaussian_policy(key: jax.Array, config: dict) -> tuple["Policy", dict]:
+def _init_squashed_gaussian_policy(key: jax.Array, config: dict, pretrained: dict = None) -> tuple["Policy", dict]:
     policy_cfg = config["policy"]
     features = policy_cfg["features"]
     log_std_min: float = policy_cfg["log_std_min"]
@@ -55,11 +57,12 @@ def _init_squashed_gaussian_policy(key: jax.Array, config: dict) -> tuple["Polic
 
     policy_net = _PolicyNet()
 
-    dummy_z = jnp.ones((latent_dim,))
-    key, k1 = jax.random.split(key)
-    policy_nn_params = policy_net.init(k1, dummy_z)
-
-    policy_params = {"policy_net": policy_nn_params}
+    if pretrained is not None:
+        policy_params = pretrained
+    else:
+        dummy_z = jnp.ones((latent_dim,))
+        key, k1 = jax.random.split(key)
+        policy_params = {"policy_net": policy_net.init(k1, dummy_z)}
 
     def sample(
         policy_params: Any, z: jnp.ndarray, key: jax.Array

@@ -20,7 +20,7 @@ class Reward(NamedTuple):
     logits: Callable   # (reward_params, z, action) -> (num_bins,)
 
 
-def init_reward_model(config: dict) -> tuple["Reward", dict]:
+def init_reward_model(config: dict, pretrained: dict = None) -> tuple["Reward", dict]:
     """
     Initialize the TDMPC2 learned reward head.
 
@@ -33,15 +33,17 @@ def init_reward_model(config: dict) -> tuple["Reward", dict]:
 
     Returns:
         (Reward, reward_params) where reward_params are flat Flax params.
+
+    If pretrained is provided, it is used as the initial parameters (fully trainable).
     """
     reward_type = config["reward"]["type"]
     if reward_type == "mlp":
-        return _init_mlp_reward(config)
+        return _init_mlp_reward(config, pretrained=pretrained)
     else:
         raise ValueError(f"Unknown reward type: {reward_type!r}")
 
 
-def _init_mlp_reward(config: dict) -> tuple["Reward", dict]:
+def _init_mlp_reward(config: dict, pretrained: dict = None) -> tuple["Reward", dict]:
     rp = config["reward"]
     features = rp["features"]
     num_bins: int = rp["num_bins"]
@@ -62,9 +64,12 @@ def _init_mlp_reward(config: dict) -> tuple["Reward", dict]:
             return nn.Dense(num_bins)(x)
 
     reward_net = _RewardHead()
-    dummy_z = jnp.ones((latent_dim,))
-    dummy_a = jnp.ones((dim_a,))
-    reward_params = reward_net.init(jax.random.key(0), dummy_z, dummy_a)
+    if pretrained is not None:
+        reward_params = pretrained
+    else:
+        dummy_z = jnp.ones((latent_dim,))
+        dummy_a = jnp.ones((dim_a,))
+        reward_params = reward_net.init(jax.random.key(0), dummy_z, dummy_a)
 
     def logits_fn(reward_params: Any, z: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
         return reward_net.apply(reward_params, z, a)

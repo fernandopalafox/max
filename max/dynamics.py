@@ -3,7 +3,6 @@
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-import pickle
 from typing import NamedTuple, Callable, Any
 
 from max.normalizers import Normalizer
@@ -18,6 +17,7 @@ def init_dynamics(
     key: jax.Array,
     config: Any,
     normalizer: Normalizer = None,
+    pretrained: dict = None,
 ) -> tuple[Dynamics, dict]:
     """
     Dispatcher — reads config["dynamics"]["type"].
@@ -28,14 +28,16 @@ def init_dynamics(
         (Dynamics, dyn_params) where dyn_params are the trainable params directly.
         Dynamics.predict(dyn_params, z, action) -> z_next
             action: raw (un-normalized).
+
+    If pretrained is provided, it is used as the initial parameters (fully trainable).
+    For dense_lora, pretrained should be the dense dynamics Flax params to build LoRA on top of.
     """
     variant = config["dynamics"]["type"]
 
     if variant == "dense":
-        return _init_dense_dynamics(key, config)
-
+        return _init_dense_dynamics(key, config, pretrained=pretrained)
     if variant == "dense_lora":
-        return _init_lora_dynamics(key, config)
+        return _init_lora_dynamics(key, config, pretrained=pretrained)
 
     raise ValueError(f"Unknown dynamics: {variant!r}")
 
@@ -43,6 +45,7 @@ def init_dynamics(
 def _init_dense_dynamics(
     key: jax.Array,
     config: Any,
+    pretrained: dict = None,
 ) -> tuple[Dynamics, dict]:
     """
     Dense MLP dynamics: NormedLinear blocks with SimNorm final activation.
@@ -83,8 +86,11 @@ def _init_dense_dynamics(
 
     dynamics_net = _DynamicsNet()
     dummy_x = jnp.ones((latent_dim + dim_action,))
-    key, k1 = jax.random.split(key)
-    mean_params = dynamics_net.init(k1, dummy_x)
+    if pretrained is not None:
+        mean_params = pretrained
+    else:
+        key, k1 = jax.random.split(key)
+        mean_params = dynamics_net.init(k1, dummy_x)
 
     def predict(mean_params: Any, z: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
         return dynamics_net.apply(mean_params, jnp.concatenate([z, action], axis=-1))
@@ -95,23 +101,24 @@ def _init_dense_dynamics(
 def _init_lora_dynamics(
     key: jax.Array,
     config: Any,
+    pretrained: dict = None,
 ) -> tuple[Dynamics, dict]:
     """
     LoRA-XS dynamics: frozen pretrained MLP with trainable low-rank R matrices.
 
-    Loads a pretrained dense dynamics checkpoint and computes truncated SVD of
-    each Dense layer weight. Only the R matrices (one r×r matrix per layer) are
-    trainable. Effective weight: W_eff = W + U @ diag(Sigma) @ R @ V^T.
+    pretrained should be the dense dynamics Flax params (e.g. from a prior dense run).
+    The dense weights are baked into the forward pass via SVD decomposition.
+    Only the R matrices (one r×r matrix per layer) are trainable.
+    Effective weight: W_eff = W + U @ diag(Sigma) @ R @ V^T.
 
     Param count: num_layers * r^2 (e.g. 3 layers, r=16 → 768 params).
 
     config["dynamics"]:
-        type:                   str, "dense_lora"
-        dynamics_features:      list[int], must match pretrained architecture
+        type:              str, "dense_lora"
+        dynamics_features: list[int], must match pretrained architecture
         simnorm_dim_v, simnorm_tau: same as dense variant
-        svd_rank:               int, LoRA rank r (default 32)
-        r_init_std:             float, std for R init (default 1e-5)
-        pretrained_params_path: str, path to pretrained latent_dynamics pkl
+        svd_rank:          int, LoRA rank r (default 32)
+        r_init_std:        float, std for R init (default 1e-5)
 
     Returns dyn_params = {"R_0": ..., "R_1": ..., ...} directly.
     """
@@ -121,7 +128,6 @@ def _init_lora_dynamics(
     simnorm_tau: float = dyn_cfg["simnorm_tau"]
     svd_rank: int = dyn_cfg["svd_rank"]
     r_init_std: float = dyn_cfg["r_init_std"]
-    pretrained_path: str = dyn_cfg["pretrained_params_path"]
 
     latent_dim: int = config["encoder"]["encoder_features"][-1]
 
@@ -129,9 +135,7 @@ def _init_lora_dynamics(
         f"dynamics_features[-1]={features[-1]} must equal latent_dim={latent_dim}"
     )
 
-    with open(pretrained_path, "rb") as f:
-        pretrained = pickle.load(f)
-    pretrained_dyn = pretrained["dynamics"]["mean"]["params"]
+    pretrained_dyn = pretrained["params"]
 
     # Build frozen layer dicts and initialize R matrices
     frozen_layers = []
