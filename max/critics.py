@@ -70,7 +70,7 @@ def _init_ensemble_critic(key: jax.Array, config: dict, pretrained: dict = None)
     dummy_z = jnp.ones((latent_dim,))
     dummy_a = jnp.ones((dim_a,))
 
-    if config["critic"].get("frozen", False):
+    if config["critic"]["frozen"]:
         def value(params: Any, z: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
             return jax.vmap(lambda p: q_net.apply(p, z, a))(pretrained["ensemble"])
 

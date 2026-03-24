@@ -57,7 +57,7 @@ def _init_squashed_gaussian_policy(key: jax.Array, config: dict, pretrained: dic
 
     policy_net = _PolicyNet()
 
-    if config["policy"].get("frozen", False):
+    if config["policy"]["frozen"]:
         def sample(
             params: Any, z: jnp.ndarray, key: jax.Array
         ) -> tuple[jnp.ndarray, jnp.ndarray]:

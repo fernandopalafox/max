@@ -16,6 +16,8 @@ Scripts require the `max` conda environment: `conda run -n max python scripts/tr
 
 **No defensive clutter.** Don't add asserts, input validation, or error checks unless explicitly asked for. Trust that inputs are correct.
 
+**No config defaults.** Always access config keys directly (e.g. `config["key"]`), never with `.get("key", default)`. Missing keys should raise an error immediately so misconfigured runs fail loudly rather than silently using a fallback.
+
 ## Commits and PRs
 
 Keep commit messages and PR descriptions plain and concise — no section headers, checklists, or structured templates. Describe the problem, what the change does, and any non-obvious tradeoffs. A good PR description reads like a short paragraph to a colleague, not a form. Don't hard-wrap at 88 columns; let each sentence flow on one line since messages are rendered on GitHub.

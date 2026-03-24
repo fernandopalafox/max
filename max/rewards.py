@@ -65,7 +65,7 @@ def _init_mlp_reward(config: dict, pretrained: dict = None) -> tuple["Reward", d
 
     reward_net = _RewardHead()
 
-    if config["reward"].get("frozen", False):
+    if config["reward"]["frozen"]:
         def logits_fn(params: Any, z: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
             return reward_net.apply(pretrained, z, a)
 

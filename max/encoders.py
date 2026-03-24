@@ -64,7 +64,7 @@ def _init_proprioceptive_encoder(key: jax.Array, config: dict, pretrained: dict 
 
     encoder_net = _Encoder()
 
-    if config["encoder"].get("frozen", False):
+    if config["encoder"]["frozen"]:
         def encode(params: Any, obs: jnp.ndarray) -> jnp.ndarray:
             return encoder_net.apply(pretrained, obs)
         return Encoder(encode=encode), {}
