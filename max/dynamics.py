@@ -94,6 +94,11 @@ def _init_dense_dynamics(
         key, k1 = jax.random.split(key)
         mean_params = dynamics_net.init(k1, dummy_x)
 
+    if config["dynamics"]["frozen"]:
+        def predict(params: Any, z: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
+            return dynamics_net.apply(mean_params, jnp.concatenate([z, action], axis=-1))
+        return Dynamics(predict=predict), {}
+
     def predict(mean_params: Any, z: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
         return dynamics_net.apply(mean_params, jnp.concatenate([z, action], axis=-1))
 

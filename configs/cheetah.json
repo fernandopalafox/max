@@ -13,7 +13,7 @@
     "dim_action": 6,
     "train_freq": 1000000,
     "eval_freq": 10000,
-    "chunk_size": 1000,
+    "chunk_size": 1,
     "plot_eval": true,
 
     "evaluator": {
@@ -34,14 +34,16 @@
       "type": "proprioceptive",
       "encoder_features": [256, 128, 64],
       "simnorm_dim_v": 8,
-      "simnorm_tau": 1.0
+      "simnorm_tau": 1.0,
+      "frozen": true
     },
 
     "dynamics": {
       "type": "dense_last_layer",
       "dynamics_features": [512, 512, 128, 64],
       "simnorm_dim_v": 8,
-      "simnorm_tau": 1.0
+      "simnorm_tau": 1.0,
+      "frozen": false
     },
 
     "critic": {
@@ -52,14 +54,16 @@
       "vmin": -10.0,
       "vmax": 10.0,
       "dropout": 0.01,
-      "num_subsample": 2
+      "num_subsample": 2,
+      "frozen": true
     },
 
     "policy": {
       "type": "squashed_gaussian",
       "features": [512, 512],
       "log_std_min": -10,
-      "log_std_max": 2
+      "log_std_max": 2,
+      "frozen": true
     },
 
     "reward": {
@@ -67,7 +71,8 @@
       "features": [512, 512],
       "num_bins": 101,
       "vmin": -10.0,
-      "vmax": 10.0
+      "vmax": 10.0,
+      "frozen": true
     },
 
     "environment": {
