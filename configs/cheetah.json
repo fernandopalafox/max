@@ -11,7 +11,6 @@
     "buffer_size": 1000010,
     "dim_state": 17,
     "dim_action": 6,
-    "train_freq": 1000000,
     "eval_freq": 10000,
     "chunk_size": 1,
     "plot_eval": true,
@@ -19,7 +18,7 @@
     "evaluator": {
       "seed": 123,
       "max_steps": 500,
-      "num_episodes": 10,
+      "num_episodes": 2,
       "environment": {},
       "planner": {}
     },
@@ -79,7 +78,7 @@
       "type": "cheetah",
       "num_agents": 1,
       "max_episode_steps": 500,
-      "cheetah_mass_scale": 1.0
+      "cheetah_mass_scale": 0.5
     },
 
     "trainer": {
