@@ -1,8 +1,9 @@
 {
   "training": {
-    "wandb_project": "cheetah_ft_latent",
+    "wandb_project": "finetune-cheetah",
     "seed": 43,
-    "save_dir": "./data/models/cheetah",
+    "save_dir": "/home/fp5275/repos/max/data/models/cheetah",
+    "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah/20260323_less_features/final.pkl",
     "checkpoint_enabled": true,
     "checkpoint_freq": 100000,
     "num_agents": 1,
@@ -10,7 +11,7 @@
     "buffer_size": 1000010,
     "dim_state": 17,
     "dim_action": 6,
-    "train_freq": 1,
+    "train_freq": 1000000,
     "eval_freq": 10000,
     "chunk_size": 1000,
     "plot_eval": true,
@@ -31,14 +32,14 @@
 
     "encoder": {
       "type": "proprioceptive",
-      "encoder_features": [256, 128],
+      "encoder_features": [256, 128, 64],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0
     },
 
     "dynamics": {
-      "type": "dense",
-      "dynamics_features": [512, 512, 128],
+      "type": "dense_last_layer",
+      "dynamics_features": [512, 512, 128, 64],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0
     },
@@ -77,12 +78,12 @@
     },
 
     "trainer": {
-      "type": "tdmpc2",
+      "type": "ogd",
       "lr": 3e-4,
       "encoder_lr": 9e-5,
       "policy_lr": 3e-4,
       "grad_clip_norm": 20,
-      "horizon": 3,
+      "horizon": 1,
       "discount_factor": 0.99,
       "temporal_decay": 0.5,
       "ema_decay": 0.99,
@@ -93,10 +94,10 @@
     },
 
     "sampler": {
-      "type": "trajectory_batch",
-      "batch_size": 256,
-      "horizon": 3,
-      "min_buffer_size": 259
+      "type": "latest",
+      "batch_size": 1,
+      "horizon": 1,
+      "min_buffer_size": 0
     },
 
     "state_labels": [

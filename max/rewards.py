@@ -64,6 +64,16 @@ def _init_mlp_reward(config: dict, pretrained: dict = None) -> tuple["Reward", d
             return nn.Dense(num_bins)(x)
 
     reward_net = _RewardHead()
+
+    if config["reward"].get("frozen", False):
+        def logits_fn(params: Any, z: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
+            return reward_net.apply(pretrained, z, a)
+
+        def predict_fn(params: Any, z: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
+            return two_hot_inv(logits_fn(params, z, a), vmin, vmax, num_bins)
+
+        return Reward(predict=predict_fn, logits=logits_fn), {}
+
     if pretrained is not None:
         reward_params = pretrained
     else:

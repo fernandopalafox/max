@@ -64,6 +64,11 @@ def _init_proprioceptive_encoder(key: jax.Array, config: dict, pretrained: dict 
 
     encoder_net = _Encoder()
 
+    if config["encoder"].get("frozen", False):
+        def encode(params: Any, obs: jnp.ndarray) -> jnp.ndarray:
+            return encoder_net.apply(pretrained, obs)
+        return Encoder(encode=encode), {}
+
     if pretrained is not None:
         enc_parameters = pretrained
     else:
