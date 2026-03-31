@@ -28,17 +28,20 @@ def init_sampler(config: dict) -> Sampler:
 
 
 def _create_latest_sampler() -> Sampler:
-    """Single-transition sampler for EKF-style trainers. Key is unused.
+    """Single-transition sampler. Key is unused.
 
-    Skips transitions at episode boundaries (done=True at the source step)
-    to avoid feeding cross-episode (s, a, s') tuples to the trainer.
+    sample_fn:    Python-loop version used outside jax.lax.scan (e.g. EKF).
+                  Skips episode-boundary transitions and returns None if buffer
+                  has fewer than 2 entries.
+    sample_jit:   scan-compatible version for OGD-style trainers. Returns the
+                  most recent complete transition as (B=1, H=1) batch in the
+                  standard {"states", "actions", "rewards"} format.
     """
 
     def sample_fn(key, buffer, buffer_idx):
         if buffer_idx < 2:
             return None
         prev = buffer_idx - 2
-        # Don't use a transition that crosses an episode boundary
         if buffer["dones"][prev] == 1.0:
             return None
         return {
@@ -47,7 +50,20 @@ def _create_latest_sampler() -> Sampler:
             "next_states": buffer["states"][0, prev+1:prev+2, :],
         }
 
-    return Sampler(sample_fn=sample_fn)
+    def sample_jit_fn(key, buffer, buffer_idx):
+        buf_size = buffer["states"].shape[1]
+        prev = (buffer_idx - 2) % buf_size
+        curr = (buffer_idx - 1) % buf_size
+
+        s_prev = buffer["states"][0, prev]   # (dim_s,)
+        s_curr = buffer["states"][0, curr]   # (dim_s,)
+        states = jnp.stack([s_prev, s_curr])[None]  # (1, 2, dim_s)
+        action = buffer["actions"][0, prev][None, None]  # (1, 1, dim_a)
+        reward = buffer["rewards"][0, prev][None, None]  # (1, 1)
+
+        return {"states": states, "actions": action, "rewards": reward}
+
+    return Sampler(sample_fn=sample_fn, sample_jit=sample_jit_fn)
 
 
 def _create_trajectory_batch_sampler(batch_size: int, horizon: int, min_buffer_size: int = None) -> Sampler:

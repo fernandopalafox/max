@@ -57,6 +57,26 @@ def _init_squashed_gaussian_policy(key: jax.Array, config: dict, pretrained: dic
 
     policy_net = _PolicyNet()
 
+    if config["policy"]["frozen"]:
+        def sample(
+            params: Any, z: jnp.ndarray, key: jax.Array
+        ) -> tuple[jnp.ndarray, jnp.ndarray]:
+            mean, log_std_raw = policy_net.apply(pretrained["policy_net"], z)
+            log_std_dif = log_std_max - log_std_min
+            log_std = log_std_min + 0.5 * log_std_dif * (jnp.tanh(log_std_raw) + 1)
+            std = jnp.exp(log_std)
+            key, noise_key = jax.random.split(key)
+            noise = jax.random.normal(noise_key, shape=mean.shape)
+            x = mean + std * noise
+            action = jnp.tanh(x)
+            log_prob_gauss = jnp.sum(
+                -0.5 * (noise ** 2 + jnp.log(2.0 * jnp.pi)) - log_std, axis=-1
+            )
+            log_jacob = jnp.sum(jnp.log(1.0 - action ** 2 + 1e-6), axis=-1)
+            return action, log_prob_gauss - log_jacob
+
+        return Policy(sample=sample), {}
+
     if pretrained is not None:
         policy_params = pretrained
     else:

@@ -70,6 +70,18 @@ def _init_ensemble_critic(key: jax.Array, config: dict, pretrained: dict = None)
     dummy_z = jnp.ones((latent_dim,))
     dummy_a = jnp.ones((dim_a,))
 
+    if config["critic"]["frozen"]:
+        def value(params: Any, z: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
+            return jax.vmap(lambda p: q_net.apply(p, z, a))(pretrained["ensemble"])
+
+        def subsample(params: Any, z: jnp.ndarray, a: jnp.ndarray, key: jax.Array) -> jnp.ndarray:
+            logits = value(params, z, a)
+            q_vals = two_hot_inv(logits, vmin, vmax, num_bins)
+            idxs = jax.random.choice(key, num_ensemble, shape=(num_subsample,), replace=False)
+            return q_vals[idxs]
+
+        return Critic(value=value, subsample=subsample), {}
+
     if pretrained is not None:
         critic_params = pretrained
     else:

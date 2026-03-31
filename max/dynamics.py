@@ -22,7 +22,7 @@ def init_dynamics(
     """
     Dispatcher — reads config["dynamics"]["type"].
 
-    Supported variants: "dense", "dense_lora".
+    Supported variants: "dense", "dense_lora_xs", "dense_last_layer".
 
     Returns:
         (Dynamics, dyn_params) where dyn_params are the trainable params directly.
@@ -36,8 +36,10 @@ def init_dynamics(
 
     if variant == "dense":
         return _init_dense_dynamics(key, config, pretrained=pretrained)
-    if variant == "dense_lora":
-        return _init_lora_dynamics(key, config, pretrained=pretrained)
+    if variant == "dense_lora_xs":
+        return _init_lora_xs_dynamics(key, config, pretrained=pretrained)
+    if variant == "dense_last_layer":
+        return _init_dense_last_layer_dynamics(key, config, pretrained=pretrained)
 
     raise ValueError(f"Unknown dynamics: {variant!r}")
 
@@ -92,13 +94,103 @@ def _init_dense_dynamics(
         key, k1 = jax.random.split(key)
         mean_params = dynamics_net.init(k1, dummy_x)
 
+    if config["dynamics"]["frozen"]:
+        def predict(params: Any, z: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
+            return dynamics_net.apply(mean_params, jnp.concatenate([z, action], axis=-1))
+        return Dynamics(predict=predict), {}
+
     def predict(mean_params: Any, z: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
         return dynamics_net.apply(mean_params, jnp.concatenate([z, action], axis=-1))
 
     return Dynamics(predict=predict), mean_params
 
 
-def _init_lora_dynamics(
+def _init_dense_last_layer_dynamics(
+    key: jax.Array,
+    config: Any,
+    pretrained: dict = None,
+) -> tuple[Dynamics, dict]:
+    """
+    Dense MLP dynamics with only the last layer (Dense + LayerNorm) trainable.
+
+    All earlier layers are frozen and closed over at construction time.
+    If pretrained is provided, all layers are initialized from it; otherwise random init.
+    Either way, only the last-layer params are returned as trainable.
+
+    config["dynamics"]:
+        type:              str, "dense_last_layer"
+        dynamics_features: list[int], MLP hidden+output sizes (last = latent_dim)
+        simnorm_dim_v:     int, simplex dimension V
+        simnorm_tau:       float, softmax temperature (default 1.0)
+
+    Returns dyn_params = {"kernel", "bias", "ln_scale", "ln_bias"} for the last layer.
+    """
+    dyn_cfg = config["dynamics"]
+    features = dyn_cfg["dynamics_features"]
+    simnorm_dim_v: int = dyn_cfg["simnorm_dim_v"]
+    simnorm_tau: float = dyn_cfg["simnorm_tau"]
+
+    latent_dim: int = config["encoder"]["encoder_features"][-1]
+    dim_action: int = config["dim_action"]
+
+    class _DynamicsNet(nn.Module):
+        @nn.compact
+        def __call__(self, x):
+            for feat in features[:-1]:
+                x = nn.Dense(feat)(x)
+                x = nn.LayerNorm()(x)
+                x = mish(x)
+            x = nn.Dense(features[-1])(x)
+            x = nn.LayerNorm()(x)
+            return simnorm(x, simnorm_dim_v, simnorm_tau)
+
+    dynamics_net = _DynamicsNet()
+    dummy_x = jnp.ones((latent_dim + dim_action,))
+
+    if pretrained is not None:
+        all_params = pretrained
+    else:
+        key, k1 = jax.random.split(key)
+        all_params = dynamics_net.init(k1, dummy_x)
+
+    n = len(features)
+    last_i = n - 1
+    p = all_params["params"]
+
+    # Freeze all but the last layer by closing over them
+    frozen = [
+        {
+            "W": p[f"Dense_{i}"]["kernel"],
+            "b": p[f"Dense_{i}"]["bias"],
+            "ln_scale": p[f"LayerNorm_{i}"]["scale"],
+            "ln_bias": p[f"LayerNorm_{i}"]["bias"],
+        }
+        for i in range(last_i)
+    ]
+
+    last_params = {
+        "kernel":   p[f"Dense_{last_i}"]["kernel"],
+        "bias":     p[f"Dense_{last_i}"]["bias"],
+        "ln_scale": p[f"LayerNorm_{last_i}"]["scale"],
+        "ln_bias":  p[f"LayerNorm_{last_i}"]["bias"],
+    }
+
+    def _forward(last_p: Any, x: jnp.ndarray) -> jnp.ndarray:
+        for layer in frozen:
+            x = x @ layer["W"] + layer["b"]
+            x = layer["ln_scale"] * jax.nn.standardize(x, axis=-1, epsilon=1e-6) + layer["ln_bias"]
+            x = mish(x)
+        x = x @ last_p["kernel"] + last_p["bias"]
+        x = last_p["ln_scale"] * jax.nn.standardize(x, axis=-1, epsilon=1e-6) + last_p["ln_bias"]
+        return simnorm(x, simnorm_dim_v, simnorm_tau)
+
+    def predict(mean_params: Any, z: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
+        return _forward(mean_params, jnp.concatenate([z, action], axis=-1))
+
+    return Dynamics(predict=predict), last_params
+
+
+def _init_lora_xs_dynamics(
     key: jax.Array,
     config: Any,
     pretrained: dict = None,
@@ -114,7 +206,7 @@ def _init_lora_dynamics(
     Param count: num_layers * r^2 (e.g. 3 layers, r=16 → 768 params).
 
     config["dynamics"]:
-        type:              str, "dense_lora"
+        type:              str, "dense_lora_xs"
         dynamics_features: list[int], must match pretrained architecture
         simnorm_dim_v, simnorm_tau: same as dense variant
         svd_rank:          int, LoRA rank r (default 32)
