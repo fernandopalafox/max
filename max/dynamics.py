@@ -22,7 +22,7 @@ def init_dynamics(
     """
     Dispatcher — reads config["dynamics"]["type"].
 
-    Supported variants: "dense", "dense_lora", "dense_last_layer".
+    Supported variants: "dense", "dense_lora_xs", "dense_last_layer".
 
     Returns:
         (Dynamics, dyn_params) where dyn_params are the trainable params directly.
@@ -36,8 +36,8 @@ def init_dynamics(
 
     if variant == "dense":
         return _init_dense_dynamics(key, config, pretrained=pretrained)
-    if variant == "dense_lora":
-        return _init_lora_dynamics(key, config, pretrained=pretrained)
+    if variant == "dense_lora_xs":
+        return _init_lora_xs_dynamics(key, config, pretrained=pretrained)
     if variant == "dense_last_layer":
         return _init_dense_last_layer_dynamics(key, config, pretrained=pretrained)
 
@@ -190,7 +190,7 @@ def _init_dense_last_layer_dynamics(
     return Dynamics(predict=predict), last_params
 
 
-def _init_lora_dynamics(
+def _init_lora_xs_dynamics(
     key: jax.Array,
     config: Any,
     pretrained: dict = None,
@@ -206,7 +206,7 @@ def _init_lora_dynamics(
     Param count: num_layers * r^2 (e.g. 3 layers, r=16 → 768 params).
 
     config["dynamics"]:
-        type:              str, "dense_lora"
+        type:              str, "dense_lora_xs"
         dynamics_features: list[int], must match pretrained architecture
         simnorm_dim_v, simnorm_tau: same as dense variant
         svd_rank:          int, LoRA rank r (default 32)
