@@ -7,7 +7,7 @@
     "checkpoint_enabled": true,
     "checkpoint_freq": 100000,
     "num_agents": 1,
-    "max_steps": 1000000,
+    "max_steps": 100000,
     "buffer_size": 1000010,
     "dim_state": 17,
     "dim_action": 6,
@@ -18,7 +18,7 @@
     "evaluator": {
       "seed": 123,
       "max_steps": 500,
-      "num_episodes": 2,
+      "num_episodes": 5,
       "environment": {},
       "planner": {}
     },
@@ -42,6 +42,8 @@
       "dynamics_features": [512, 512, 128, 64],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
+      "svd_rank": 48,
+      "r_init_std": 1e-5,
       "frozen": false
     },
 
@@ -78,7 +80,7 @@
       "type": "cheetah",
       "num_agents": 1,
       "max_episode_steps": 500,
-      "cheetah_mass_scale": 0.5
+      "cheetah_mass_scale": 0.1
     },
 
     "trainer": {
@@ -98,10 +100,10 @@
     },
 
     "sampler": {
-      "type": "latest",
-      "batch_size": 1,
-      "horizon": 1,
-      "min_buffer_size": 0
+      "type": "trajectory_batch",
+      "batch_size": 256,
+      "horizon": 3,
+      "min_buffer_size": 259
     },
 
     "state_labels": [
