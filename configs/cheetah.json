@@ -15,6 +15,10 @@
     "chunk_size": 1,
     "plot_eval": true,
 
+    "visualizer": {
+      "type": "cheetah"
+    },
+
     "evaluator": {
       "seed": 123,
       "max_steps": 500,

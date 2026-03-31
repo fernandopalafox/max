@@ -34,7 +34,7 @@ import pickle
 import json
 from datetime import datetime
 
-from max.visualizers import create_cheetah_xy_animation, create_cheetah_xy_video
+from max.visualizers import init_visualizer
 
 
 def main(config):
@@ -116,6 +116,7 @@ def main(config):
     )
 
     buffers = init_buffer(config)
+    visualizer = init_visualizer(config) if plot_eval else None
 
     # ---- Parameter count ----
     total_n = count_parameters(parameters["mean"])
@@ -133,13 +134,8 @@ def main(config):
     wandb.log(initial_metrics, step=0)
     print(f"[{time.time()-t0:.2f}s] Initial evaluation complete")
 
-    if plot_eval and "trajectory" in eval_results:
-        traj = eval_results["trajectory"]
-        # if "episode_rewards" in eval_results:
-        #     best = int(np.argmax(eval_results["episode_rewards"]))
-        #     traj = jax.tree.map(lambda x: x[best], traj)
-        full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
-        video_path = create_cheetah_xy_video(full_states)
+    if visualizer is not None and "trajectory" in eval_results:
+        video_path = visualizer.visualize(eval_results["trajectory"])
         wandb.log({"eval/animation": wandb.Video(video_path, format="mp4")}, step=0)
         print(f"[{time.time()-t0:.2f}s] Animation logged")
 
@@ -223,10 +219,8 @@ def main(config):
             }
             wandb.log(metrics_to_log, step=step)
 
-            if plot_eval and "trajectory" in eval_results:
-                traj = eval_results["trajectory"]
-                full_states = np.concatenate([traj.qpos, traj.qvel], axis=-1)
-                video_path = create_cheetah_xy_video(full_states)
+            if visualizer is not None and "trajectory" in eval_results:
+                video_path = visualizer.visualize(eval_results["trajectory"])
                 wandb.log(
                     {"eval/animation": wandb.Video(video_path, format="mp4")},
                     step=step,
