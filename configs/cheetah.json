@@ -42,7 +42,7 @@
     },
 
     "dynamics": {
-      "type": "dense_last_layer",
+      "type": "dense_lora_xs",
       "dynamics_features": [512, 512, 128, 64],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
@@ -89,9 +89,9 @@
 
     "trainer": {
       "type": "ekf_efficient",
-      "lr": 10.0,
-      "jitter": 1e-6,
-      "init_cov_scale": 1.0,
+      "lr": 1,
+      "jitter": 0.0,
+      "init_cov_scale": 0.01,
       "encoder_lr": 9e-5,
       "policy_lr": 3e-4,
       "grad_clip_norm": 20,

@@ -506,6 +506,7 @@ def init_ekf_efficient_trainer(
 
     # Initialise covariance directly in the parameters dict
     init_params["covariance"] = jnp.eye(dim_dyn_params) * init_cov_scale
+    init_trace = float(dim_dyn_params * init_cov_scale)
 
     # Observation function: predict z_{t+1} from [z_t | a_t] using dynamics params
     def observation_fn(flat_dyn_params, x):
@@ -546,7 +547,13 @@ def init_ekf_efficient_trainer(
             "mean": parameters["mean"] | {"dynamics": unflatten_fn_dyn(flat_dyn_new)},
             "covariance": cov_new,
         }
-        return train_state, new_parameters, {"losses/ekf_prediction": loss}
+        cov_trace = jnp.trace(cov_new)
+        return train_state, new_parameters, {
+            "losses/pred_error": loss,
+            "losses/cov_trace": cov_trace,
+            "losses/cov_trace_delta": cov_trace - init_trace,
+            "losses/cov_diag_min": jnp.min(jnp.diag(cov_new)),
+        }
 
     trainer = Trainer(train_fn=train_step)
     return trainer, train_state
