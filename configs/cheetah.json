@@ -7,7 +7,7 @@
     "checkpoint_enabled": true,
     "checkpoint_freq": 100000,
     "num_agents": 1,
-    "max_steps": 100000,
+    "max_steps": 30000,
     "buffer_size": 1000010,
     "dim_state": 17,
     "dim_action": 6,
@@ -88,8 +88,10 @@
     },
 
     "trainer": {
-      "type": "ogd",
-      "lr": 3e-4,
+      "type": "ekf_efficient",
+      "lr": 10.0,
+      "jitter": 1e-6,
+      "init_cov_scale": 1.0,
       "encoder_lr": 9e-5,
       "policy_lr": 3e-4,
       "grad_clip_norm": 20,
@@ -104,9 +106,9 @@
     },
 
     "sampler": {
-      "type": "trajectory_batch",
-      "batch_size": 256,
-      "horizon": 3,
+      "type": "latest",
+      "batch_size": 1,
+      "horizon": 1,
       "min_buffer_size": 259
     },
 
