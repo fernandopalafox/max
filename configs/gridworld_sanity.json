@@ -491,35 +491,24 @@
       "projection_seed": 42,
       "pretrained_params_path": "./data/pretrained_models/mlp_resnet_gridworld.pkl"
     },
-    "trainer": "ekf",
+    "trainer": "ekf_efficient",
     "trainer_params": {
-      "learning_rate": 1.0,
-      "weight_decay": 0.0,
-      "proc_noise_init": 0.01,
-      "proc_noise_decay": 0.99,
-      "proc_noise_floor": 0.001,
-      "init_cov_scale": 0.1,
-      "jitter": 1e-06
+      "learning_rate": 100.0,
+      "init_cov_scale": 0.011,
+      "jitter": 0.0
     },
-    "planner_type": "astar",
+    "planner_type": "mpvi",
     "planner_params": {
-      "horizon": 30,
-      "batch_size": 200,
-      "max_iter": 5,
-      "elit_frac": 0.1,
-      "learning_rate": 0.9,
+      "horizon": 25,
       "dim_control": 1,
-      "action_low": [
-        0.0
-      ],
-      "action_high": [
-        3.0
-      ]
+      "grid_size": 10,
+      "weight_time": 0.1
     },
     "cost_type": "gridworld_navigation",
     "cost_fn_params": {
       "weight_jerk": 0.0,
-      "weight_control": 0.01,
+      "weight_goal": 0.1,
+      "weight_control": 0.0,
       "weight_info": 0.0,
       "weight_time": 0.1,
       "goal_state": [

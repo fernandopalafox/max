@@ -959,15 +959,16 @@ def make_gridworld_env(params: EnvParams, maze_layout, start_pos, goal_pos=None)
         reward = 0.0
         rewards = jnp.array([reward])
 
-        # Goal-based termination (if goal_pos was provided)
-        if has_goal:
-            next_x = jnp.round(next_state[0]).astype(jnp.int32)
-            next_y = jnp.round(next_state[1]).astype(jnp.int32)
-            goal_x = jnp.round(goal[0]).astype(jnp.int32)
-            goal_y = jnp.round(goal[1]).astype(jnp.int32)
-            terminated = jnp.logical_and(next_x == goal_x, next_y == goal_y)
-        else:
-            terminated = False
+        # Goal-based termination disabled: let the agent explore freely
+        # if has_goal:
+        #     next_x = jnp.round(next_state[0]).astype(jnp.int32)
+        #     next_y = jnp.round(next_state[1]).astype(jnp.int32)
+        #     goal_x = jnp.round(goal[0]).astype(jnp.int32)
+        #     goal_y = jnp.round(goal[1]).astype(jnp.int32)
+        #     terminated = jnp.logical_and(next_x == goal_x, next_y == goal_y)
+        # else:
+        #     terminated = False
+        terminated = False
 
         # Check truncation
         truncated = step_count >= params.max_episode_steps

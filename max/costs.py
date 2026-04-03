@@ -273,7 +273,7 @@ def _terminal_cost_pendulum_swing_up(state):
 
 
 def _stage_cost_gridworld_navigation(
-    state, control, cost_params, weight_control, weight_info, weight_time, info_term_fn
+    state, control, cost_params, weight_goal, weight_control, weight_info, weight_time, info_term_fn
 ):
     """
     Stage cost for gridworld navigation: Manhattan distance + time penalty + control penalty - info bonus.
@@ -287,9 +287,8 @@ def _stage_cost_gridworld_navigation(
         state: Current state (x, y) position
         control: Current action (discrete: 0=up, 1=down, 2=left, 3=right)
         cost_params: Dict with 'dyn_params', 'params_cov_model', and 'goal_state'
-        weight_control: Control penalty weight
+        weight_goal: Goal-seeking weight (scales Manhattan distance)
         weight_info: Information gathering weight
-        weight_time: Time penalty per step (encourages faster goal reaching)
         info_term_fn: Information term function (can be None)
 
     Returns:
@@ -301,12 +300,8 @@ def _stage_cost_gridworld_navigation(
     # In a grid, you can only move up/down/left/right, so Manhattan is natural
     manhattan_distance = jnp.sum(jnp.abs(state - goal_state))
 
-    # Control penalty (small, just to discourage unnecessary movements)
-    control_cost = weight_control * jnp.sum(control ** 2)
-
-    # Time penalty - constant per step
-    # This ensures agent doesn't stall, always has incentive to reach goal
-    time_cost = weight_time
+    # Goal-seeking cost (scaled by weight_goal to balance against info term)
+    goal_cost = weight_goal * manhattan_distance
 
     # Information gathering bonus (exploration)
     exploration_term = 0.0
@@ -315,17 +310,19 @@ def _stage_cost_gridworld_navigation(
             state, control, cost_params["dyn_params"], cost_params["params_cov_model"]
         )
 
-    return manhattan_distance + control_cost + time_cost + exploration_term
+    return goal_cost + exploration_term
 
 
-def _terminal_cost_gridworld_navigation(state, cost_params):
+def _terminal_cost_gridworld_navigation(state, cost_params, weight_goal, weight_terminal):
     """
-    Terminal cost for gridworld: Manhattan distance to goal.
+    Terminal cost for gridworld: weighted Manhattan distance to goal.
 
     Uses Manhattan distance since gridworld only allows axis-aligned movement.
+    weight_terminal scales the terminal cost relative to stage costs so MPVI
+    can prioritize reaching the goal by the end of the planning horizon.
     """
     goal_state = cost_params["goal_state"]
-    return jnp.sum(jnp.abs(state - goal_state))
+    return weight_terminal * jnp.sum(jnp.abs(state - goal_state))
 
 
 def _stage_cost_drone_state_tracking_w_info(
@@ -924,9 +921,11 @@ def init_cost(config, dynamics_model):
         # Extract params
         params = config["cost_fn_params"]
         weight_jerk = params.get("weight_jerk", 0.0)
+        weight_goal = params.get("weight_goal", 1.0)
         weight_control = params.get("weight_control", 0.01)
         weight_info = params.get("weight_info", 0.0)
         weight_time = params.get("weight_time", 0.1)
+        weight_terminal = params.get("weight_terminal", 1.0)
         meas_noise_diag = jnp.array(params["meas_noise_diag"])
 
         # Create the info term calculator (JIT-able helper)
@@ -945,7 +944,7 @@ def init_cost(config, dynamics_model):
         # Vectorize stage cost over the horizon
         stage_cost_vmap = jax.vmap(
             lambda s, u, cp: _stage_cost_gridworld_navigation(
-                s, u, cp, weight_control, weight_info, weight_time, info_term_fn
+                s, u, cp, weight_goal, weight_control, weight_info, weight_time, info_term_fn
             ),
             in_axes=(0, 0, None),
         )
@@ -965,7 +964,7 @@ def init_cost(config, dynamics_model):
             stage_costs = stage_cost_vmap(states[:-1], controls, cost_params)
 
             # 3. Calculate terminal cost (on state T)
-            terminal = _terminal_cost_gridworld_navigation(states[-1], cost_params)
+            terminal = _terminal_cost_gridworld_navigation(states[-1], cost_params, weight_goal, weight_terminal)
 
             # 4. Calculate Jerk Cost (on controls) - usually 0 for gridworld
             jerk = 0.0
@@ -977,6 +976,14 @@ def init_cost(config, dynamics_model):
 
         # Attach dynamics model for planners that need it (e.g., A*)
         cost_fn.dynamics_model = dynamics_model
+        # Attach stage cost for planners that need per-(state, action) costs (e.g., MPVI)
+        cost_fn.stage_cost_fn = lambda s, c, cp: _stage_cost_gridworld_navigation(
+            s, c, cp, weight_goal, weight_control, weight_info, weight_time, info_term_fn
+        )
+        # Attach terminal cost for planners that need V initialization (e.g., MPVI)
+        cost_fn.terminal_cost_fn = lambda s, cp: _terminal_cost_gridworld_navigation(
+            s, cp, weight_goal, weight_terminal
+        )
         return cost_fn
 
     elif cost_type == "merging_idm_info":

@@ -77,8 +77,8 @@ def init_planner(
         planner, state = create_random_planner(config, cost_fn, key)
     elif planner_type == "astar":
         planner, state = create_astar_planner(config, cost_fn, key)
-    # elif planner_type == "ilqr":
-    #     planner, state = create_ilqr_planner(config, cost_fn, key) # Future extension
+    elif planner_type == "mpvi":
+        planner, state = create_mpvi_planner(config, cost_fn, key)
     else:
         raise ValueError(f"Unknown planner type: {planner_type}")
 
@@ -389,6 +389,158 @@ def _create_icem_solve(config: Any, cost_fn: CostFn) -> Callable:
         best_controls = final_best_seq.reshape(horizon, dim_control)
 
         return best_controls, new_state
+
+    return solve
+
+
+# --- MPVI (Model Predictive Value Iteration) Implementation ---
+
+
+def create_mpvi_planner(
+    config: Any, cost_fn: CostFn, key: jax.Array
+) -> tuple[Planner, PlannerState]:
+    """
+    Creates a Model Predictive Value Iteration planner for discrete gridworld.
+
+    Performs finite-horizon backward DP over the full grid using the learned
+    dynamics model, then extracts an action sequence by forward-rolling the
+    time-indexed policy from the current state.
+
+    Uses cost_fn.stage_cost_fn (if available) for per-(state, action) costs,
+    which automatically includes info gathering when weight_info > 0.
+
+    Fully JIT-compiled: no callbacks, no Python loops.
+
+    Args:
+        config: Configuration dictionary with planner_params
+        cost_fn: Cost function (with dynamics_model and optionally stage_cost_fn)
+        key: JAX random key
+    """
+    planner_params = config.get("planner_params", {})
+    horizon = planner_params.get("horizon", 25)
+    dim_control = planner_params.get("dim_control", 1)
+    grid_size = planner_params.get("grid_size", 10)
+    weight_time = planner_params.get("weight_time", 0.1)
+
+    if not hasattr(cost_fn, 'dynamics_model'):
+        raise ValueError("MPVI planner requires cost_fn to have dynamics_model attribute")
+
+    dynamics_model = cost_fn.dynamics_model
+    pred_one_step_fn = dynamics_model.pred_one_step
+    num_actions = 4
+    num_cells = grid_size * grid_size
+
+    initial_state = PlannerState(key=key)
+
+    # Pre-compute all (x,y) coordinates and action arrays (static)
+    xs, ys = jnp.meshgrid(jnp.arange(grid_size), jnp.arange(grid_size))
+    all_xy = jnp.stack([xs, ys], axis=-1).reshape(num_cells, 2).astype(jnp.float32)
+    all_actions = jnp.arange(num_actions, dtype=jnp.float32)
+
+    def _predict_transition(dyn_params, state_xy, action_scalar):
+        """Predict next state for one (state, action) pair, rounded to grid."""
+        action = jnp.array([action_scalar])
+        discrete_action = jnp.round(jnp.clip(action, 0.0, 3.0))
+        next_state = pred_one_step_fn(dyn_params, state_xy, discrete_action)
+        next_xy = jnp.clip(jnp.round(next_state), 0, grid_size - 1)
+        return next_xy
+
+    # Double vmap: over all cells x all actions -> (num_cells, num_actions, 2)
+    _predict_all_actions = jax.vmap(_predict_transition, in_axes=(None, None, 0))
+    _predict_all_cells_actions = jax.vmap(_predict_all_actions, in_axes=(None, 0, None))
+
+    # If cost_fn exposes a per-(state, action) stage cost, use it directly.
+    # This captures weight_info, info_term_fn, etc. from cost_fn's closure,
+    # so MPVI doesn't need to know about info gathering at all.
+    if hasattr(cost_fn, 'stage_cost_fn'):
+        _stage_cost = cost_fn.stage_cost_fn
+
+        def _sc_single(state_xy, action_scalar, cost_params):
+            action = jnp.array([action_scalar])
+            return _stage_cost(state_xy, action, cost_params)
+
+        _sc_all_actions = jax.vmap(_sc_single, in_axes=(None, 0, None))
+        _sc_all_cells_actions = jax.vmap(_sc_all_actions, in_axes=(0, None, None))
+        use_cost_fn_stage = True
+        print("  MPVI: using cost_fn.stage_cost_fn for per-(state, action) costs")
+    else:
+        use_cost_fn_stage = False
+        print("  MPVI: no stage_cost_fn on cost_fn, using Manhattan + time fallback")
+
+    # If cost_fn exposes a terminal cost, use it for V initialization.
+    # This ensures V is scaled consistently with stage costs (e.g., weight_goal).
+    if hasattr(cost_fn, 'terminal_cost_fn'):
+        _terminal_cost = cost_fn.terminal_cost_fn
+        _tc_all_cells = jax.vmap(_terminal_cost, in_axes=(0, None))
+        use_cost_fn_terminal = True
+        print("  MPVI: using cost_fn.terminal_cost_fn for V initialization")
+    else:
+        use_cost_fn_terminal = False
+        print("  MPVI: no terminal_cost_fn on cost_fn, using raw Manhattan for V init")
+
+    @jax.jit
+    def solve(state, init_env_state, cost_params):
+        dyn_params = cost_params["dyn_params"]
+        goal_state = jnp.array(cost_params["goal_state"], dtype=jnp.float32)
+
+        # Phase 1: Batch transition computation for all (cell, action) pairs
+        next_states = _predict_all_cells_actions(dyn_params, all_xy, all_actions)
+        next_x = jnp.clip(jnp.round(next_states[..., 0]).astype(jnp.int32), 0, grid_size - 1)
+        next_y = jnp.clip(jnp.round(next_states[..., 1]).astype(jnp.int32), 0, grid_size - 1)
+
+        # Phase 2: V initialization (terminal cost over all cells)
+        if use_cost_fn_terminal:
+            # Use cost_fn's terminal cost (includes weight_goal scaling)
+            V_flat = _tc_all_cells(all_xy, cost_params)
+            V = V_flat.reshape(grid_size, grid_size)
+        else:
+            # Fallback: raw Manhattan distance
+            manhattan = jnp.sum(jnp.abs(all_xy - goal_state[None, :]), axis=1)
+            V = manhattan.reshape(grid_size, grid_size)
+
+        # Reshape transition indices to (grid_size, grid_size, num_actions)
+        next_x_grid = next_x.reshape(grid_size, grid_size, num_actions)
+        next_y_grid = next_y.reshape(grid_size, grid_size, num_actions)
+
+        # Compute per-(state, action) stage costs
+        if use_cost_fn_stage:
+            # Use cost_fn's stage cost (includes info gathering if weight_info > 0)
+            stage_costs_flat = _sc_all_cells_actions(all_xy, all_actions, cost_params)
+            stage_costs_sa = stage_costs_flat.reshape(grid_size, grid_size, num_actions)
+        else:
+            # Fallback: Manhattan + time penalty (no info term)
+            manhattan_fb = jnp.sum(jnp.abs(all_xy - goal_state[None, :]), axis=1)
+            base_stage_costs = (manhattan_fb + weight_time).reshape(grid_size, grid_size)
+            stage_costs_sa = base_stage_costs[..., None] * jnp.ones((1, 1, num_actions))
+
+        # Phase 3: Backward DP via scan (reverse) -> (horizon, grid_size, grid_size) policy
+        def backward_step(V, _):
+            V_next = V[next_y_grid, next_x_grid]         # (10, 10, 4)
+            Q = stage_costs_sa + V_next                    # (10, 10, 4)
+            policy = jnp.argmin(Q, axis=-1)                # (10, 10)
+            V_new = jnp.min(Q, axis=-1)                    # (10, 10)
+            return V_new, policy
+
+        _, all_policies = jax.lax.scan(backward_step, V, None, length=horizon, reverse=True)
+
+        # Phase 4: Forward action extraction via scan
+        def forward_step(xy, policy_t):
+            x_int = jnp.clip(jnp.round(xy[0]).astype(jnp.int32), 0, grid_size - 1)
+            y_int = jnp.clip(jnp.round(xy[1]).astype(jnp.int32), 0, grid_size - 1)
+            action = policy_t[y_int, x_int].astype(jnp.float32)
+            action_arr = jnp.array([action])
+            discrete_action = jnp.round(jnp.clip(action_arr, 0.0, 3.0))
+            next_xy = pred_one_step_fn(dyn_params, xy, discrete_action)
+            next_xy = jnp.clip(jnp.round(next_xy), 0, grid_size - 1)
+            return next_xy, action
+
+        _, actions_seq = jax.lax.scan(forward_step, init_env_state, all_policies)
+        actions = actions_seq.reshape(horizon, dim_control)
+
+        new_state = state.replace(key=jax.random.split(state.key)[1])
+        return actions, new_state
+
+    return Planner(cost_fn=cost_fn, solve_fn=solve), initial_state
 
 
 # --- A* Implementation ---
@@ -826,62 +978,35 @@ def _get_neighbors_model_based(pos, pred_one_step_fn, dyn_params):
     return solve
 
 
-@partial(jax.jit, static_argnums=(0, 1, 3))
-def powerlaw_psd_gaussian(
-    exponent: float, size: tuple, rng: jax.Array, fmin: float = 0
-) -> Array:
-    """Generates Gaussian noise with a power-law power spectral density."""
-    samples = size[-1]
-    f = rfftfreq(samples)
-    fmin = jnp.maximum(fmin, 1.0 / samples)
+def create_icem_planner(
+    config: Any, cost_fn: CostFn, key: jax.Array
+) -> tuple[Planner, PlannerState]:
+    """Creates an Improved Cross-Entropy Method (iCEM) planner."""
+    # Extract what's needed for initial state
+    planner_params = config.get("planner_params", {})
+    horizon = planner_params.get("horizon")
+    dim_control = planner_params.get("dim_control")
+    batch_size = planner_params.get("batch_size")
+    elit_frac = planner_params.get("elit_frac")
+    initial_mean_val = planner_params.get("initial_mean_val", 0.0)
 
-    s_scale = f
-    ix = jnp.sum(s_scale < fmin)
+    unrolled_dim = horizon * dim_control
+    num_elites = int(elit_frac * batch_size)
 
-    def cutoff(x, idx):
-        x_idx = jax.lax.dynamic_slice(x, (idx,), (1,))
-        y = jnp.ones_like(x) * x_idx
-        mask = jnp.arange(x.shape[0]) < idx
-        return jnp.where(mask, y, x)
+    # Create initial state
+    initial_mean = jnp.ones(unrolled_dim) * initial_mean_val
+    initial_elites = jnp.zeros((num_elites, unrolled_dim))
+    initial_state = PlannerState(key=key, mean=initial_mean, elites=initial_elites)
 
-    s_scale = jax.lax.cond(
-        jnp.logical_and(ix > 0, ix < len(s_scale)),
-        cutoff,
-        lambda x, idx: x,
-        s_scale,
-        ix,
-    )
-    s_scale = s_scale ** (-exponent / 2.0)
+    # Create the JIT-compiled solver with everything closed over
+    _solve = _create_icem_solve(config, cost_fn)
 
-    w = s_scale[1:]
-    w = w.at[-1].set(w[-1] * (1 + (samples % 2)) / 2.0)
-    sigma = 2 * jnp.sqrt(jnp.sum(w**2)) / samples
+    def solve_fn(
+        state: PlannerState,
+        init_env_state: Array,
+        cost_params: dict,
+    ) -> Tuple[Array, PlannerState]:
+        """Solve function for iCEM."""
+        return _solve(state, init_env_state, cost_params)
 
-    size_list = list(size)
-    size_list[-1] = len(f)
-    dims_to_add = len(size_list) - 1
-    s_scale_shaped = s_scale[(jnp.newaxis,) * dims_to_add + (Ellipsis,)]
-
-    key_sr, key_si = random.split(rng)
-    sr = random.normal(key=key_sr, shape=tuple(size_list)) * s_scale_shaped
-    si = random.normal(key=key_si, shape=tuple(size_list)) * s_scale_shaped
-
-    si = si.at[..., 0].set(0)
-    sr = sr.at[..., 0].set(sr[..., 0] * jnp.sqrt(2))
-
-    def make_real_if_even(sr_in, si_in):
-        si_out = si_in.at[..., -1].set(0)
-        sr_out = sr_in.at[..., -1].set(sr_in[..., -1] * jnp.sqrt(2))
-        return sr_out, si_out
-
-    sr, si = jax.lax.cond(
-        samples % 2 == 0,
-        make_real_if_even,
-        lambda sr_in, si_in: (sr_in, si_in),
-        sr,
-        si,
-    )
-
-    s = sr + 1j * si
-    y = irfft(s, n=samples, axis=-1) / sigma
-    return y
+    return Planner(cost_fn=cost_fn, solve_fn=solve_fn), initial_state
