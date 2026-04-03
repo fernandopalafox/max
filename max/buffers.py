@@ -2,100 +2,116 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from typing import Dict
 
 
-def init_jax_buffers(
-    num_agents: int,
-    buffer_size: int,
-    dim_state: int,
-    dim_action: int,
-) -> Dict[str, jnp.ndarray]:
+def init_buffer(config: dict) -> Dict[str, jnp.ndarray]:
     """
     Pre-allocate JAX arrays for buffer storage.
 
-    Args:
-        num_agents: Number of agents
-        buffer_size: Maximum number of steps to store
-        dim_state: State dimension
-        dim_action: Action dimension
-
     Returns:
         Dict containing preallocated JAX arrays:
-            - states: (num_agents, buffer_size, dim_state)
+            - states:  (num_agents, buffer_size, dim_state)
             - actions: (num_agents, buffer_size, dim_action)
             - rewards: (num_agents, buffer_size)
-            - dones: (buffer_size,)
-            - log_pis_old: (num_agents, buffer_size)
-            - values_old: (num_agents, buffer_size)
+            - dones:   (buffer_size,)
     """
+    num_agents  = config["num_agents"]
+    buffer_size = config["buffer_size"]
+    dim_state   = config["dim_state"]
+    dim_action  = config["dim_action"]
     return {
-        "states": jnp.zeros((num_agents, buffer_size, dim_state)),
+        "states":  jnp.zeros((num_agents, buffer_size, dim_state)),
         "actions": jnp.zeros((num_agents, buffer_size, dim_action)),
         "rewards": jnp.zeros((num_agents, buffer_size)),
-        "dones": jnp.zeros(buffer_size),
-        "log_pis_old": jnp.zeros((num_agents, buffer_size)),
-        "values_old": jnp.zeros((num_agents, buffer_size)),
+        "dones":   jnp.zeros(buffer_size),
     }
 
 
 @jax.jit
-def update_buffer_dynamic(
+def update_buffer(
     buffers: Dict[str, jnp.ndarray],
     buffer_idx: int,
     states: jnp.ndarray,
     actions: jnp.ndarray,
     rewards: jnp.ndarray,
-    log_pis: jnp.ndarray,
-    values: jnp.ndarray,
     done: float,
 ) -> Dict[str, jnp.ndarray]:
     """
     Update buffers using dynamic_update_slice for better performance.
 
-    This pure function updates the buffer at the specified index using
-    JAX's dynamic_update_slice for efficient in-place-style updates.
+    Pure function — updates the buffer at the specified index.
 
     Args:
-        buffers: Current buffer dict
+        buffers:    Current buffer dict
         buffer_idx: Index to update
-        states: States for all agents (num_agents, dim_state)
-        actions: Actions for all agents (num_agents, dim_action)
-        rewards: Rewards for all agents (num_agents,)
-        log_pis: Log probabilities for all agents (num_agents,)
-        values: Values for all agents (num_agents,)
-        done: Done flag (shared across agents)
+        states:     States for all agents (num_agents, dim_state)
+        actions:    Actions for all agents (num_agents, dim_action)
+        rewards:    Rewards for all agents (num_agents,)
+        done:       Done flag (shared across agents)
 
     Returns:
         Updated buffer dict with new transition at buffer_idx
     """
-    # Reshape for dynamic_update_slice (add buffer dimension)
-    states = states[:, None, :]  # (num_agents, 1, dim_state)
-    actions = actions[:, None, :]  # (num_agents, 1, dim_action)
-    rewards = rewards[:, None]  # (num_agents, 1)
-    log_pis = log_pis[:, None]  # (num_agents, 1)
-    values = values[:, None]  # (num_agents, 1)
-    done = jnp.array([done])  # (1,)
+    states_s  = states[:, None, :]   # (num_agents, 1, dim_state)
+    actions_s = actions[:, None, :]  # (num_agents, 1, dim_action)
+    rewards_s = rewards[:, None]     # (num_agents, 1)
+    done_s    = jnp.array([done])    # (1,)
 
-    buffers = {
+    return {
         "states": jax.lax.dynamic_update_slice(
-            buffers["states"], states, (0, buffer_idx, 0)
+            buffers["states"], states_s, (0, buffer_idx, 0)
         ),
         "actions": jax.lax.dynamic_update_slice(
-            buffers["actions"], actions, (0, buffer_idx, 0)
+            buffers["actions"], actions_s, (0, buffer_idx, 0)
         ),
         "rewards": jax.lax.dynamic_update_slice(
-            buffers["rewards"], rewards, (0, buffer_idx)
-        ),
-        "log_pis_old": jax.lax.dynamic_update_slice(
-            buffers["log_pis_old"], log_pis, (0, buffer_idx)
-        ),
-        "values_old": jax.lax.dynamic_update_slice(
-            buffers["values_old"], values, (0, buffer_idx)
+            buffers["rewards"], rewards_s, (0, buffer_idx)
         ),
         "dones": jax.lax.dynamic_update_slice(
-            buffers["dones"], done, (buffer_idx,)
+            buffers["dones"], done_s, (buffer_idx,)
         ),
     }
 
-    return buffers
+
+def episodes_from_buffer(
+    buffers: Dict,
+    prev_idx: int,
+    curr_idx: int,
+    buffer_size: int,
+    partial_reward: float = 0.0,
+    partial_len: int = 0,
+) -> tuple[list, float, int]:
+    """
+    Return completed episode stats for transitions written in [prev_idx, curr_idx).
+
+    partial_reward, partial_len: running totals for the episode that was
+    in-progress at prev_idx. Pass 0 / 0 at the start of training.
+
+    Returns:
+        episodes:           list of {"episodes/reward": float, "episodes/length": int}
+        new_partial_reward: reward accumulated so far in the still-incomplete episode
+        new_partial_len:    steps accumulated so far in the still-incomplete episode
+    """
+    n = curr_idx - prev_idx
+    indices = (np.arange(n) + prev_idx) % buffer_size
+    dones = np.array(buffers["dones"][indices])
+    rewards = np.array(buffers["rewards"][0, indices])
+
+    episodes = []
+    ep_reward = partial_reward
+    ep_len = partial_len
+
+    for done, reward in zip(dones, rewards):
+        ep_reward += float(reward)
+        ep_len += 1
+        if done == 1.0:
+            episodes.append({
+                "episodes/reward": ep_reward,
+                "episodes/length": ep_len,
+            })
+            ep_reward = 0.0
+            ep_len = 0
+
+    return episodes, ep_reward, ep_len
