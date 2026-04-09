@@ -180,12 +180,16 @@ def main(config, save_dir, plot_eval=False):
 
     # Initial evaluation before training
     eval_results = evaluator.evaluate(train_state.params)
-    init_cov_trace = (
+    init_cov_trace_per_param = (
         jnp.trace(train_state.covariance) / train_state.covariance.shape[0]
         if train_state.covariance is not None
         else 0.0
     )
-    wandb.log({**eval_results, "eval/cov_trace": float(init_cov_trace)}, step=0)
+    wandb.log({
+        **eval_results,
+        "eval/cov_trace": float(init_cov_trace_per_param),
+        "eval/cov_trace_delta": 0.0,
+    }, step=0)
 
     # Initialize cost function
     cost_fn = init_cost(config, dynamics_model)
@@ -203,8 +207,18 @@ def main(config, save_dir, plot_eval=False):
     )
     buffer_idx = 0
 
+    # One-time diagnostic: check what the pretrained model predicts at key cells
+    print("\n=== Initial Model Predictions at Key Cells ===")
+    diag_key_cells = [(2, 9, 3), (3, 9, 3), (5, 9, 3), (0, 0, 0), (0, 0, 3),
+                      (3, 4, 0), (3, 6, 1), (5, 4, 3)]  # old obstacle boundary
+    for (cx, cy, ca) in diag_key_cells:
+        s = jnp.array([float(cx), float(cy)])
+        a = jnp.array([float(ca)])
+        p = dynamics_model.pred_one_step(train_state.params, s, a)
+        print(f"  ({cx},{cy}) + action {ca} -> pred ({float(p[0]):.2f}, {float(p[1]):.2f})")
+
     print(
-        f"Starting gridworld simulation for {config['total_steps']} steps "
+        f"\nStarting gridworld simulation for {config['total_steps']} steps "
     )
 
     episode_length = 0
@@ -289,18 +303,19 @@ def main(config, save_dir, plot_eval=False):
         if step % config["eval_freq"] == 0:
             eval_results = evaluator.evaluate(train_state.params)
 
-            # Track covariance trace if available
-            cov_trace = (
-                jnp.trace(train_state.covariance)
+            # Track covariance trace delta from initial
+            cov_trace_per_param = (
+                jnp.trace(train_state.covariance) / train_state.covariance.shape[0]
                 if train_state.covariance is not None
                 else 0.0
             )
-            cov_trace_per_param = cov_trace / train_state.covariance.shape[0] if train_state.covariance is not None else 0.0
+            cov_trace_delta = cov_trace_per_param - init_cov_trace_per_param
 
             wandb.log(
                 {
                     **eval_results,
                     "eval/cov_trace": float(cov_trace_per_param),
+                    "eval/cov_trace_delta": float(cov_trace_delta),
                 },
                 step=step,
             )
@@ -350,12 +365,22 @@ def main(config, save_dir, plot_eval=False):
                         f"diag_pred(2,6,right)=({float(diag_pred[0]):.3f},{float(diag_pred[1]):.3f})"
                     )
 
+                # Row-9 diagnostics: track model learning at cells that changed from pretraining
+                diag_row9_metrics = {}
+                for (dx, dy, da) in [(2, 9, 3), (3, 9, 3), (4, 9, 3)]:
+                    ds = jnp.array([float(dx), float(dy)])
+                    da_arr = jnp.array([float(da)])
+                    dp = dynamics_model.pred_one_step(train_state.params, ds, da_arr)
+                    diag_row9_metrics[f"train/diag_pred_{dx}_{dy}_a{da}_x"] = float(dp[0])
+                    diag_row9_metrics[f"train/diag_pred_{dx}_{dy}_a{da}_y"] = float(dp[1])
+
                 wandb.log({
                     "train/model_loss": float(loss),
                     "train/param_norm": new_param_norm,
                     "train/param_delta": abs(param_delta),
                     "train/diag_pred_x": float(diag_pred[0]),
                     "train/diag_pred_y": float(diag_pred[1]),
+                    **diag_row9_metrics,
                 }, step=step)
 
         # Handle Buffer Overflow
@@ -367,6 +392,77 @@ def main(config, save_dir, plot_eval=False):
     print("\nRunning final evaluation...")
     final_eval_results = evaluator.evaluate(train_state.params)
     wandb.log({f"final/{k}": v for k, v in final_eval_results.items()})
+
+    # --- Post-Training Model Prediction Diagnostic ---
+    print("\n=== Final Model Prediction Diagnostic ===")
+    maze_arr = np.array(config["env_params"]["maze_layout"])
+    grid_size = 10
+    action_names = ["up", "down", "left", "right"]
+    move_deltas = {0: (0, 1), 1: (0, -1), 2: (-1, 0), 3: (1, 0)}
+    errors = []
+    error_counts = np.zeros((grid_size, grid_size), dtype=int)
+
+    for y in range(grid_size):
+        for x in range(grid_size):
+            bitmask = maze_arr[y, x]
+            if bitmask == 0:
+                continue  # skip wall cells
+            s = jnp.array([float(x), float(y)])
+            for a_idx in range(4):
+                a = jnp.array([float(a_idx)])
+                pred = dynamics_model.pred_one_step(train_state.params, s, a)
+                pred_x = int(round(float(pred[0])))
+                pred_y = int(round(float(pred[1])))
+
+                # Ground truth from bitmask
+                can_move = (bitmask >> a_idx) & 1
+                ddx, ddy = move_deltas[a_idx]
+                if can_move:
+                    true_x, true_y = x + ddx, y + ddy
+                else:
+                    true_x, true_y = x, y
+
+                if (pred_x, pred_y) != (true_x, true_y):
+                    errors.append((x, y, a_idx, action_names[a_idx],
+                                  (true_x, true_y), (pred_x, pred_y)))
+                    error_counts[y, x] += 1
+
+    total_transitions = sum(1 for yy in range(10) for xx in range(10)
+                           if maze_arr[yy, xx] > 0) * 4
+    print(f"Total prediction errors: {len(errors)} / {total_transitions}")
+    for x, y, a, name, true, pred in errors[:40]:
+        print(f"  ({x},{y}) action {name}: true={true}, pred={pred}")
+
+    # Print final predictions at key cells (same as initial diagnostic)
+    print("\n=== Final Model Predictions at Key Cells ===")
+    for (cx, cy, ca) in diag_key_cells:
+        s = jnp.array([float(cx), float(cy)])
+        a = jnp.array([float(ca)])
+        p = dynamics_model.pred_one_step(train_state.params, s, a)
+        print(f"  ({cx},{cy}) + action {ca} -> pred ({float(p[0]):.2f}, {float(p[1]):.2f})")
+
+    # Generate prediction error heatmap
+    fig_diag, ax_diag = plt.subplots(figsize=(8, 8))
+    im = ax_diag.imshow(error_counts, origin='lower', cmap='Reds',
+                        vmin=0, vmax=4, extent=(-0.5, 9.5, -0.5, 9.5))
+    # Mark wall cells
+    for y in range(grid_size):
+        for x in range(grid_size):
+            if maze_arr[y, x] == 0:
+                ax_diag.add_patch(plt.Rectangle((x-0.5, y-0.5), 1, 1,
+                                  color='black', alpha=0.8))
+            else:
+                ax_diag.text(x, y, str(error_counts[y, x]),
+                           ha='center', va='center', fontsize=10,
+                           color='black' if error_counts[y, x] < 3 else 'white')
+    ax_diag.set_title(f'Model Prediction Errors per Cell ({len(errors)}/{total_transitions} total)')
+    ax_diag.set_xlabel('X')
+    ax_diag.set_ylabel('Y')
+    plt.colorbar(im, ax=ax_diag, label='Errors (out of 4 actions)')
+    plt.tight_layout()
+    wandb.log({"final/prediction_error_heatmap": wandb.Image(fig_diag)})
+    plt.close(fig_diag)
+    print("  Prediction error heatmap logged to wandb")
 
     # Save model parameters
     os.makedirs(save_dir, exist_ok=True)
