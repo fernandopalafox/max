@@ -12,6 +12,8 @@ def init_env(config: Dict[str, Any]):
     env_type = config["environment"]["type"]
     if env_type == "cheetah":
         return _make_cheetah_env(config)
+    elif env_type == "humanoid":
+        return _make_humanoid_env(config)
     elif env_type == "quadruped":
         return _make_quadruped_env(config)
     else:
@@ -104,13 +106,13 @@ def _make_cheetah_env(config: Dict[str, Any]):
     return reset_fn, step_fn, get_obs_fn
 
 
-def _make_quadruped_env(config: Dict[str, Any]):
+def _make_humanoid_env(config: Dict[str, Any]):
     """
-    Factory function that wraps mujoco_playground QuadrupedRun environment.
+    Factory function that wraps mujoco_playground HumanoidRun environment.
 
     Internal state: mjx.Data (full MuJoCo physics state)
-    Observation: 27D = [qpos[1:] (18D), qvel (9D)] (root + 4 legs with 3 DOFs each)
-    Action: 12D torques in [-1, 1] (3 per leg)
+    Observation: flattened vector [qpos[1:], qvel] (body pose and velocities, excluding root x)
+    Action: 17D continuous control (joint torques)
     Forward velocity = data.qvel[0]
     """
     from mujoco_playground import registry
@@ -118,21 +120,21 @@ def _make_quadruped_env(config: Dict[str, Any]):
     from mujoco import mjx
 
     env_cfg = config["environment"]
-    max_episode_steps = env_cfg.get("max_episode_steps", 1000)
-    quadruped_mass_scale = env_cfg.get("quadruped_mass_scale", 1.0)
+    max_episode_steps = env_cfg.get("max_episode_steps", 500)
+    humanoid_mass_scale = env_cfg.get("humanoid_mass_scale", 1.0)
 
-    print(f"Initializing environment: quadruped")
+    print(f"Initializing environment: humanoid")
 
     # Load environment and extract models (closed over)
-    env = registry.load('QuadrupedRun')
+    env = registry.load('HumanoidRun')
 
     # Apply mass scaling if specified
-    if quadruped_mass_scale != 1.0:
+    if humanoid_mass_scale != 1.0:
         import mujoco
         mj_model = env.mj_model
-        # Scale both mass and inertia (inertia scales linearly with mass for uniform density)
-        mj_model.body_mass[:] *= quadruped_mass_scale
-        mj_model.body_inertia[:] *= quadruped_mass_scale
+        # Scale both mass and inertia
+        mj_model.body_mass[:] *= humanoid_mass_scale
+        mj_model.body_inertia[:] *= humanoid_mass_scale
         # Recalculate dependent constants
         mj_data = mujoco.MjData(mj_model)
         mujoco.mj_setConst(mj_model, mj_data)
@@ -142,7 +144,7 @@ def _make_quadruped_env(config: Dict[str, Any]):
 
     @jax.jit
     def reset_fn(key: jax.random.PRNGKey) -> mjx.Data:
-        """Resets the quadruped environment and returns mjx.Data directly."""
+        """Resets the humanoid environment and returns mjx.Data directly."""
         env_state = env.reset(key)
         return env_state.data
 
@@ -152,8 +154,8 @@ def _make_quadruped_env(config: Dict[str, Any]):
         step_count: int,
         action: jnp.ndarray,
     ):
-        """Steps the quadruped environment forward using mjx.Data directly."""
-        # Two physics steps, reward sampled after each — matches TDMPC2's DMControl wrapper
+        """Steps the humanoid environment forward using mjx.Data directly."""
+        # Two physics steps, reward sampled after each
         a = action.squeeze()
         mid_data = mjx_env.step(mjx_model, data, a, 1)
         next_data = mjx_env.step(mjx_model, mid_data, a, 1)
@@ -161,7 +163,7 @@ def _make_quadruped_env(config: Dict[str, Any]):
         # Get observation
         obs = get_obs_fn(next_data)
 
-        # Reward sampled at both substeps and summed (forward velocity reward)
+        # Reward: forward velocity task (clipped to [0, 1] per step, max 2.0 per agent step)
         reward = (jnp.clip(mid_data.qvel[0] / 10.0, 0.0, 1.0)
                   + jnp.clip(next_data.qvel[0] / 10.0, 0.0, 1.0))
         rewards = jnp.array([reward])
@@ -181,8 +183,100 @@ def _make_quadruped_env(config: Dict[str, Any]):
 
     @jax.jit
     def get_obs_fn(data: mjx.Data) -> jnp.ndarray:
-        """Returns 27D observation: [qpos[1:], qvel] from mjx.Data."""
+        """Returns observation: [qpos[1:], qvel] from mjx.Data (excluding root x position)."""
         obs = jnp.concatenate([data.qpos[1:], data.qvel])
         return obs[None, :]  # Add agent dimension
+
+    return reset_fn, step_fn, get_obs_fn
+
+
+def _make_quadruped_env(config: Dict[str, Any]):
+    """
+    Factory function that wraps dm_control's dog-run environment.
+
+    Note: This environment is stateful (dm_control maintains internal state).
+    The state returned from step_fn and reset_fn is just the observation (JAX array),
+    not the full timestep object. This allows compatibility with JAX's JIT compilation.
+    
+    Observation: flattened vector of proprioceptive observations
+    Action: 10D continuous control
+    Reward: forward velocity task from DeepMind Control Suite dog/run
+    """
+    import numpy as np
+    import dm_control.suite as suite
+    import dm_control
+
+    env_cfg = config["environment"]
+    max_episode_steps = env_cfg.get("max_episode_steps", 1000)
+
+    print(f"Initializing environment: quadruped (dm_control dog/run task)")
+
+    # Load dog-run task from dm_control (closed over)
+    env = suite.load(domain_name='dog', task_name='run')
+    action_spec = env.action_spec()
+
+    def reset_fn(key: jax.random.PRNGKey):
+        """Resets the environment and returns the initial observation as a JAX array."""
+        timestep = env.reset()
+        obs = _extract_obs(timestep)
+        return obs
+
+    def step_fn(
+        obs_state,
+        step_count: int,
+        action: jnp.ndarray,
+    ):
+        """Steps the environment forward.
+        
+        Note: obs_state parameter is the observation from the previous step, but is ignored.
+        The dm_control environment maintains its own internal state between calls.
+        """
+        # Convert JAX array to numpy and clip to action bounds
+        action_np = np.clip(
+            np.asarray(action.squeeze()),
+            action_spec.minimum,
+            action_spec.maximum
+        )
+        
+        # Step environment (stateful; ignores obs_state because dm_control manages state internally)
+        timestep = env.step(action_np)
+
+        # Extract observation as JAX array (this becomes the new state)
+        obs = _extract_obs(timestep)
+
+        # Reward from dm_control
+        rewards = jnp.array([timestep.reward])
+
+        # Check termination
+        terminated = timestep.step_type == dm_control.dm_env.StepType.LAST
+        truncated = step_count >= max_episode_steps
+
+        info = {
+            "reward": float(timestep.reward),
+            "step_type": int(timestep.step_type),
+        }
+
+        # Return observation as state (JAX-compatible)
+        return obs, obs, rewards, terminated, truncated, info
+
+    def _extract_obs(timestep) -> jnp.ndarray:
+        """Extracts and flattens observation from dm_control timestep."""
+        obs_dict = timestep.observation
+        obs_parts = []
+        for key in sorted(obs_dict.keys()):
+            val = np.asarray(obs_dict[key])
+            obs_parts.append(val.flatten())
+        obs_flat = np.concatenate(obs_parts)
+        # Convert to JAX array and add agent batch dimension
+        obs_jax = jnp.asarray(obs_flat, dtype=jnp.float32)[None, :]
+        return obs_jax
+
+    def get_obs_fn(obs_or_timestep) -> jnp.ndarray:
+        """Extracts observation from either timestep (from reset_fn during init) or JAX array (from step_fn)."""
+        # If it's already a JAX array (from step_fn), return it as-is
+        if isinstance(obs_or_timestep, jnp.ndarray):
+            return obs_or_timestep
+        # Otherwise it's a timestep from reset_fn
+        return _extract_obs(obs_or_timestep)
 
     return reset_fn, step_fn, get_obs_fn

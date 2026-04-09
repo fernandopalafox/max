@@ -123,7 +123,8 @@ def main(config):
     wandb.config.update({"num_params_total": total_n})
     print(f"[{time.time()-t0:.2f}s] Components ready  (total={total_n:,})")
 
-    print(f"Starting TDMPC2 cheetah training for {config['max_steps']} steps")
+    env_type = config.get("environment", {}).get("type", "unknown")
+    print(f"Starting TDMPC2 {env_type} training for {config['max_steps']} steps")
 
     # ---- Initial evaluation ----
     print(f"[{time.time()-t0:.2f}s] Running initial evaluation...")
@@ -254,8 +255,9 @@ def run_sweep():
     """Entry point for wandb sweep agents."""
     wandb.init()
 
+    config_name = os.environ.get("CONFIG", "cheetah.json")
     config_path = os.path.join(
-        os.path.dirname(__file__), "..", "configs", "cheetah.json"
+        os.path.dirname(__file__), "..", "configs", config_name
     )
     with open(config_path, "r") as f:
         full_config = json.load(f)
@@ -295,7 +297,8 @@ if __name__ == "__main__":
             full_config = json.load(f)
         CONFIG = full_config["training"]
 
-        run_name_base = args.run_name or "cheetah_tdmpc2"
+        env_type = CONFIG.get("environment", {}).get("type", "unknown")
+        run_name_base = args.run_name or f"tdmpc2_{env_type}"
 
         base_key = jax.random.key(CONFIG["seed"])
         seed_keys = jax.random.split(base_key, args.num_seeds)
@@ -310,8 +313,13 @@ if __name__ == "__main__":
                 run_name = f"{run_name}_{seed_idx}"
             run_config["wandb_run_name"] = run_name
 
+            project_name = run_config.get("wandb_project")
+            if not project_name:
+                env_type = run_config.get("environment", {}).get("type", "unknown")
+                project_name = f"tdmpc2-{env_type}"
+
             wandb.init(
-                project=run_config.get("wandb_project", "cheetah_tdmpc2"),
+                project=project_name,
                 config=run_config,
                 name=run_config.get("wandb_run_name"),
                 reinit=True,
