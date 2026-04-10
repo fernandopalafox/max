@@ -97,7 +97,7 @@ def make_tdmpc2_trajectory_value_fn(dynamics, reward, critic, policy, horizon, d
                 return z_next, r
             z_H, rewards = jax.lax.scan(step, z0, actions)
             pi_a, _ = policy.sample(cost_params["mean"]["policy"], z_H, key_pi)
-            v = jnp.mean(critic.subsample(cost_params["mean"]["critic"], z_H, pi_a, key_q))
+            v = critic.value(cost_params["mean"]["critic"], z_H, pi_a, key_q)
             discounts = discount_factor ** jnp.arange(horizon)
             return jnp.dot(discounts, rewards) + (discount_factor ** horizon) * v
 
@@ -128,7 +128,7 @@ def make_tdmpc2_trajectory_value_fn_ig(
                 return z_next, r + info_weight * info
             z_H, rewards = jax.lax.scan(step, z0, actions)
             pi_a, _ = policy.sample(cost_params["mean"]["policy"], z_H, key_pi)
-            v = jnp.mean(critic.subsample(cost_params["mean"]["critic"], z_H, pi_a, key_q))
+            v = critic.value(cost_params["mean"]["critic"], z_H, pi_a, key_q)
             discounts = discount_factor ** jnp.arange(horizon)
             return jnp.dot(discounts, rewards) + (discount_factor ** horizon) * v
 

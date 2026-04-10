@@ -262,7 +262,7 @@ def init_tdmpc2_trainer(
             reward_loss = reward_loss + w * jnp.mean(soft_ce(rew_logits, rew_targets))
 
             # Q loss over ALL ensemble members
-            q_logits_all = critic.value(params["mean"]["critic"], z, a_t)  # (num_ens, B, num_bins)
+            q_logits_all = critic.logits(params["mean"]["critic"], z, a_t)  # (num_ens, B, num_bins)
             td_target_th = two_hot_batch_c(symlog(td_targets[:, t]))  # (B, num_bins)
             q_loss_all = jax.vmap(soft_ce, in_axes=(0, None))(q_logits_all, td_target_th)  # (num_ensemble, B)
             q_loss = q_loss + w * jnp.sum(jnp.mean(q_loss_all, axis=-1))
@@ -319,8 +319,7 @@ def init_tdmpc2_trainer(
 
             actions, log_probs = sample_batch(policy_params, z_t, sample_keys)  # (B, dim_a), (B,)
 
-            q_sampled = critic.subsample(critic_params_sg, z_t, actions, subkey)  # (num_subsample, B)
-            avg_q = jnp.mean(q_sampled, axis=0)  # (B,)
+            avg_q = critic.value(critic_params_sg, z_t, actions, subkey)  # (B,)
             avg_qs.append(avg_q)
 
             entropy = -log_probs  # (B,)
