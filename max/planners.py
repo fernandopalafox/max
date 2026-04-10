@@ -116,19 +116,20 @@ def make_tdmpc2_trajectory_value_fn_ig(
     def trajectory_value_fn(cost_params, z0, action_seqs, key):
         key_pi, key_q = jax.random.split(key)
 
-        # Compute info gain once at z0 — J is w.r.t. dynamics params, not
-        # trajectory-specific, so linearizing at the current state is sound
-        # and avoids recomputing a large Jacobian inside vmap/scan.
         dyn_params = cost_params["mean"]["dynamics"]
         flat_params, unflatten = jax.flatten_util.ravel_pytree(dyn_params)
-        dummy_a = jnp.zeros(action_seqs.shape[-1])
-        J = jax.jacrev(lambda fp: dynamics.predict(unflatten(fp), z0, dummy_a))(flat_params)
         P = cost_params["covariance"]
         R = meas_noise_scale * jnp.eye(z0.shape[0])
-        S = J @ P @ J.T + R
-        info_gain = 0.5 * (jnp.linalg.slogdet(S)[1] - jnp.linalg.slogdet(R)[1])
 
         def eval_traj(actions):
+            # Compute J at (z0, a[0]) for this trajectory — action-dependent so
+            # the planner can distinguish informative from uninformative trajectories.
+            # Evaluated outside the scan (once per trajectory) to avoid the
+            # vmap(512) × scan(H) Jacobian blowup that caused OOM.
+            J = jax.jacrev(lambda fp: dynamics.predict(unflatten(fp), z0, actions[0]))(flat_params)
+            S = J @ P @ J.T + R
+            info_gain = 0.5 * (jnp.linalg.slogdet(S)[1] - jnp.linalg.slogdet(R)[1])
+
             def step(z, step_and_action):
                 t, a = step_and_action
                 r = reward.predict(cost_params["mean"]["reward"], z, a)
