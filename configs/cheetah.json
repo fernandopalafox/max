@@ -24,7 +24,7 @@
       "max_steps": 500,
       "num_episodes": 5,
       "environment": {},
-      "planner": {}
+      "planner": {"type": "mppi"}
     },
 
     "normalizer": {
