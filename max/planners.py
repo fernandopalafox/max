@@ -121,14 +121,17 @@ def make_tdmpc2_trajectory_value_fn_ig(
         P = cost_params["covariance"]
         R = meas_noise_scale * jnp.eye(z0.shape[0])
 
-        def eval_traj(actions):
-            # Compute J at (z0, a[0]) for this trajectory — action-dependent so
-            # the planner can distinguish informative from uninformative trajectories.
-            # Evaluated outside the scan (once per trajectory) to avoid the
-            # vmap(512) × scan(H) Jacobian blowup that caused OOM.
+        # Compute info gains sequentially via lax.map to avoid vmap(batch) of jacrev,
+        # which triggers an XLA autotuning failure for the batched transpose kernel.
+        def compute_info_gain(actions):
             J = jax.jacrev(lambda fp: dynamics.predict(unflatten(fp), z0, actions[0]))(flat_params)
             S = J @ P @ J.T + R
-            info_gain = 0.5 * (jnp.linalg.slogdet(S)[1] - jnp.linalg.slogdet(R)[1])
+            return 0.5 * (jnp.linalg.slogdet(S)[1] - jnp.linalg.slogdet(R)[1])
+
+        info_gains = jax.lax.map(compute_info_gain, action_seqs)  # (N,)
+
+        def eval_traj(args):
+            actions, info_gain = args
 
             def step(z, step_and_action):
                 t, a = step_and_action
@@ -142,7 +145,7 @@ def make_tdmpc2_trajectory_value_fn_ig(
             discounts = discount_factor ** jnp.arange(horizon)
             return jnp.dot(discounts, rewards) + (discount_factor ** horizon) * v
 
-        return jax.vmap(eval_traj)(action_seqs)
+        return jax.vmap(eval_traj)((action_seqs, info_gains))
 
     return trajectory_value_fn
 
