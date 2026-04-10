@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import jax.flatten_util
 from jax import random
 from functools import partial
 from typing import NamedTuple, Callable, Tuple, Any
@@ -56,6 +57,18 @@ def init_planner(
         )
         action_proposal_fn = make_tdmpc2_action_proposal_fn(dynamics, policy, horizon)
         planner, state = create_mppi_planner(config, encode_fn, traj_value_fn, key, action_proposal_fn)
+    elif planner_type == "mppi_ig":
+        pp = config["planner"]
+        horizon = pp["horizon"]
+        discount = pp["discount_factor"]
+        encode_fn = make_tdmpc2_encode_fn(encoder)
+        traj_value_fn = make_tdmpc2_trajectory_value_fn_ig(
+            dynamics, reward, critic, policy, horizon, discount,
+            meas_noise_scale=pp["meas_noise_scale"],
+            info_weight=pp["info_weight"],
+        )
+        action_proposal_fn = make_tdmpc2_action_proposal_fn(dynamics, policy, horizon)
+        planner, state = create_mppi_planner(config, encode_fn, traj_value_fn, key, action_proposal_fn)
     else:
         raise ValueError(f"Unknown planner type: {planner_type!r}")
 
@@ -82,6 +95,37 @@ def make_tdmpc2_trajectory_value_fn(dynamics, reward, critic, policy, horizon, d
                 r = reward.predict(cost_params["mean"]["reward"], z, a)
                 z_next = dynamics.predict(cost_params["mean"]["dynamics"], z, a)
                 return z_next, r
+            z_H, rewards = jax.lax.scan(step, z0, actions)
+            pi_a, _ = policy.sample(cost_params["mean"]["policy"], z_H, key_pi)
+            v = jnp.mean(critic.subsample(cost_params["mean"]["critic"], z_H, pi_a, key_q))
+            discounts = discount_factor ** jnp.arange(horizon)
+            return jnp.dot(discounts, rewards) + (discount_factor ** horizon) * v
+
+        return jax.vmap(eval_traj)(action_seqs)
+
+    return trajectory_value_fn
+
+
+def make_tdmpc2_trajectory_value_fn_ig(
+    dynamics, reward, critic, policy, horizon, discount_factor, meas_noise_scale, info_weight
+):
+    """MPPI trajectory value with analytical info-gathering bonus at each rollout step.
+    Terminal Q-value is task-only and untouched."""
+    def trajectory_value_fn(cost_params, z0, action_seqs, key):
+        key_pi, key_q = jax.random.split(key)
+
+        def eval_traj(actions):
+            def step(z, a):
+                r = reward.predict(cost_params["mean"]["reward"], z, a)
+                dyn_params = cost_params["mean"]["dynamics"]
+                flat_params, unflatten = jax.flatten_util.ravel_pytree(dyn_params)
+                J = jax.jacrev(lambda fp: dynamics.predict(unflatten(fp), z, a))(flat_params)
+                P = cost_params["covariance"]
+                R = meas_noise_scale * jnp.eye(z.shape[0])
+                S = J @ P @ J.T + R
+                info = 0.5 * (jnp.linalg.slogdet(S)[1] - jnp.linalg.slogdet(R)[1])
+                z_next = dynamics.predict(dyn_params, z, a)
+                return z_next, r + info_weight * info
             z_H, rewards = jax.lax.scan(step, z0, actions)
             pi_a, _ = policy.sample(cost_params["mean"]["policy"], z_H, key_pi)
             v = jnp.mean(critic.subsample(cost_params["mean"]["critic"], z_H, pi_a, key_q))

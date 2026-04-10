@@ -1,17 +1,17 @@
 {
   "training": {
-    "wandb_project": "finetune-cheetah",
+    "wandb_project": "fewshot-cheetah",
     "seed": 43,
     "save_dir": "/home/fp5275/repos/max/data/models/cheetah",
     "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah/20260323_less_features/final.pkl",
     "checkpoint_enabled": true,
     "checkpoint_freq": 100000,
     "num_agents": 1,
-    "max_steps": 30000,
+    "max_steps": 5000,
     "buffer_size": 1000010,
     "dim_state": 17,
     "dim_action": 6,
-    "eval_freq": 10000,
+    "eval_freq": 1000,
     "chunk_size": 1,
     "plot_eval": true,
 
@@ -109,7 +109,7 @@
       "type": "latest",
       "batch_size": 1,
       "horizon": 1,
-      "min_buffer_size": 259
+      "min_buffer_size": 1
     },
 
     "state_labels": [
@@ -119,7 +119,9 @@
     ],
 
     "planner": {
-      "type": "mppi",
+      "type": "mppi_ig",
+      "info_weight": 0.1,
+      "meas_noise_scale": 1.0,
       "horizon": 3,
       "num_iterations": 6,
       "dim_control": 6,
