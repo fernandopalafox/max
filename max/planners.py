@@ -66,6 +66,7 @@ def init_planner(
             dynamics, reward, critic, policy, horizon, discount,
             meas_noise_scale=pp["meas_noise_scale"],
             info_weight=pp["info_weight"],
+            info_horizon=pp["info_horizon"],
         )
         action_proposal_fn = make_tdmpc2_action_proposal_fn(dynamics, policy, horizon)
         planner, state = create_mppi_planner(config, encode_fn, traj_value_fn, key, action_proposal_fn)
@@ -107,15 +108,17 @@ def make_tdmpc2_trajectory_value_fn(dynamics, reward, critic, policy, horizon, d
 
 
 def make_tdmpc2_trajectory_value_fn_ig(
-    dynamics, reward, critic, policy, horizon, discount_factor, meas_noise_scale, info_weight
+    dynamics, reward, critic, policy, horizon, discount_factor, meas_noise_scale, info_weight,
+    info_horizon,
 ):
-    """MPPI trajectory value with analytical info-gathering bonus at each rollout step.
+    """MPPI trajectory value with analytical info-gathering bonus for the first info_horizon steps.
     Terminal Q-value is task-only and untouched."""
     def trajectory_value_fn(cost_params, z0, action_seqs, key):
         key_pi, key_q = jax.random.split(key)
 
         def eval_traj(actions):
-            def step(z, a):
+            def step(z, step_and_action):
+                t, a = step_and_action
                 r = reward.predict(cost_params["mean"]["reward"], z, a)
                 dyn_params = cost_params["mean"]["dynamics"]
                 flat_params, unflatten = jax.flatten_util.ravel_pytree(dyn_params)
@@ -124,9 +127,10 @@ def make_tdmpc2_trajectory_value_fn_ig(
                 R = meas_noise_scale * jnp.eye(z.shape[0])
                 S = J @ P @ J.T + R
                 info = 0.5 * (jnp.linalg.slogdet(S)[1] - jnp.linalg.slogdet(R)[1])
+                info_bonus = jnp.where(t < info_horizon, info_weight * info, 0.0)
                 z_next = dynamics.predict(dyn_params, z, a)
-                return z_next, r + info_weight * info
-            z_H, rewards = jax.lax.scan(step, z0, actions)
+                return z_next, r + info_bonus
+            z_H, rewards = jax.lax.scan(step, z0, (jnp.arange(horizon), actions))
             pi_a, _ = policy.sample(cost_params["mean"]["policy"], z_H, key_pi)
             v = critic.value(cost_params["mean"]["critic"], z_H, pi_a, key_q)
             discounts = discount_factor ** jnp.arange(horizon)

@@ -121,6 +121,7 @@
     "planner": {
       "type": "mppi_ig",
       "info_weight": 0.1,
+      "info_horizon": 3,
       "meas_noise_scale": 1.0,
       "horizon": 3,
       "num_iterations": 6,
