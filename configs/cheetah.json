@@ -1,13 +1,13 @@
 {
   "training": {
     "wandb_project": "fewshot-cheetah",
-    "seed": 43,
+    "seed": 44,
     "save_dir": "/home/fp5275/repos/max/data/models/cheetah",
     "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah/20260323_less_features/final.pkl",
     "checkpoint_enabled": true,
     "checkpoint_freq": 100000,
     "num_agents": 1,
-    "max_steps": 5000,
+    "max_steps": 10000,
     "buffer_size": 1000010,
     "dim_state": 17,
     "dim_action": 6,
@@ -89,7 +89,7 @@
 
     "trainer": {
       "type": "ekf_efficient",
-      "lr": 1,
+      "lr": 1.0,
       "jitter": 0.0,
       "init_cov_scale": 0.01,
       "encoder_lr": 9e-5,
@@ -120,13 +120,13 @@
 
     "planner": {
       "type": "mppi_ig",
-      "info_weight": 0.1,
-      "info_horizon": 3,
+      "info_weight": 10.0,
+      "info_horizon": 1,
       "meas_noise_scale": 1.0,
       "horizon": 3,
-      "num_iterations": 6,
+      "num_iterations": 1,
       "dim_control": 6,
-      "batch_size": 512,
+      "batch_size": 64,
       "num_pi_trajs": 24,
       "temperature": 0.5,
       "min_std": 0.05,

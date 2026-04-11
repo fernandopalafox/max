@@ -121,14 +121,12 @@ def make_tdmpc2_trajectory_value_fn_ig(
         P = cost_params["covariance"]
         R = meas_noise_scale * jnp.eye(z0.shape[0])
 
-        # Compute info gains sequentially via lax.map to avoid vmap(batch) of jacrev,
-        # which triggers an XLA autotuning failure for the batched transpose kernel.
         def compute_info_gain(actions):
             J = jax.jacrev(lambda fp: dynamics.predict(unflatten(fp), z0, actions[0]))(flat_params)
             S = J @ P @ J.T + R
             return 0.5 * (jnp.linalg.slogdet(S)[1] - jnp.linalg.slogdet(R)[1])
 
-        info_gains = jax.lax.map(compute_info_gain, action_seqs)  # (N,)
+        info_gains = jax.vmap(compute_info_gain)(action_seqs)  # (N,)
 
         def eval_traj(args):
             actions, info_gain = args

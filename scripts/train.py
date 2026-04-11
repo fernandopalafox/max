@@ -2,7 +2,7 @@
 
 import os
 # os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.45"
+# os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.45"
 os.environ["JAX_COMPILATION_CACHE_DIR"] = "/tmp/jax_cache"
 os.environ["JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] = "0"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
