@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import jax.flatten_util
 from jax import random
 from functools import partial
 from typing import NamedTuple, Callable, Tuple, Any
@@ -56,6 +57,19 @@ def init_planner(
         )
         action_proposal_fn = make_tdmpc2_action_proposal_fn(dynamics, policy, horizon)
         planner, state = create_mppi_planner(config, encode_fn, traj_value_fn, key, action_proposal_fn)
+    elif planner_type == "mppi_ig":
+        pp = config["planner"]
+        horizon = pp["horizon"]
+        discount = pp["discount_factor"]
+        encode_fn = make_tdmpc2_encode_fn(encoder)
+        traj_value_fn = make_tdmpc2_trajectory_value_fn_ig(
+            dynamics, reward, critic, policy, horizon, discount,
+            meas_noise_scale=pp["meas_noise_scale"],
+            info_weight=pp["info_weight"],
+            info_horizon=pp["info_horizon"],
+        )
+        action_proposal_fn = make_tdmpc2_action_proposal_fn(dynamics, policy, horizon)
+        planner, state = create_mppi_planner(config, encode_fn, traj_value_fn, key, action_proposal_fn)
     else:
         raise ValueError(f"Unknown planner type: {planner_type!r}")
 
@@ -84,11 +98,52 @@ def make_tdmpc2_trajectory_value_fn(dynamics, reward, critic, policy, horizon, d
                 return z_next, r
             z_H, rewards = jax.lax.scan(step, z0, actions)
             pi_a, _ = policy.sample(cost_params["mean"]["policy"], z_H, key_pi)
-            v = jnp.mean(critic.subsample(cost_params["mean"]["critic"], z_H, pi_a, key_q))
+            v = critic.value(cost_params["mean"]["critic"], z_H, pi_a, key_q)
             discounts = discount_factor ** jnp.arange(horizon)
             return jnp.dot(discounts, rewards) + (discount_factor ** horizon) * v
 
         return jax.vmap(eval_traj)(action_seqs)
+
+    return trajectory_value_fn
+
+
+def make_tdmpc2_trajectory_value_fn_ig(
+    dynamics, reward, critic, policy, horizon, discount_factor, meas_noise_scale, info_weight,
+    info_horizon,
+):
+    """MPPI trajectory value with analytical info-gathering bonus for the first info_horizon steps.
+    Terminal Q-value is task-only and untouched."""
+    def trajectory_value_fn(cost_params, z0, action_seqs, key):
+        key_pi, key_q = jax.random.split(key)
+
+        dyn_params = cost_params["mean"]["dynamics"]
+        flat_params, unflatten = jax.flatten_util.ravel_pytree(dyn_params)
+        P = cost_params["covariance"]
+        R = meas_noise_scale * jnp.eye(z0.shape[0])
+
+        def compute_info_gain(actions):
+            J = jax.jacrev(lambda fp: dynamics.predict(unflatten(fp), z0, actions[0]))(flat_params)
+            S = J @ P @ J.T + R
+            return 0.5 * (jnp.linalg.slogdet(S)[1] - jnp.linalg.slogdet(R)[1])
+
+        info_gains = jax.vmap(compute_info_gain)(action_seqs)  # (N,)
+
+        def eval_traj(args):
+            actions, info_gain = args
+
+            def step(z, step_and_action):
+                t, a = step_and_action
+                r = reward.predict(cost_params["mean"]["reward"], z, a)
+                info_bonus = jnp.where(t < info_horizon, info_weight * info_gain, 0.0)
+                z_next = dynamics.predict(dyn_params, z, a)
+                return z_next, r + info_bonus
+            z_H, rewards = jax.lax.scan(step, z0, (jnp.arange(horizon), actions))
+            pi_a, _ = policy.sample(cost_params["mean"]["policy"], z_H, key_pi)
+            v = critic.value(cost_params["mean"]["critic"], z_H, pi_a, key_q)
+            discounts = discount_factor ** jnp.arange(horizon)
+            return jnp.dot(discounts, rewards) + (discount_factor ** horizon) * v
+
+        return jax.vmap(eval_traj)((action_seqs, info_gains))
 
     return trajectory_value_fn
 

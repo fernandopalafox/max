@@ -8,12 +8,7 @@ import jax.numpy as jnp
 from typing import Any, Callable, NamedTuple
 
 from max.environments import init_env
-from max.planners import (
-    create_mppi_planner,
-    make_tdmpc2_encode_fn,
-    make_tdmpc2_trajectory_value_fn,
-    make_tdmpc2_action_proposal_fn,
-)
+from max.planners import init_planner
 
 
 class Evaluator(NamedTuple):
@@ -96,16 +91,9 @@ def _create_evaluator(
     key = jax.random.key(seed)
     key, planner_key = jax.random.split(key)
 
-    pp = mppi_config["planner"]
-    horizon = pp["horizon"]
-    discount = pp.get("discount_factor", 0.99)
-    encode_fn = make_tdmpc2_encode_fn(encoder)
-    traj_value_fn = make_tdmpc2_trajectory_value_fn(
-        dynamics, reward, critic, policy, horizon, discount
-    )
-    action_proposal_fn = make_tdmpc2_action_proposal_fn(dynamics, policy, horizon)
-    planner, init_planner_state = create_mppi_planner(
-        mppi_config, encode_fn, traj_value_fn, planner_key, action_proposal_fn
+    planner, init_planner_state = init_planner(
+        mppi_config, key=planner_key,
+        encoder=encoder, dynamics=dynamics, reward=reward, critic=critic, policy=policy,
     )
 
     def _scan_step(carry, step_idx):
