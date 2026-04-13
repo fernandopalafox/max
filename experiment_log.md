@@ -153,14 +153,26 @@ Fixed: EKF trainer, last_layer dynamics, same streaming setup.
 
 ---
 
-## Summary: Best configs per method
+## Key Results (Best Configs)
 
-| Method | Trainer | Mean | Std | Params | Config |
-|---|---|---|---|---|---|
-| LoRA-XS (all layers, tuned lr) | EKF | **616** | ±48 | 9216 | adapt=[0,1,2,3], r=48, lr=10 |
-| LoRA-XS (original) | EKF | ~598 | — | 9216 | adapt=[0,1,2,3], r=48, lr=1000 |
-| LoRA-XS (tuned placement+lr) | EKF | 581 | ±15 | 4608 | adapt=[1,2], r=48, lr=10 |
-| LoRA-XS | OGD | ~505 | — | 9216 | all layers |
-| TinyLoRA (tuned) | EKF | 496 | ±31 | **64** | adapt=[0,1,2,3], r=64, u=16, lr=5000 |
-| TinyLoRA (tuned) | OGD | 469 | ±7 | **64** | adapt=[0,1,2,3], r=64, u=16 |
-| last_layer | EKF | 537 | ±17 | ~8384 | lr=7000 |
+Methods we care most about, with best hyperparameters from sweeps. All in `fewshot-cheetah`. LR for OGD methods was not swept — set by param-count scaling from dense lr=3e-4.
+
+| Method | Trainer | Mean | Std | Seeds | Params | Best Hyperparams | wandb run |
+|---|---|---|---|---|---|---|---|
+| LoRA-XS | EKF | **616** | ±48 | 3 | 9,216 | adapt=[0,1,2,3], r=48, lr=10 | `stream-ekf-lora-best-full` |
+| LoRA-XS | EKF | 580 | ±18 | 3 | 4,608 | adapt=[1,2], r=48, lr=10 | `stream-ekf-lora-best` |
+| EKF last-layer | EKF | 481 | ±77 | 5 | ~8,384 | lr=7000 | `stream-ekf-lastlayer` |
+| TinyLoRA | EKF | 496 | ±31 | 3 | **64** | adapt=[0,1,2,3], r=64, u=16, lr=5000 | `stream-ekf-tiny-lora` |
+| OGD LoRA-XS | OGD | ~505 | — | 3 | 9,216 | adapt=[0,1,2,3], lr=4e-5 *(placement not swept for OGD)* | `stream-ogd-lora` |
+| OGD TinyLoRA | OGD | 469 | ±7 | 3 | **64** | adapt=[0,1,2,3], r=64, u=16, lr=4e-5 | `stream-ogd-tiny-lora` |
+| OGD last-layer | OGD | — | — | 3 | ~8,384 | lr=4e-5 *(not swept)* | `stream-ogd` |
+| OGD full network | OGD | — | — | 3 | ~400k | lr=3e-4 *(not swept)* | `stream-ogd-dense` |
+
+**Notes:**
+- OGD last-layer and OGD dense results not precisely logged — check wandb `fewshot-cheetah`
+- OGD LoRA-XS placement was never swept (only EKF was); [1,2] may improve OGD performance too
+- EKF last-layer at 5 seeds shows high variance (±77), suggesting lr=7000 is near stability limit
+
+---
+
+## Sweep Details
