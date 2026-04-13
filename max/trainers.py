@@ -14,6 +14,7 @@ References: TD-MPC2 (Hansen et al. 2023), tdmpc2.py / world_model.py
 
 import jax
 import jax.numpy as jnp
+import jax.flatten_util
 import optax
 from flax import struct
 from typing import Any, Callable, NamedTuple
@@ -22,6 +23,7 @@ from max.encoders import Encoder
 from max.critics import Critic
 from max.policies import Policy
 from max.utilities import symlog, symexp, two_hot, two_hot_inv, soft_ce, ema_update
+from max.estimators import EKFEfficient
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +74,8 @@ def init_trainer(
         )
     if trainer_type == "ogd":
         return init_ogd_trainer(key, config, encoder, dynamics, init_params)
+    if trainer_type == "ekf_efficient":
+        return init_ekf_efficient_trainer(key, config, encoder, dynamics, init_params)
 
     raise ValueError(f"Unknown trainer: {trainer_type!r}")
 
@@ -258,7 +262,7 @@ def init_tdmpc2_trainer(
             reward_loss = reward_loss + w * jnp.mean(soft_ce(rew_logits, rew_targets))
 
             # Q loss over ALL ensemble members
-            q_logits_all = critic.value(params["mean"]["critic"], z, a_t)  # (num_ens, B, num_bins)
+            q_logits_all = critic.logits(params["mean"]["critic"], z, a_t)  # (num_ens, B, num_bins)
             td_target_th = two_hot_batch_c(symlog(td_targets[:, t]))  # (B, num_bins)
             q_loss_all = jax.vmap(soft_ce, in_axes=(0, None))(q_logits_all, td_target_th)  # (num_ensemble, B)
             q_loss = q_loss + w * jnp.sum(jnp.mean(q_loss_all, axis=-1))
@@ -315,8 +319,7 @@ def init_tdmpc2_trainer(
 
             actions, log_probs = sample_batch(policy_params, z_t, sample_keys)  # (B, dim_a), (B,)
 
-            q_sampled = critic.subsample(critic_params_sg, z_t, actions, subkey)  # (num_subsample, B)
-            avg_q = jnp.mean(q_sampled, axis=0)  # (B,)
+            avg_q = critic.value(critic_params_sg, z_t, actions, subkey)  # (B,)
             avg_qs.append(avg_q)
 
             entropy = -log_probs  # (B,)
@@ -455,6 +458,101 @@ def init_ogd_trainer(
         }
         new_train_state = train_state.replace(opt_state=new_opt)
         return new_train_state, new_parameters, {"losses/consistency": loss}
+
+    trainer = Trainer(train_fn=train_step)
+    return trainer, train_state
+
+
+# ---------------------------------------------------------------------------
+# EKF-efficient trainer
+# ---------------------------------------------------------------------------
+
+def init_ekf_efficient_trainer(
+    key: jax.Array,
+    config: dict,
+    encoder: Encoder,
+    dynamics,
+    init_params: dict,
+) -> tuple[Trainer, TrainState]:
+    """
+    Online Bayesian dynamics adaptation via EKF, operating in latent space.
+
+    Adapts only dynamics parameters; encoder is frozen (stop-gradient).
+    Covariance is stored in parameters["covariance"] (initialised here by
+    mutating init_params, which is the same dict as `parameters` in train.py).
+
+    config["trainer"]:
+        lr:             float, scales measurement covariance as eye(latent_dim) / lr
+        jitter:         float, regularisation added to innovation covariance diagonal
+        init_cov_scale: float, initial parameter covariance = eye(dim_dyn) * init_cov_scale
+    """
+    tp = config["trainer"]
+    learning_rate: float = tp["lr"]
+    jitter: float = tp["jitter"]
+    init_cov_scale: float = tp["init_cov_scale"]
+
+    dim_action: int = config["dim_action"]
+
+    # Latent dimension via a single forward pass of the encoder
+    dummy_z = encoder.encode(init_params["mean"]["encoder"], jnp.zeros(config["dim_state"]))
+    latent_dim: int = dummy_z.shape[0]
+
+    # Flatten dynamics params to learn their structure
+    flat_dyn_init, unflatten_fn_dyn = jax.flatten_util.ravel_pytree(
+        init_params["mean"]["dynamics"]
+    )
+    dim_dyn_params: int = flat_dyn_init.shape[0]
+
+    # Initialise covariance directly in the parameters dict
+    init_params["covariance"] = jnp.eye(dim_dyn_params) * init_cov_scale
+    init_trace = float(dim_dyn_params * init_cov_scale)
+
+    # Observation function: predict z_{t+1} from [z_t | a_t] using dynamics params
+    def observation_fn(flat_dyn_params, x):
+        z_t = x[:latent_dim]
+        a_t = x[latent_dim:]
+        return dynamics.predict(unflatten_fn_dyn(flat_dyn_params), z_t, a_t)
+
+    meas_cov = jnp.eye(latent_dim) / learning_rate
+
+    estimator = EKFEfficient(
+        dynamics_fn=lambda params, _: params,  # identity: no process noise
+        observation_fn=observation_fn,
+        meas_cov=meas_cov,
+        jitter=jitter,
+    )
+
+    train_state = TrainState(opt_state=None)
+
+    @jax.jit
+    def train_step(train_state, batch, parameters, key):
+        enc_params = jax.lax.stop_gradient(parameters["mean"]["encoder"])
+        z_t = encoder.encode(enc_params, batch["states"][0, 0])
+        z_next = jax.lax.stop_gradient(encoder.encode(enc_params, batch["states"][0, 1]))
+        a_t = batch["actions"][0, 0]
+
+        ekf_inp = jnp.concatenate([z_t, a_t])  # (latent_dim + dim_a,)
+        ekf_out = z_next                         # (latent_dim,)
+
+        flat_dyn, _ = jax.flatten_util.ravel_pytree(parameters["mean"]["dynamics"])
+        cov = parameters["covariance"]
+
+        flat_dyn_new, cov_new, _ = estimator.estimate(flat_dyn, cov, ekf_inp, ekf_out)
+
+        # Prequential (pre-fit) loss
+        loss = jnp.mean((ekf_out - observation_fn(flat_dyn, ekf_inp)) ** 2)
+
+        new_parameters = parameters | {
+            "mean": parameters["mean"] | {"dynamics": unflatten_fn_dyn(flat_dyn_new)},
+            "covariance": cov_new,
+        }
+        cov_trace = jnp.trace(cov_new)
+        return train_state, new_parameters, {
+            "losses/pred_error": loss,
+            "losses/cov_trace": cov_trace,
+            "losses/cov_trace_delta": cov_trace - init_trace,
+            "losses/cov_diag_min": jnp.min(jnp.diag(cov_new)),
+        }
 
     trainer = Trainer(train_fn=train_step)
     return trainer, train_state

@@ -9,8 +9,9 @@ from max.utilities import mish, two_hot_inv
 
 
 class Critic(NamedTuple):
-    value: Callable       # (critic_params, z, a) -> logits  shape (...batch dims...) prepended with (num_ensemble,)
-    subsample: Callable   # (critic_params, z, a, key, n=2) -> (n, ...) Q values (raw, no min/mean)
+    logits: Callable      # (critic_params, z, a) -> raw logits  shape (num_ensemble, [B,] num_bins)
+    subsample: Callable   # (critic_params, z, a, key) -> (num_subsample, [B]) Q values (raw, no aggregation)
+    value: Callable       # (critic_params, z, a, key) -> scalar or (B,) aggregated Q value
 
 
 def init_critic(key: jax.Array, config: dict, pretrained: dict = None) -> tuple["Critic", dict]:
@@ -71,16 +72,18 @@ def _init_ensemble_critic(key: jax.Array, config: dict, pretrained: dict = None)
     dummy_a = jnp.ones((dim_a,))
 
     if config["critic"]["frozen"]:
-        def value(params: Any, z: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
+        def logits(params: Any, z: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
             return jax.vmap(lambda p: q_net.apply(p, z, a))(pretrained["ensemble"])
 
         def subsample(params: Any, z: jnp.ndarray, a: jnp.ndarray, key: jax.Array) -> jnp.ndarray:
-            logits = value(params, z, a)
-            q_vals = two_hot_inv(logits, vmin, vmax, num_bins)
+            q_vals = two_hot_inv(logits(params, z, a), vmin, vmax, num_bins)
             idxs = jax.random.choice(key, num_ensemble, shape=(num_subsample,), replace=False)
             return q_vals[idxs]
 
-        return Critic(value=value, subsample=subsample), {}
+        def value(params: Any, z: jnp.ndarray, a: jnp.ndarray, key: jax.Array) -> jnp.ndarray:
+            return jnp.mean(subsample(params, z, a, key), axis=0)
+
+        return Critic(logits=logits, subsample=subsample, value=value), {}
 
     if pretrained is not None:
         critic_params = pretrained
@@ -90,7 +93,7 @@ def _init_ensemble_critic(key: jax.Array, config: dict, pretrained: dict = None)
         ensemble_params = jax.vmap(lambda k: q_net.init(k, dummy_z, dummy_a))(ens_keys)
         critic_params = {"ensemble": ensemble_params}
 
-    def value(critic_params: Any, z: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
+    def logits(critic_params: Any, z: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
         """
         Returns raw logits.
         z/a can be unbatched (latent,)/(dim_a,) -> returns (num_ensemble, num_bins)
@@ -109,11 +112,21 @@ def _init_ensemble_critic(key: jax.Array, config: dict, pretrained: dict = None)
         """
         Pick num_subsample random ensemble members, return their scalar Q values (no aggregation).
         z/a unbatched -> returns (num_subsample,); z/a batched (B,...) -> returns (num_subsample, B).
-        Caller decides how to aggregate (min for TD targets, mean for policy/planner).
         """
-        logits = value(critic_params, z, a)                        # (num_ensemble, [B,] num_bins)
-        q_vals = two_hot_inv(logits, vmin, vmax, num_bins)          # (num_ensemble, [B])
+        q_vals = two_hot_inv(logits(critic_params, z, a), vmin, vmax, num_bins)  # (num_ensemble, [B])
         idxs = jax.random.choice(key, num_ensemble, shape=(num_subsample,), replace=False)
-        return q_vals[idxs]                                         # (num_subsample, [B])
+        return q_vals[idxs]                                                        # (num_subsample, [B])
 
-    return Critic(value=value, subsample=subsample), critic_params
+    def value(
+        critic_params: Any,
+        z: jnp.ndarray,
+        a: jnp.ndarray,
+        key: jax.Array,
+    ) -> jnp.ndarray:
+        """
+        Aggregated Q value: mean over subsampled ensemble members.
+        z/a unbatched -> scalar; z/a batched (B,...) -> (B,).
+        """
+        return jnp.mean(subsample(critic_params, z, a, key), axis=0)
+
+    return Critic(logits=logits, subsample=subsample, value=value), critic_params

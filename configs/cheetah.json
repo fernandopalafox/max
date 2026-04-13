@@ -6,11 +6,11 @@
     "checkpoint_enabled": true,
     "checkpoint_freq": 100000,
     "num_agents": 1,
-    "max_steps": 100000,
+    "max_steps": 10000,
     "buffer_size": 1000010,
     "dim_state": 17,
     "dim_action": 6,
-    "eval_freq": 10000,
+    "eval_freq": 1000,
     "chunk_size": 1,
     "plot_eval": true,
 
@@ -23,7 +23,7 @@
       "max_steps": 500,
       "num_episodes": 5,
       "environment": {},
-      "planner": {}
+      "planner": {"type": "mppi"}
     },
 
     "normalizer": {
@@ -103,10 +103,10 @@
     },
 
     "sampler": {
-      "type": "trajectory_batch",
-      "batch_size": 256,
-      "horizon": 3,
-      "min_buffer_size": 259
+      "type": "latest",
+      "batch_size": 1,
+      "horizon": 1,
+      "min_buffer_size": 1
     },
 
     "state_labels": [
@@ -116,11 +116,14 @@
     ],
 
     "planner": {
-      "type": "mppi",
+      "type": "mppi_ig",
+      "info_weight": 10.0,
+      "info_horizon": 1,
+      "meas_noise_scale": 1.0,
       "horizon": 3,
-      "num_iterations": 6,
+      "num_iterations": 1,
       "dim_control": 6,
-      "batch_size": 512,
+      "batch_size": 64,
       "num_pi_trajs": 24,
       "temperature": 0.5,
       "min_std": 0.05,
