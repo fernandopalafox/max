@@ -76,6 +76,8 @@ def init_trainer(
         return init_ogd_trainer(key, config, encoder, dynamics, init_params)
     if trainer_type == "ekf_efficient":
         return init_ekf_efficient_trainer(key, config, encoder, dynamics, init_params)
+    if trainer_type == "ekf_batch":
+        return init_ekf_batch_trainer(key, config, encoder, dynamics, init_params)
 
     raise ValueError(f"Unknown trainer: {trainer_type!r}")
 
@@ -552,6 +554,145 @@ def init_ekf_efficient_trainer(
             "losses/cov_trace": cov_trace,
             "losses/cov_trace_delta": cov_trace - init_trace,
             "losses/cov_diag_min": jnp.min(jnp.diag(cov_new)),
+        }
+
+    trainer = Trainer(train_fn=train_step)
+    return trainer, train_state
+
+
+# ---------------------------------------------------------------------------
+# EKF-batch trainer
+# ---------------------------------------------------------------------------
+
+def init_ekf_batch_trainer(
+    key: jax.Array,
+    config: dict,
+    encoder: Encoder,
+    dynamics,
+    init_params: dict,
+) -> tuple[Trainer, TrainState]:
+    """
+    Batched EKF dynamics adaptation using the trajectory_batch sampler.
+
+    Processes each trajectory in the batch sequentially via jax.lax.scan,
+    applying one EKFEfficient update per trajectory.  Sequential updates are
+    mathematically equivalent to a single batch update because trajectories
+    are independent given theta.  This keeps the observation dimension at
+    M = H * D (e.g. 192) rather than B * H * D (e.g. 3072), making the
+    Jacobian computation and the (M, M) innovation covariance solve fast.
+
+    The diagonal measurement covariance encodes temporal decay:
+        R_t = (1 / (lr * lambda^t)) * I_D   for step t in [0, H).
+
+    config["trainer"]:
+        lr:             float, base learning rate (scales R^{-1})
+        horizon:        int, autoregressive rollout length H
+        temporal_decay: float, lambda — per-step decay in measurement trust
+        jitter:         float, regularisation on innovation covariance diagonal
+        init_cov_scale: float, initial P = eye(N) * init_cov_scale
+
+    config["sampler"]:
+        batch_size:     int, number of trajectories B processed sequentially
+    """
+    tp = config["trainer"]
+    lr: float = tp["lr"]
+    H: int = tp["horizon"]
+    temporal_decay: float = tp["temporal_decay"]
+    jitter: float = tp["jitter"]
+    init_cov_scale: float = tp["init_cov_scale"]
+
+    B: int = config["sampler"]["batch_size"]
+
+    dummy_z = encoder.encode(init_params["mean"]["encoder"], jnp.zeros(config["dim_state"]))
+    latent_dim: int = dummy_z.shape[0]
+
+    flat_dyn_init, unflatten_fn = jax.flatten_util.ravel_pytree(
+        init_params["mean"]["dynamics"]
+    )
+    N: int = flat_dyn_init.shape[0]
+
+    init_params["covariance"] = jnp.eye(N) * init_cov_scale
+    init_trace = float(N * init_cov_scale)
+
+    # Single-trajectory measurement covariance: (H*D, H*D) diagonal
+    steps = jnp.arange(H)
+    meas_var_per_step = 1.0 / (lr * temporal_decay ** steps)
+    meas_cov = jnp.diag(jnp.repeat(meas_var_per_step, latent_dim))
+
+    encode_batch = jax.vmap(encoder.encode, in_axes=(None, 0))
+
+    def observation_fn(flat_theta, control):
+        """Single-trajectory rollout: M = H * D outputs."""
+        dyn_params = unflatten_fn(flat_theta)
+        z0 = control["z0"]       # (D,)
+        acts = control["actions"] # (H, dim_a)
+
+        def step_fn(z, a):
+            z_next = dynamics.predict(dyn_params, z, a)
+            return z_next, z_next
+
+        _, preds = jax.lax.scan(step_fn, z0, acts)
+        return preds.reshape(-1)  # (H*D,)
+
+    estimator = EKFEfficient(
+        dynamics_fn=lambda params, _: params,
+        observation_fn=observation_fn,
+        meas_cov=meas_cov,
+        jitter=jitter,
+    )
+
+    train_state = TrainState(opt_state=None)
+
+    @jax.jit
+    def train_step(train_state, batch, parameters, key):
+        enc_params = jax.lax.stop_gradient(parameters["mean"]["encoder"])
+        obs = batch["states"]
+        actions = batch["actions"]
+
+        obs_flat = obs.reshape(B * (H + 1), -1)
+        z_all = jax.lax.stop_gradient(encode_batch(enc_params, obs_flat))
+        z_all = z_all.reshape(B, H + 1, latent_dim)
+
+        flat_theta_init, _ = jax.flatten_util.ravel_pytree(parameters["mean"]["dynamics"])
+        P_init = parameters["covariance"]
+
+        # Sequential EKF updates over the batch via scan
+        def update_one(carry, i):
+            flat_theta, P = carry
+            control_i = {"z0": z_all[i, 0], "actions": actions[i]}
+            Y_i = z_all[i, 1:].reshape(-1)
+            flat_theta_new, P_new, _ = estimator.estimate(flat_theta, P, control_i, Y_i)
+            return (flat_theta_new, P_new), None
+
+        (flat_theta_new, P_new), _ = jax.lax.scan(
+            update_one, (flat_theta_init, P_init), jnp.arange(B)
+        )
+
+        # Consistency loss matching OGD: (1/H) * sum_t [ lambda^t * mean_{B,D}(err^2) ]
+        def predict_single(flat_theta, z0, acts):
+            dyn_params = unflatten_fn(flat_theta)
+            def step_fn(z, a):
+                z_next = dynamics.predict(dyn_params, z, a)
+                return z_next, z_next
+            _, preds = jax.lax.scan(step_fn, z0, acts)
+            return preds  # (H, D)
+
+        preds = jax.vmap(predict_single, in_axes=(None, 0, 0))(
+            flat_theta_init, z_all[:, 0], actions
+        )  # (B, H, D)
+        sq_err = (preds - z_all[:, 1:]) ** 2                           # (B, H, D)
+        weights = temporal_decay ** jnp.arange(H)                      # (H,)
+        loss = jnp.sum(weights * jnp.mean(sq_err, axis=(0, 2))) / H    # scalar
+
+        new_parameters = parameters | {
+            "mean": parameters["mean"] | {"dynamics": unflatten_fn(flat_theta_new)},
+            "covariance": P_new,
+        }
+        return train_state, new_parameters, {
+            "losses/consistency": loss,
+            "losses/cov_trace": jnp.trace(P_new),
+            "losses/cov_trace_delta": jnp.trace(P_new) - init_trace,
+            "losses/cov_diag_min": jnp.min(jnp.diag(P_new)),
         }
 
     trainer = Trainer(train_fn=train_step)
