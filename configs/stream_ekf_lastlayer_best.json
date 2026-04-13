@@ -4,8 +4,7 @@
     "seed": 44,
     "save_dir": "/home/fp5275/repos/max/data/models/cheetah",
     "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah/20260323_less_features/final.pkl",
-    "checkpoint_enabled": true,
-    "checkpoint_freq": 100000,
+    "checkpoint_enabled": false,
     "num_agents": 1,
     "max_steps": 10000,
     "buffer_size": 1000010,
@@ -13,47 +12,50 @@
     "dim_action": 6,
     "eval_freq": 1000,
     "chunk_size": 1,
-    "plot_eval": true,
-
-    "visualizer": {
-      "type": "cheetah"
-    },
-
+    "plot_eval": false,
     "evaluator": {
       "seed": 123,
       "max_steps": 500,
       "num_episodes": 5,
       "environment": {},
-      "planner": {"type": "mppi"}
+      "planner": {
+        "type": "mppi"
+      }
     },
-
     "normalizer": {
       "critic": {
         "q_scale_init": 1.0
       }
     },
-
     "encoder": {
       "type": "proprioceptive",
-      "encoder_features": [256, 128, 64],
+      "encoder_features": [
+        256,
+        128,
+        64
+      ],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
       "frozen": true
     },
-
     "dynamics": {
       "type": "dense_last_layer",
-      "dynamics_features": [512, 512, 128, 64],
+      "dynamics_features": [
+        512,
+        512,
+        128,
+        64
+      ],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
-      "svd_rank": 48,
-      "r_init_std": 1e-5,
       "frozen": false
     },
-
     "critic": {
       "type": "ensemble",
-      "features": [512, 512],
+      "features": [
+        512,
+        512
+      ],
       "num_ensemble": 5,
       "num_bins": 101,
       "vmin": -10.0,
@@ -62,62 +64,64 @@
       "num_subsample": 2,
       "frozen": true
     },
-
     "policy": {
       "type": "squashed_gaussian",
-      "features": [512, 512],
+      "features": [
+        512,
+        512
+      ],
       "log_std_min": -10,
       "log_std_max": 2,
       "frozen": true
     },
-
     "reward": {
       "type": "mlp",
-      "features": [512, 512],
+      "features": [
+        512,
+        512
+      ],
       "num_bins": 101,
       "vmin": -10.0,
       "vmax": 10.0,
       "frozen": true
     },
-
     "environment": {
       "type": "cheetah",
       "num_agents": 1,
       "max_episode_steps": 500,
       "cheetah_mass_scale": 0.1
     },
-
     "trainer": {
       "type": "ekf_efficient",
-      "lr": 10.0,
+      "lr": 7000,
       "jitter": 0.0,
-      "init_cov_scale": 0.01,
-      "encoder_lr": 9e-5,
-      "policy_lr": 3e-4,
-      "grad_clip_norm": 20,
-      "horizon": 1,
-      "discount_factor": 0.99,
-      "temporal_decay": 0.5,
-      "ema_decay": 0.99,
-      "consistency_coef": 20.0,
-      "reward_coef": 0.1,
-      "value_coef": 0.1,
-      "entropy_coef": 1e-4
+      "init_cov_scale": 0.01
     },
-
     "sampler": {
       "type": "latest",
       "batch_size": 1,
       "horizon": 1,
       "min_buffer_size": 1
     },
-
     "state_labels": [
-      "rootz", "rooty", "bthigh", "bshin", "bfoot", "fthigh", "fshin", "ffoot",
-      "vel_x", "vel_z", "vel_y", "vel_bthigh", "vel_bshin", "vel_bfoot",
-      "vel_fthigh", "vel_fshin", "vel_ffoot"
+      "rootz",
+      "rooty",
+      "bthigh",
+      "bshin",
+      "bfoot",
+      "fthigh",
+      "fshin",
+      "ffoot",
+      "vel_x",
+      "vel_z",
+      "vel_y",
+      "vel_bthigh",
+      "vel_bshin",
+      "vel_bfoot",
+      "vel_fthigh",
+      "vel_fshin",
+      "vel_ffoot"
     ],
-
     "planner": {
       "type": "mppi",
       "info_weight": 0.0,
@@ -134,6 +138,5 @@
       "num_elites": 64,
       "max_std": 2.0
     }
-
   }
 }
