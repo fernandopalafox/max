@@ -26,6 +26,7 @@ Metric: `eval/episode_reward` (mean ± std).
 |---|---|---|---|---|---|---|
 | `stream-ekf-lora-best` | [1,2] | 48 | 10 | 580 | ±18 | 4608 |
 | `stream-ekf-lora-best-full` | [0,1,2,3] | 48 | 10 | **616** | ±48 | 9216 |
+| `stream-ekf-lastlayer` | — | — | 7000 | 481 | ±77 | ~8384 |
 
 ---
 
@@ -144,10 +145,11 @@ Fixed: EKF trainer, last_layer dynamics, same streaming setup.
 | 500 | 486 | ±28 | done |
 | 1000 | 483 | ±53 | done |
 | 5000 | 513 | ±86 | done |
-| **7000** | **537** | **±17** | done ← best |
+| **7000** | **537** | **±17** | done ← best (3 seeds; 5-seed recheck gave 481 ±77) |
 | 10000 | 472 | ±106 | done |
 | 15000 | 474 | ±38 | done |
 | 20000 | 223 | — | done (mostly collapsing) |
+| 30000+ | — | — | abandoned (unstable) |
 
 ---
 
