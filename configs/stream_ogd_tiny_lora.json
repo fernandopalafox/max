@@ -40,7 +40,7 @@
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
       "svd_rank": 64,
-      "steering_dim": 8,
+      "steering_dim": 16,
       "projection_seed": 42,
       "adapt_layers": [0, 1, 2, 3],
       "frozen": false

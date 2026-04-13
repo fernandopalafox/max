@@ -50,6 +50,7 @@
       "simnorm_tau": 1.0,
       "svd_rank": 48,
       "r_init_std": 1e-05,
+      "adapt_layers": [0, 1, 2, 3],
       "frozen": false
     },
     "critic": {
