@@ -2,8 +2,7 @@
   "training": {
     "wandb_project": "finetune-cheetah",
     "seed": 43,
-    "save_dir": "/home/fp5275/repos/max/data/models/cheetah",
-    "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah/20260323_less_features/final.pkl",
+    "save_dir": "./data/models/cheetah",
     "checkpoint_enabled": true,
     "checkpoint_freq": 100000,
     "num_agents": 1,
@@ -38,11 +37,11 @@
       "encoder_features": [256, 128, 64],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
-      "frozen": true
+      "frozen": false
     },
 
     "dynamics": {
-      "type": "dense_last_layer",
+      "type": "dense",
       "dynamics_features": [512, 512, 128, 64],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
@@ -60,7 +59,7 @@
       "vmax": 10.0,
       "dropout": 0.01,
       "num_subsample": 2,
-      "frozen": true
+      "frozen": false
     },
 
     "policy": {
@@ -68,7 +67,7 @@
       "features": [512, 512],
       "log_std_min": -10,
       "log_std_max": 2,
-      "frozen": true
+      "frozen": false
     },
 
     "reward": {
@@ -77,7 +76,7 @@
       "num_bins": 101,
       "vmin": -10.0,
       "vmax": 10.0,
-      "frozen": true
+      "frozen": false
     },
 
     "environment": {
@@ -88,7 +87,7 @@
     },
 
     "trainer": {
-      "type": "ogd",
+      "type": "tdmpc2",
       "lr": 3e-4,
       "encoder_lr": 9e-5,
       "policy_lr": 3e-4,
