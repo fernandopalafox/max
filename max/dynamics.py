@@ -159,32 +159,30 @@ def _init_dense_last_layer_dynamics(
     last_i = n - 1
     p = all_params["params"]
 
-    # Freeze all but the last layer by closing over them
-    frozen = [
-        {
-            "W": p[f"Dense_{i}"]["kernel"],
-            "b": p[f"Dense_{i}"]["bias"],
-            "ln_scale": p[f"LayerNorm_{i}"]["scale"],
-            "ln_bias": p[f"LayerNorm_{i}"]["bias"],
-        }
-        for i in range(last_i)
-    ]
+    # Frozen prefix params (all layers except the last), closed over at construction time.
+    # The last layer params are returned as trainable.
+    dense_last = f"Dense_{last_i}"
+    ln_last    = f"LayerNorm_{last_i}"
+    frozen_prefix = {k: v for k, v in p.items() if k not in (dense_last, ln_last)}
 
     last_params = {
-        "kernel":   p[f"Dense_{last_i}"]["kernel"],
-        "bias":     p[f"Dense_{last_i}"]["bias"],
-        "ln_scale": p[f"LayerNorm_{last_i}"]["scale"],
-        "ln_bias":  p[f"LayerNorm_{last_i}"]["bias"],
+        "kernel":   p[dense_last]["kernel"],
+        "bias":     p[dense_last]["bias"],
+        "ln_scale": p[ln_last]["scale"],
+        "ln_bias":  p[ln_last]["bias"],
     }
 
     def _forward(last_p: Any, x: jnp.ndarray) -> jnp.ndarray:
-        for layer in frozen:
-            x = x @ layer["W"] + layer["b"]
-            x = layer["ln_scale"] * jax.nn.standardize(x, axis=-1, epsilon=1e-6) + layer["ln_bias"]
-            x = mish(x)
-        x = x @ last_p["kernel"] + last_p["bias"]
-        x = last_p["ln_scale"] * jax.nn.standardize(x, axis=-1, epsilon=1e-6) + last_p["ln_bias"]
-        return simnorm(x, simnorm_dim_v, simnorm_tau)
+        # Reconstruct full Flax params dict so the forward pass is numerically
+        # identical to _init_dense_dynamics (same LayerNorm implementation).
+        full_params = {
+            "params": {
+                **frozen_prefix,
+                dense_last: {"kernel": last_p["kernel"], "bias": last_p["bias"]},
+                ln_last:    {"scale": last_p["ln_scale"], "bias": last_p["ln_bias"]},
+            }
+        }
+        return dynamics_net.apply(full_params, x)
 
     def predict(mean_params: Any, z: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
         return _forward(mean_params, jnp.concatenate([z, action], axis=-1))
