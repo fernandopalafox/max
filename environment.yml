@@ -1,3 +1,4 @@
+# environment.yml
 name: max
 channels:
   - defaults
@@ -197,4 +198,4 @@ dependencies:
       - wcwidth==0.6.0
       - werkzeug==3.1.5
       - zipp==3.23.0
-prefix: /home/fp5275/miniconda3/envs/max
+prefix: /home/jai/miniconda3/envs/max
