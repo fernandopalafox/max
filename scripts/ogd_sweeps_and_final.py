@@ -17,7 +17,7 @@ from pathlib import Path
 
 REPO = Path(__file__).parent.parent
 LOG_PATH = REPO / "experiment_log.md"
-SUMMARY_PATH = REPO / "final_comparison_summary.md"
+SUMMARY_PATH = REPO / "ogd_runs_progress.md"  # live progress log; final results go to experiment_log.md
 
 BASE_CONFIGS = {
     "ogd_lastlayer": REPO / "configs" / "stream_ogd.json",
@@ -29,7 +29,10 @@ BASE_CONFIGS = {
     "ekf_lastlayer": REPO / "configs" / "stream_ekf_lastlayer_best.json",
 }
 
-OGD_LRS = [1e-5, 1e-4, 3e-4, 1e-3, 1e-2]
+# Initial LR sweep range. Adam for dynamics adaptation: start low, up to 1e-2.
+# If best is at the top of the range we extend upward by a decade until we find a peak.
+OGD_INITIAL_LRS = [1e-5, 1e-4, 1e-3, 1e-2]
+MAX_ADAM_LR = 1.0  # Adam rarely stable above this for neural net weights
 
 summary = []
 
@@ -41,6 +44,12 @@ def log(msg):
 
 def write_summary():
     SUMMARY_PATH.write_text("\n".join(summary) + "\n")
+
+
+def lr_run_name(lr):
+    """Human-readable run name for a learning rate."""
+    s = f"{lr:.0e}".replace("e-0", "e-").replace("e+0", "e").replace("e+", "e")
+    return f"lr{s}"
 
 
 def run_experiment(config_dict, run_name, num_seeds):
@@ -80,39 +89,69 @@ def fmt(rewards):
     return f"mean={a.mean():.1f} ±{a.std():.1f} (n={len(a)})"
 
 
+def mean_or_neg(rewards):
+    return np.mean(rewards) if rewards else -1.0
+
+
+def sweep_lr(base, project, num_seeds=3):
+    """
+    Logarithmic LR sweep with upward extension.
+    Starts with OGD_INITIAL_LRS. If the best LR is at the top of the tested
+    range, extends upward by a decade until the peak is interior or we hit
+    MAX_ADAM_LR. Returns (best_lr, sweep_results_dict).
+    """
+    sweep_results = {}
+
+    for lr in OGD_INITIAL_LRS:
+        cfg = json.loads(json.dumps(base))
+        cfg["training"]["wandb_project"] = project
+        cfg["training"]["trainer"]["lr"] = lr
+        out = run_experiment(cfg, lr_run_name(lr), num_seeds=num_seeds)
+        rewards = parse_rewards(out)
+        sweep_results[lr] = rewards
+        log(f"  lr={lr:.1e}: {fmt(rewards)}")
+
+    # Extend upward if best is at the top boundary
+    while True:
+        best_lr = max(sweep_results, key=lambda k: mean_or_neg(sweep_results[k]))
+        top_lr  = max(sweep_results.keys())
+        if best_lr < top_lr or top_lr >= MAX_ADAM_LR:
+            break  # peak is interior, or we've hit the Adam stability ceiling
+        next_lr = top_lr * 10
+        if next_lr > MAX_ADAM_LR:
+            break
+        log(f"  Best is at top (lr={best_lr:.1e}) — extending to lr={next_lr:.1e}")
+        cfg = json.loads(json.dumps(base))
+        cfg["training"]["wandb_project"] = project
+        cfg["training"]["trainer"]["lr"] = next_lr
+        out = run_experiment(cfg, lr_run_name(next_lr), num_seeds=num_seeds)
+        rewards = parse_rewards(out)
+        sweep_results[next_lr] = rewards
+        log(f"  lr={next_lr:.1e}: {fmt(rewards)}")
+
+    best_lr = max(sweep_results, key=lambda k: mean_or_neg(sweep_results[k]))
+    return best_lr, sweep_results
+
+
 # ─── Phase 1: OGD LR Sweeps ──────────────────────────────────────────────────
 
 ogd_sweep_configs = {
-    "ogd_lastlayer": ("ogd-lastlayer-lr", {}),
-    "ogd_dense":     ("ogd-dense-lr",     {}),
-    "ogd_loraxs":    ("ogd-loraxs-lr",    {}),
-    "ogd_tinylora":  ("ogd-tinylora-lr",  {}),
+    "ogd_lastlayer": "ogd-lastlayer-lr",
+    "ogd_dense":     "ogd-dense-lr",
+    "ogd_loraxs":    "ogd-loraxs-lr",
+    "ogd_tinylora":  "ogd-tinylora-lr",
 }
 
 best_ogd_lrs = {}
 
-for method_key, (project, overrides) in ogd_sweep_configs.items():
+for method_key, project in ogd_sweep_configs.items():
     log(f"\n## OGD LR Sweep: {method_key} → project={project}")
     with open(BASE_CONFIGS[method_key]) as f:
         base = json.load(f)
 
-    sweep_results = {}
-    for lr in OGD_LRS:
-        run_name = f"lr{lr:.0e}".replace("e-0", "e-").replace("e+0", "e")
-        cfg = json.loads(json.dumps(base))
-        cfg["training"]["wandb_project"] = project
-        cfg["training"]["trainer"]["lr"] = lr
-        for k, v in overrides.items():
-            cfg["training"][k] = v
-
-        out = run_experiment(cfg, run_name, num_seeds=3)
-        rewards = parse_rewards(out)
-        sweep_results[lr] = rewards
-        log(f"  lr={lr:.0e}: {fmt(rewards)}")
-
-    best_lr = max(sweep_results, key=lambda k: np.mean(sweep_results[k]) if sweep_results[k] else -1)
+    best_lr, sweep_results = sweep_lr(base, project, num_seeds=3)
     best_ogd_lrs[method_key] = best_lr
-    log(f"  → Best lr: {best_lr:.0e}  ({fmt(sweep_results[best_lr])})")
+    log(f"  → Best lr: {best_lr:.1e}  ({fmt(sweep_results[best_lr])})")
     write_summary()
 
 log(f"\n## OGD Best LRs Summary")
@@ -124,8 +163,6 @@ write_summary()
 # ─── Phase 2: Update experiment_log.md ───────────────────────────────────────
 
 log("\n## Updating experiment_log.md Key Results table...")
-
-log_text = LOG_PATH.read_text()
 
 method_labels = {
     "ogd_lastlayer": "OGD last-layer",
@@ -212,4 +249,28 @@ for method, trainer, key in rows:
 
 log(f"\nCompleted: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 write_summary()
-print(f"\nSummary written to {SUMMARY_PATH}")
+
+# ─── Append concise results to experiment_log.md ─────────────────────────────
+
+entry = f"\n\n---\n\n## Final Comparison — {FINAL_PROJECT} — {datetime.now().strftime('%Y-%m-%d')}\n\n"
+entry += "All methods, 5 seeds each. OGD LRs tuned via sweep (see `ogd-*-lr` wandb projects).\n\n"
+entry += "| Method | Trainer | Mean | Std | Seeds |\n"
+entry += "|---|---|---|---|---|\n"
+
+for method, trainer, key in rows:
+    rewards = final_results.get(key, [])
+    if rewards:
+        a = np.array(rewards)
+        entry += f"| {method} | {trainer} | {a.mean():.1f} | ±{a.std():.1f} | {len(a)} |\n"
+    else:
+        entry += f"| {method} | {trainer} | — | — | — |\n"
+
+entry += "\n**OGD best LRs from sweep:**\n"
+for key, label in method_labels.items():
+    entry += f"- {label}: lr={best_ogd_lrs[key]:.0e}\n"
+
+with open(LOG_PATH, "a") as f:
+    f.write(entry)
+
+print(f"\nResults appended to {LOG_PATH}")
+print(f"Progress log at {SUMMARY_PATH}")

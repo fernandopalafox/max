@@ -153,14 +153,13 @@ Fixed: EKF trainer, last_layer dynamics, same streaming setup.
 
 ---
 
-## Key Results (Best Configs)
+## Key Results (Best Configs) — 2026-04-13
 
 Methods we care most about, with best hyperparameters from sweeps. All in `fewshot-cheetah`. LR for OGD methods was not swept — set by param-count scaling from dense lr=3e-4.
 
 | Method | Trainer | Mean | Std | Seeds | Params | Best Hyperparams | wandb run |
 |---|---|---|---|---|---|---|---|
 | LoRA-XS | EKF | **616** | ±48 | 3 | 9,216 | adapt=[0,1,2,3], r=48, lr=10 | `stream-ekf-lora-best-full` |
-| LoRA-XS | EKF | 580 | ±18 | 3 | 4,608 | adapt=[1,2], r=48, lr=10 | `stream-ekf-lora-best` |
 | EKF last-layer | EKF | 481 | ±77 | 5 | ~8,384 | lr=7000 | `stream-ekf-lastlayer` |
 | TinyLoRA | EKF | 496 | ±31 | 3 | **64** | adapt=[0,1,2,3], r=64, u=16, lr=5000 | `stream-ekf-tiny-lora` |
 | OGD LoRA-XS | OGD | ~505 | — | 3 | 9,216 | adapt=[0,1,2,3], lr=4e-5 *(placement not swept for OGD)* | `stream-ogd-lora` |
@@ -176,3 +175,36 @@ Methods we care most about, with best hyperparameters from sweeps. All in `fewsh
 ---
 
 ## Sweep Details
+
+
+### OGD LR Sweep Results — 2026-04-13
+Best LRs found:
+- OGD last-layer: lr=1e-04
+- OGD full network: lr=1e-04
+- OGD LoRA-XS: lr=1e-04
+- OGD TinyLoRA: lr=1e-03
+
+*(Key Results table should be manually updated with final 5-seed results from streaming-adaptation-final)*
+
+
+---
+
+## Final Comparison — streaming-adaptation-final — 2026-04-13
+
+All methods, 5 seeds each. OGD LRs tuned via sweep (see `ogd-*-lr` wandb projects).
+
+| Method | Trainer | Mean | Std | Seeds |
+|---|---|---|---|---|
+| LoRA-XS | EKF | 609.7 | ±40.7 | 5 |
+| last-layer | EKF | 480.7 | ±69.2 | 5 |
+| TinyLoRA | EKF | 502.4 | ±31.8 | 5 |
+| LoRA-XS | OGD | 540.2 | ±51.3 | 5 |
+| TinyLoRA | OGD | 474.2 | ±26.5 | 5 |
+| last-layer | OGD | 445.4 | ±68.5 | 5 |
+| full network | OGD | 589.5 | ±89.1 | 5 |
+
+**OGD best LRs from sweep:**
+- OGD last-layer: lr=1e-04
+- OGD full network: lr=1e-04
+- OGD LoRA-XS: lr=1e-04
+- OGD TinyLoRA: lr=1e-03
