@@ -8,8 +8,8 @@
     "num_agents": 1,
     "max_steps": 100000,
     "buffer_size": 1000010,
-    "dim_state": 46,
-    "dim_action": 17,
+    "dim_state": 54,
+    "dim_action": 21,
     "eval_freq": 10000,
     "chunk_size": 1,
     "plot_eval": true,
@@ -42,7 +42,7 @@
 
     "dynamics": {
       "type": "dense_last_layer",
-      "dynamics_features": [512, 512, 256, 128],
+      "dynamics_features": [512, 512, 256, 64],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
       "svd_rank": 64,
@@ -127,7 +127,7 @@
       "type": "mppi",
       "horizon": 3,
       "num_iterations": 6,
-      "dim_control": 17,
+      "dim_control": 21,
       "batch_size": 512,
       "num_pi_trajs": 24,
       "temperature": 0.5,

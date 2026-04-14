@@ -112,7 +112,7 @@ def _make_humanoid_env(config: Dict[str, Any]):
 
     Internal state: mjx.Data (full MuJoCo physics state)
     Observation: flattened vector [qpos[1:], qvel] (body pose and velocities, excluding root x)
-    Action: 17D continuous control (joint torques)
+    Action: nu-dimensional continuous control (HumanoidRun has nu=21)
     Forward velocity = data.qvel[0]
     """
     from mujoco_playground import registry

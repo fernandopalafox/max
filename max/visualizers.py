@@ -36,8 +36,7 @@ def _init_cheetah_visualizer(config) -> Visualizer:
 
 def _init_humanoid_visualizer(config) -> Visualizer:
     def visualize(trajectory):
-        full_states = np.concatenate([trajectory.qpos, trajectory.qvel], axis=-1)
-        return _create_humanoid_video(full_states)
+        return _create_humanoid_video(trajectory.qpos, trajectory.qvel)
     return Visualizer(visualize=visualize)
 
 def _init_quadruped_visualizer(config) -> Visualizer:
@@ -249,7 +248,7 @@ def _create_placeholder_video(save_path=None, fps=25):
 
 
 
-def _create_humanoid_video(states, max_frames=300, save_path=None, fps=50):
+def _create_humanoid_video(qpos, qvel, max_frames=300, save_path=None, fps=50):
     """
     Creates an MP4 video showing the humanoid as a stick figure.
 
@@ -260,8 +259,8 @@ def _create_humanoid_video(states, max_frames=300, save_path=None, fps=50):
     - Legs (hips, knees, ankles)
 
     Args:
-        states: (T, N) array where N >= 46 (qpos + qvel for humanoid)
-                Assumes structure: [qpos (23), qvel (23), ...] or similar
+        qpos: (T, nq) MuJoCo generalized positions
+        qvel: (T, nv) MuJoCo generalized velocities
         max_frames: subsample to at most this many frames
         save_path: path for the .mp4 file (temp file if None)
         fps: frames per second
@@ -270,28 +269,30 @@ def _create_humanoid_video(states, max_frames=300, save_path=None, fps=50):
     """
     import tempfile
     
-    states = np.array(states)
+    qpos = np.array(qpos)
+    qvel = np.array(qvel)
+
+    # Trajectories can come in as (T, nq) or (N, T, nq) where N = num_agents.
+    # The cheetah visualizer treats the leading dim as batch; here we just render
+    # the first agent to keep the visualization simple.
+    if qpos.ndim == 3:
+        qpos = qpos[0]
+    if qvel.ndim == 3:
+        qvel = qvel[0]
     
     # Subsample if needed
-    if len(states) > max_frames:
-        idx = np.linspace(0, len(states) - 1, max_frames, dtype=int)
-        states = states[idx]
+    if len(qpos) > max_frames:
+        idx = np.linspace(0, len(qpos) - 1, max_frames, dtype=int)
+        qpos = qpos[idx]
+        qvel = qvel[idx]
     
-    # Extract root position and velocity from qpos and qvel
-    # Humanoid qpos typically: [root_x, root_z, root_y, ...joints...]
-    # qvel typically: [root_x_vel, root_y_vel, root_z_vel, root_y_omega, ...joint_vels...]
-    T = len(states)
-    
-    # For visualization, we'll use a simple forward kinematics approximation
-    # Root position (assuming first 3 qpos are x, z, y)
-    root_x = states[:, 0]
-    root_z = states[:, 1] + 1.0  # Offset torso height above ground
-    
-    # Forward velocity from qvel[0]
-    if states.shape[1] > 23:
-        forward_vel = states[:, 23]  # qvel[0] after qpos (23 DOF)
-    else:
-        forward_vel = np.zeros(T)
+    T = len(qpos)
+
+    # MuJoCo free joint convention for humanoid is typically qpos[:3] = (x, y, z).
+    # We visualize side-view as x vs z.
+    root_x = qpos[:, 0]
+    root_z = qpos[:, 2]
+    forward_vel = qvel[:, 0] if qvel.shape[1] > 0 else np.zeros(T)
     
     fig, ax = plt.subplots(figsize=(10, 8), dpi=100)
     ax.set_xlim(-3, 3)
