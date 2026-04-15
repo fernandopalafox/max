@@ -274,14 +274,18 @@ def run_sweep():
 
 
 if __name__ == "__main__":
+    import sys
+    import shutil
+    import subprocess
+    import tempfile
+
     parser = argparse.ArgumentParser(description="Run TDMPC2 training.")
     parser.add_argument("--run-name", type=str, default=None)
-    parser.add_argument("--num-seeds", type=int, default=1)
     parser.add_argument(
         "--config",
         type=str,
         default="cheetah.json",
-        help="Config filename in configs folder.",
+        help="Config filename or absolute path.",
     )
     args = parser.parse_args()
 
@@ -296,27 +300,64 @@ if __name__ == "__main__":
         CONFIG = full_config["training"]
 
         run_name_base = args.run_name or "cheetah_tdmpc2"
+        num_seeds = CONFIG.get("num_seeds", 1)
+        num_processes = CONFIG.get("num_processes", 1)
 
-        base_key = jax.random.key(CONFIG["seed"])
-        seed_keys = jax.random.split(base_key, args.num_seeds)
-        seeds = [int(jax.random.bits(k)) for k in seed_keys]
+        if num_processes > 1:
+            # Derive per-process seeds using Python random (not JAX) so the
+            # parent process never initializes a CUDA context — otherwise the
+            # parent and each subprocess would hold simultaneous CUDA contexts
+            # on the same GPU, causing OOM.
+            import random
+            rng = random.Random(CONFIG["seed"])
+            proc_seeds = [rng.randint(0, 2**31) for _ in range(num_processes)]
 
-        for seed_idx, seed in enumerate(seeds, start=1):
-            print(f"--- Starting run seed {seed_idx}/{args.num_seeds} ---")
-            run_config = copy.deepcopy(CONFIG)
-            run_config["seed"] = seed
-            run_name = run_name_base
-            if args.num_seeds > 1:
-                run_name = f"{run_name}_{seed_idx}"
-            run_config["wandb_run_name"] = run_name
+            for proc_idx, proc_seed in enumerate(proc_seeds, start=1):
+                print(f"--- Starting process {proc_idx}/{num_processes} ---")
+                if os.path.exists("/tmp/jax_cache"):
+                    shutil.rmtree("/tmp/jax_cache")
 
-            wandb.init(
-                project=run_config.get("wandb_project", "cheetah_tdmpc2"),
-                config=run_config,
-                name=run_config.get("wandb_run_name"),
-                reinit=True,
-            )
-            main(run_config)
-            wandb.finish()
+                proc_config = copy.deepcopy(CONFIG)
+                proc_config["seed"] = proc_seed
+                proc_config["num_processes"] = 1  # prevent recursion
+                proc_config["process_idx"] = proc_idx
+
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", delete=False
+                ) as f:
+                    json.dump({"training": proc_config}, f, indent=2)
+                    tmp_path = f.name
+
+                proc_run_name = f"{run_name_base}_p{proc_idx}"
+                subprocess.run(
+                    [sys.executable, __file__,
+                     "--config", tmp_path,
+                     "--run-name", proc_run_name],
+                    cwd=os.path.dirname(os.path.abspath(__file__)),
+                )
+                os.unlink(tmp_path)
+
+        else:
+            base_key = jax.random.key(CONFIG["seed"])
+            seed_keys = jax.random.split(base_key, num_seeds)
+            seeds = [int(jax.random.bits(k)) for k in seed_keys]
+
+            for seed_idx, seed in enumerate(seeds, start=1):
+                print(f"--- Starting run {seed_idx}/{num_seeds} ---")
+                run_config = copy.deepcopy(CONFIG)
+                run_config["seed"] = seed
+                run_name = run_name_base
+                if num_seeds > 1:
+                    run_name = f"{run_name}_{seed_idx}"
+                run_config["wandb_run_name"] = run_name
+
+                wandb.init(
+                    project=run_config.get("wandb_project", "cheetah_tdmpc2"),
+                    config=run_config,
+                    name=run_config.get("wandb_run_name"),
+                    reinit=True,
+                )
+                main(run_config)
+                wandb.finish()
 
         print("All experiments complete.")
