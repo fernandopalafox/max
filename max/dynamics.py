@@ -224,12 +224,30 @@ def _init_lora_xs_dynamics(
     adapt_layers: set = set(dyn_cfg["adapt_layers"])
 
     latent_dim: int = config["encoder"]["encoder_features"][-1]
+    dim_action: int = config["dim_action"]
 
     assert features[-1] == latent_dim, (
         f"dynamics_features[-1]={features[-1]} must equal latent_dim={latent_dim}"
     )
 
-    pretrained_dyn = pretrained["params"]
+    if pretrained is not None:
+        pretrained_dyn = pretrained["params"]
+    else:
+        class _DynamicsNet(nn.Module):
+            @nn.compact
+            def __call__(self, x):
+                for feat in features[:-1]:
+                    x = nn.Dense(feat)(x)
+                    x = nn.LayerNorm()(x)
+                    x = mish(x)
+                x = nn.Dense(features[-1])(x)
+                x = nn.LayerNorm()(x)
+                return simnorm(x, simnorm_dim_v, simnorm_tau)
+
+        key, k_init = jax.random.split(key)
+        pretrained_dyn = _DynamicsNet().init(
+            k_init, jnp.ones((latent_dim + dim_action,))
+        )["params"]
 
     frozen_layers = []
     R_init = {}
