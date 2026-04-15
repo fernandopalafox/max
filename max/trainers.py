@@ -72,6 +72,10 @@ def init_trainer(
         return init_tdmpc2_trainer(
             key, config, encoder, dynamics, critic, policy, reward, init_params
         )
+    if trainer_type == "meta_tdmpc2":
+        return init_meta_tdmpc2_trainer(
+            key, config, encoder, dynamics, critic, policy, reward, init_params
+        )
     if trainer_type == "ogd":
         return init_ogd_trainer(key, config, encoder, dynamics, init_params)
     if trainer_type == "ekf_efficient":
@@ -380,6 +384,306 @@ def init_tdmpc2_trainer(
 
         # ---- Update running Q scale (IQR from t=0 column) ----
         # tau = 1 - ema_decay: official uses tau=0.01 for both target critic and RunningScale
+        scale_tau = 1.0 - ema_decay
+        iqr = jnp.maximum(jnp.percentile(avg_qs[:, 0], 75) - jnp.percentile(avg_qs[:, 0], 25), 1.0)
+        new_q_scale = (1.0 - scale_tau) * q_scale + scale_tau * iqr
+        parameters = parameters | {"normalizer": parameters["normalizer"] | {"q_scale": new_q_scale}}
+
+        new_train_state = train_state.replace(
+            opt_state={"world_model": new_wm_opt, "policy": new_pi_opt},
+        )
+
+        all_metrics = {**wm_metrics, **pi_metrics, "losses/world_model": wm_loss_total}
+        return new_train_state, parameters, all_metrics
+
+    def train_fn(train_state, batch, parameters, key):
+        return train_step(train_state, batch, parameters, key)
+
+    trainer = Trainer(train_fn=train_fn)
+    return trainer, train_state
+
+
+# ---------------------------------------------------------------------------
+# MetaTDMPC2 trainer
+# ---------------------------------------------------------------------------
+
+def init_meta_tdmpc2_trainer(
+    key: jax.Array,
+    config: dict,
+    encoder: Encoder,
+    dynamics,
+    critic: Critic,
+    policy: Policy,
+    reward,
+    init_params: dict,
+) -> tuple[Trainer, TrainState]:
+    """
+    First-order MAML variant of TDMPC2 for meta-learning an adaptable dynamics
+    adapter initialization.
+
+    Per meta-batch trajectory, a single naive-GD step adapts the dynamics
+    adapter ψ on the first transition (s0, a0, s1), then the regular TDMPC2
+    losses (consistency + reward + Q) are computed on the remaining H-step
+    meta-test sequence using the per-trajectory adapted adapter ψ'. Gradients
+    flow through the inner GD step, so ψ is trained to be adaptable.
+
+    The dynamics must be an adapter variant (dense_last_layer, dense_lora_xs,
+    dense_tiny_lora); only params["mean"]["dynamics"] (= ψ) is inner-adapted.
+    Requires sampler.horizon = trainer.horizon + 1.
+
+    config["trainer"]: same fields as tdmpc2 plus:
+        meta_lr_inner:  float, inner-loop naive GD step size α for ψ adaptation
+    """
+    tp = config["trainer"]
+    lr: float = tp["lr"]
+    encoder_lr: float = tp["encoder_lr"]
+    policy_lr: float = tp["policy_lr"]
+    grad_clip_norm: float = tp["grad_clip_norm"]
+    H: int = tp["horizon"]
+    discount_factor: float = tp["discount_factor"]
+    temporal_decay: float = tp["temporal_decay"]
+    ema_decay: float = tp["ema_decay"]
+    consistency_coef: float = tp["consistency_coef"]
+    reward_coef: float = tp["reward_coef"]
+    value_coef: float = tp["value_coef"]
+    entropy_coef: float = tp["entropy_coef"]
+    meta_lr_inner: float = tp["meta_lr_inner"]
+
+    dim_action: int = config["dim_action"]
+
+    critic_cfg = config["critic"]
+    num_bins: int = critic_cfg["num_bins"]
+    vmin: float = critic_cfg["vmin"]
+    vmax: float = critic_cfg["vmax"]
+    num_ensemble: int = critic_cfg["num_ensemble"]
+
+    reward_cfg = config["reward"]
+    rew_num_bins: int = reward_cfg["num_bins"]
+    rew_vmin: float = reward_cfg["vmin"]
+    rew_vmax: float = reward_cfg["vmax"]
+
+    def _make_labels(params: dict) -> dict:
+        mean_labels = {
+            k: jax.tree_util.tree_map(lambda _: k, v)
+            for k, v in params["mean"].items()
+        }
+        return {
+            "mean": mean_labels,
+            "normalizer": jax.tree_util.tree_map(lambda _: "normalizer", params["normalizer"]),
+        }
+
+    partition_optimizers = {
+        "encoder":    optax.chain(optax.clip_by_global_norm(grad_clip_norm), optax.adam(encoder_lr)),
+        "dynamics":   optax.chain(optax.clip_by_global_norm(grad_clip_norm), optax.adam(lr)),
+        "reward":     optax.chain(optax.clip_by_global_norm(grad_clip_norm), optax.adam(lr)),
+        "critic":     optax.chain(optax.clip_by_global_norm(grad_clip_norm), optax.adam(lr)),
+        "ema_critic": optax.set_to_zero(),
+        "policy":     optax.set_to_zero(),
+        "normalizer": optax.set_to_zero(),
+    }
+    param_labels = _make_labels(init_params)
+    wm_optimizer = optax.multi_transform(partition_optimizers, param_labels)
+
+    pi_optimizer = optax.chain(
+        optax.clip_by_global_norm(grad_clip_norm),
+        optax.adam(policy_lr, eps=1e-5),
+    )
+
+    wm_opt_state = wm_optimizer.init(init_params)
+    pi_opt_state = pi_optimizer.init(init_params["mean"]["policy"])
+
+    train_state = TrainState(
+        opt_state={"world_model": wm_opt_state, "policy": pi_opt_state},
+    )
+
+    encode_single = encoder.encode
+    encode_batch = jax.vmap(encode_single, in_axes=(None, 0))
+
+    # Dynamics forward where each trajectory uses its own adapted adapter ψ'_i
+    infer_batch_adapted = jax.vmap(dynamics.predict, in_axes=(0, 0, 0))
+
+    rew_logits_batch = jax.vmap(reward.logits, in_axes=(None, 0, 0))
+
+    sample_batch = jax.vmap(policy.sample, in_axes=(None, 0, 0))
+
+    two_hot_batch_c = jax.vmap(lambda x: two_hot(x, vmin, vmax, num_bins))
+    two_hot_batch_r = jax.vmap(lambda x: two_hot(x, rew_vmin, rew_vmax, rew_num_bins))
+
+    # Per-trajectory inner adaptation: one naive-GD step on ψ using (s0, a0, s1).
+    def adapt_one(psi, enc_params, s0, a0, s1):
+        z0 = encode_single(enc_params, s0)
+        z1_tgt = jax.lax.stop_gradient(encode_single(enc_params, s1))
+        def l(p):
+            return jnp.mean((dynamics.predict(p, z0, a0) - z1_tgt) ** 2)
+        g = jax.grad(l)(psi)
+        return jax.tree_util.tree_map(lambda p, gi: p - meta_lr_inner * gi, psi, g)
+
+    adapt_batch = jax.vmap(adapt_one, in_axes=(None, None, 0, 0, 0))
+
+    def wm_loss_fn(params: dict, batch: dict, key: jax.Array):
+        """
+        Meta world-model loss. Expects batch to carry one extra transition
+        (sampler.horizon = H + 1): obs shape (B, H+2, dim_s), actions (B, H+1, dim_a).
+        The first transition is used for inner adaptation; the remaining H steps
+        form the meta-test sequence.
+        """
+        obs_full = batch["states"]        # (B, H+2, dim_s)
+        actions_full = batch["actions"]   # (B, H+1, dim_a)
+        rewards_full = batch["rewards"]   # (B, H+1)
+
+        # ---- Inner adaptation: one GD step per trajectory on ψ ----
+        psi_adapted = adapt_batch(
+            params["mean"]["dynamics"],
+            params["mean"]["encoder"],
+            obs_full[:, 0], actions_full[:, 0], obs_full[:, 1],
+        )  # pytree with leading dim B
+
+        # ---- Meta-test views: drop the adaptation transition ----
+        obs = obs_full[:, 1:]             # (B, H+1, dim_s)
+        actions = actions_full[:, 1:]     # (B, H, dim_a)
+        rewards = rewards_full[:, 1:]     # (B, H)
+        B = obs.shape[0]
+
+        # ---- TD targets (stop_gradient) ----
+        key, pi_key, q_key = jax.random.split(key, 3)
+
+        obs_next_flat = obs[:, 1:].reshape(B * H, -1)
+        z_next_flat_sg = jax.lax.stop_gradient(
+            encode_batch(params["mean"]["encoder"], obs_next_flat)
+        )
+
+        pi_keys_flat = jax.random.split(pi_key, B * H)
+        next_actions_flat, _ = sample_batch(
+            params["mean"]["policy"], z_next_flat_sg, pi_keys_flat
+        )
+
+        q_keys_flat = jax.random.split(q_key, B * H)
+        q_sampled_flat = jax.vmap(
+            critic.subsample, in_axes=(None, 0, 0, 0)
+        )(params["mean"]["ema_critic"], z_next_flat_sg, next_actions_flat, q_keys_flat)
+        q_min_flat = jnp.min(q_sampled_flat, axis=-1)
+        q_min = q_min_flat.reshape(B, H)
+
+        td_targets = jax.lax.stop_gradient(rewards + discount_factor * q_min)
+
+        # ---- Latent rollout using adapted ψ'_i per trajectory ----
+        z0 = encode_batch(params["mean"]["encoder"], obs[:, 0])
+
+        consistency_loss = jnp.zeros(())
+        reward_loss = jnp.zeros(())
+        q_loss = jnp.zeros(())
+
+        zs = [z0]
+        z = z0
+
+        for t in range(H):
+            w = temporal_decay ** t
+            a_t = actions[:, t]
+
+            rew_logits = rew_logits_batch(params["mean"]["reward"], z, a_t)
+            rew_targets = two_hot_batch_r(symlog(rewards[:, t]))
+            reward_loss = reward_loss + w * jnp.mean(soft_ce(rew_logits, rew_targets))
+
+            q_logits_all = critic.logits(params["mean"]["critic"], z, a_t)
+            td_target_th = two_hot_batch_c(symlog(td_targets[:, t]))
+            q_loss_all = jax.vmap(soft_ce, in_axes=(0, None))(q_logits_all, td_target_th)
+            q_loss = q_loss + w * jnp.sum(jnp.mean(q_loss_all, axis=-1))
+
+            z_pred = infer_batch_adapted(psi_adapted, z, a_t)
+            z_real = jax.lax.stop_gradient(
+                encode_batch(params["mean"]["encoder"], obs[:, t + 1])
+            )
+
+            consistency_loss = consistency_loss + w * jnp.mean((z_pred - z_real) ** 2)
+
+            zs.append(z_pred)
+            z = z_pred
+
+        zs_stacked = jnp.stack(zs, axis=1)
+
+        consistency_loss = consistency_loss / H
+        reward_loss = reward_loss / H
+        q_loss = q_loss / (H * num_ensemble)
+
+        total_loss = (
+            consistency_coef * consistency_loss
+            + reward_coef * reward_loss
+            + value_coef * q_loss
+        )
+        metrics = {
+            "losses/consistency": consistency_loss,
+            "losses/reward":      reward_loss,
+            "losses/value":       q_loss,
+        }
+        return total_loss, (metrics, zs_stacked)
+
+    def policy_loss_fn(
+        policy_params: dict,
+        critic_params_sg: dict,
+        zs_sg: jnp.ndarray,
+        key: jax.Array,
+        q_scale: jnp.ndarray,
+    ):
+        B = zs_sg.shape[0]
+        policy_loss = jnp.zeros(())
+        avg_qs = []
+
+        for t in range(H + 1):
+            z_t = zs_sg[:, t, :]
+            key, sample_key, subkey = jax.random.split(key, 3)
+            sample_keys = jax.random.split(sample_key, B)
+
+            actions, log_probs = sample_batch(policy_params, z_t, sample_keys)
+
+            avg_q = critic.value(critic_params_sg, z_t, actions, subkey)
+            avg_qs.append(avg_q)
+
+            entropy = -log_probs
+            scaled_entropy = entropy * dim_action
+            step_objective = (avg_q + entropy_coef * scaled_entropy) / q_scale
+            policy_loss = policy_loss - (temporal_decay ** t) * jnp.mean(step_objective)
+
+        avg_qs_stacked = jnp.stack(avg_qs, axis=1)
+        metrics = {"losses/policy": policy_loss, "losses/entropy": jnp.mean(-log_probs)}
+        return policy_loss, (metrics, avg_qs_stacked)
+
+    @jax.jit
+    def train_step(train_state, batch, parameters, key):
+        key, wm_key, pi_key = jax.random.split(key, 3)
+
+        (wm_loss_total, (wm_metrics, zs)), wm_grads = jax.value_and_grad(
+            wm_loss_fn, has_aux=True
+        )(parameters, batch, wm_key)
+
+        wm_updates, new_wm_opt = wm_optimizer.update(
+            wm_grads, train_state.opt_state["world_model"], parameters
+        )
+        parameters = optax.apply_updates(parameters, wm_updates)
+
+        zs_sg = jax.lax.stop_gradient(zs)
+        critic_params_sg = jax.lax.stop_gradient(parameters["mean"]["critic"])
+
+        q_scale = parameters["normalizer"]["q_scale"]
+
+        (_, (pi_metrics, avg_qs)), pi_grads = jax.value_and_grad(
+            policy_loss_fn, argnums=0, has_aux=True
+        )(parameters["mean"]["policy"], critic_params_sg, zs_sg, pi_key, q_scale)
+
+        pi_updates, new_pi_opt = pi_optimizer.update(
+            pi_grads, train_state.opt_state["policy"]
+        )
+        parameters = parameters | {
+            "mean": parameters["mean"] | {
+                "policy": optax.apply_updates(parameters["mean"]["policy"], pi_updates)
+            }
+        }
+
+        parameters = parameters | {
+            "mean": parameters["mean"] | {
+                "ema_critic": ema_update(parameters["mean"]["ema_critic"], parameters["mean"]["critic"], ema_decay)
+            }
+        }
+
         scale_tau = 1.0 - ema_decay
         iqr = jnp.maximum(jnp.percentile(avg_qs[:, 0], 75) - jnp.percentile(avg_qs[:, 0], 25), 1.0)
         new_q_scale = (1.0 - scale_tau) * q_scale + scale_tau * iqr
