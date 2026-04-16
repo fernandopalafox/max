@@ -190,7 +190,8 @@ def main(config):
 
         # ---- Log mean train metrics for this chunk ----
         mean_metrics = {k: float(jnp.mean(v)) for k, v in chunk_out.train_metrics.items()}
-        wandb.log(mean_metrics, step=step)
+        sps = chunk_size / dt
+        wandb.log({**mean_metrics, "train/steps_per_second": sps}, step=step)
 
         # ---- Log episode stats from buffer ----
         curr_idx = int(rollout_state.buffer_idx)
@@ -208,7 +209,6 @@ def main(config):
             )
 
         # ---- Evaluation ----
-        sps = chunk_size / dt
         if chunk_idx % eval_every == 0:
             t_eval = time.time()
             eval_results = evaluator.evaluate(rollout_state.parameters)
