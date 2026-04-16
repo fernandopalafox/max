@@ -46,11 +46,12 @@
       "dynamics_features": [512, 512, 128, 64],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
-      "svd_rank": 48,
+      "rank": 48,
       "r_init_std": 1e-5,
       "adapt_layers": [0, 1, 2, 3],
       "frozen_backbone": false,
-      "frozen_adapter": false
+      "frozen_adapter": false,
+      "freeze_subspace": false
     },
 
     "critic": {

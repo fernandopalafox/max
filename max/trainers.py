@@ -512,23 +512,25 @@ def init_meta_tdmpc2_trainer(
         actions_full = batch["actions"]   # (B, H+1, dim_a)
         rewards_full = batch["rewards"]   # (B, H+1)
 
-        # ---- Inner adaptation: one GD step on adapter params only ----
-        # Only params["mean"]["dynamics"]["adapter"] is inner-adapted;
-        # backbone (if any) is held fixed during the inner step.
+        # ---- Inner adaptation: one GD step on R params only ----
+        # P and Q (subspace) are held fixed in the inner loop; only R matrices are adapted.
         # Second-order gradients flow through this for full MAML.
         enc_params_sg = jax.lax.stop_gradient(params["mean"]["encoder"])
         dyn_params = params["mean"]["dynamics"]
-        def inner_loss(adapter):
-            full_dyn = dyn_params | {"adapter": adapter}
+        adapter = dyn_params["adapter"]
+        r_params = {k: v for k, v in adapter.items() if k.startswith("R_")}
+
+        def inner_loss(r):
+            full_dyn = dyn_params | {"adapter": adapter | r}
             z0 = encode_batch(enc_params_sg, obs_full[:, 0])
             z1_tgt = jax.lax.stop_gradient(encode_batch(enc_params_sg, obs_full[:, 1]))
             return jnp.mean((infer_batch(full_dyn, z0, actions_full[:, 0]) - z1_tgt) ** 2)
 
-        adapter_grad = jax.grad(inner_loss)(dyn_params["adapter"])
-        adapter_adapted = jax.tree_util.tree_map(
-            lambda p, g: p - meta_lr_inner * g, dyn_params["adapter"], adapter_grad
+        r_grad = jax.grad(inner_loss)(r_params)
+        r_adapted = jax.tree_util.tree_map(
+            lambda p, g: p - meta_lr_inner * g, r_params, r_grad
         )
-        psi_adapted = dyn_params | {"adapter": adapter_adapted}
+        psi_adapted = dyn_params | {"adapter": adapter | r_adapted}
 
         # ---- Meta-test views ----
         obs = obs_full[:, 1:]
@@ -877,31 +879,31 @@ def init_fomaml_tdmpc2_trainer(
     def train_step(train_state, batch, parameters, key):
         key, wm_key, pi_key = jax.random.split(key, 3)
 
-        # Inner adaptation: one gradient step on adapter params only.
-        # Only parameters["mean"]["dynamics"]["adapter"] is inner-adapted;
-        # backbone (if any) is held fixed during the inner step.
+        # Inner adaptation: one GD step on R params only.
+        # P and Q (subspace) are held fixed in the inner loop; only R matrices are adapted.
         enc_params_sg = jax.lax.stop_gradient(parameters["mean"]["encoder"])
         dyn_params = parameters["mean"]["dynamics"]
+        adapter = dyn_params["adapter"]
+        r_params = {k: v for k, v in adapter.items() if k.startswith("R_")}
 
-        def inner_loss(adapter):
-            full_dyn = dyn_params | {"adapter": adapter}
+        def inner_loss(r):
+            full_dyn = dyn_params | {"adapter": adapter | r}
             z0 = encode_batch(enc_params_sg, batch["states"][:, 0])
             z1_tgt = jax.lax.stop_gradient(encode_batch(enc_params_sg, batch["states"][:, 1]))
             z_pred = infer_batch(full_dyn, z0, batch["actions"][:, 0])
             return jnp.mean((z_pred - z1_tgt) ** 2)
 
-        inner_grad = jax.grad(inner_loss)(dyn_params["adapter"])
-        adapter_adapted = jax.tree_util.tree_map(
-            lambda p, g: p - meta_lr_inner * g, dyn_params["adapter"], inner_grad
+        inner_grad = jax.grad(inner_loss)(r_params)
+        r_adapted = jax.tree_util.tree_map(
+            lambda p, g: p - meta_lr_inner * g, r_params, inner_grad
         )
 
-        # Straight-through: forward uses adapted values, backward routes to original adapter.
-        # adapter_fomaml == adapter_adapted numerically; d(adapter_fomaml)/d(adapter) = I.
-        adapter_fomaml = jax.tree_util.tree_map(
-            lambda pa, p: jax.lax.stop_gradient(pa) + (p - jax.lax.stop_gradient(p)),
-            adapter_adapted, dyn_params["adapter"],
+        # Straight-through: forward uses adapted R values, backward routes to original R.
+        r_fomaml = jax.tree_util.tree_map(
+            lambda ra, p: jax.lax.stop_gradient(ra) + (p - jax.lax.stop_gradient(p)),
+            r_adapted, r_params,
         )
-        psi_fomaml = dyn_params | {"adapter": adapter_fomaml}
+        psi_fomaml = dyn_params | {"adapter": adapter | r_fomaml}
 
         # Substitute ψ_fomaml into params for the outer loss — same structure as vanilla.
         params_fomaml = parameters | {

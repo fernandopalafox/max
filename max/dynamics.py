@@ -196,40 +196,48 @@ def _init_lora_xs_dynamics(
     pretrained: dict = None,
 ) -> tuple[Dynamics, dict]:
     """
-    LoRA-XS dynamics with independent backbone / adapter freeze control.
+    LoRA-XS dynamics with learnable projection subspace (P, Q) and freeze control.
 
-    Effective weight: W_eff = W + U @ diag(Sigma) @ R @ V^T.
-    U, Sigma, V are computed once at init from pretrained weights and stay fixed.
+    Effective weight: W_eff = W + P @ R @ Q^T
+    (code convention: x @ W, so W is (d_in, d_out), P is (d_in, rank), Q is (d_out, rank))
+
+    P and Q are trainable parameters that co-adapt with W during meta-learning,
+    keeping the adapter subspace aligned with the backbone. Only R is adapted
+    in the inner loop and at deployment time.
+
+    All adapter parameters (P, Q, R) are stored flat under the "adapter" key.
 
     config["dynamics"]:
         type:              str, "dense_lora_xs"
-        dynamics_features: list[int], must match pretrained architecture
+        dynamics_features: list[int]
         simnorm_dim_v, simnorm_tau: same as dense variant
-        svd_rank:          int, LoRA rank r
-        r_init_std:        float, std for R init
-        adapt_layers:      list[int], indices of layers to adapt (rest frozen)
-        frozen_backbone:   bool
-            true  — backbone (W, b, ln) baked into closure; not in returned params
-            false — backbone params returned under "backbone" key; full forward pass
-        frozen_adapter:    bool
-            true  — no R matrices returned; LoRA correction is zeroed out
-            false — R matrices returned under "adapter" key
+        rank:              int, bottleneck rank r
+        r_init_std:        float, std for R init (P and Q use 0.01)
+        adapt_layers:      list[int], indices of layers to adapt
+        frozen_backbone:   bool — true: W/b/ln in closure; false: in params["backbone"]
+        frozen_adapter:    bool — must be false; raises if true
+        freeze_subspace:   bool
+            false (pretraining): P, Q in params["adapter"] alongside R
+            true  (finetuning):  P, Q baked into closure from pretrained["adapter"]
 
-    Returned params structure:
-        frozen_backbone=true,  frozen_adapter=false -> {"adapter": {"R_0": ..., ...}}
-        frozen_backbone=false, frozen_adapter=false -> {"backbone": {...}, "adapter": {...}}
-        frozen_backbone=false, frozen_adapter=true  -> {"backbone": {...}}
-        frozen_backbone=true,  frozen_adapter=true  -> {} (degenerate)
+    Returned params["mean"]["dynamics"]:
+        frozen_backbone=false, freeze_subspace=false -> {"backbone": {...}, "adapter": {P_i, Q_i, R_i, ...}}
+        frozen_backbone=true,  freeze_subspace=true  -> {"adapter": {R_i, ...}}
+        frozen_backbone=true,  freeze_subspace=false -> {"adapter": {P_i, Q_i, R_i, ...}}
     """
     dyn_cfg = config["dynamics"]
     features = dyn_cfg["dynamics_features"]
     simnorm_dim_v: int = dyn_cfg["simnorm_dim_v"]
     simnorm_tau: float = dyn_cfg["simnorm_tau"]
-    svd_rank: int = dyn_cfg["svd_rank"]
+    rank: int = dyn_cfg["rank"]
     r_init_std: float = dyn_cfg["r_init_std"]
     adapt_layers: set = set(dyn_cfg["adapt_layers"])
     frozen_backbone: bool = dyn_cfg["frozen_backbone"]
     frozen_adapter: bool = dyn_cfg["frozen_adapter"]
+    freeze_subspace: bool = dyn_cfg["freeze_subspace"]
+
+    if frozen_adapter:
+        raise ValueError("frozen_adapter=true is invalid for dense_lora_xs — nothing to adapt.")
 
     latent_dim: int = config["encoder"]["encoder_features"][-1]
     dim_action: int = config["dim_action"]
@@ -238,8 +246,17 @@ def _init_lora_xs_dynamics(
         f"dynamics_features[-1]={features[-1]} must equal latent_dim={latent_dim}"
     )
 
-    if pretrained is not None:
+    # Build initial backbone weights (random if no pretrained, else from dense Flax params).
+    if pretrained is not None and "params" in pretrained:
+        # Loading from a dense Flax checkpoint.
         pretrained_dyn = pretrained["params"]
+        def _get_layer(i):
+            return (
+                pretrained_dyn[f"Dense_{i}"]["kernel"],
+                pretrained_dyn[f"Dense_{i}"]["bias"],
+                pretrained_dyn[f"LayerNorm_{i}"]["scale"],
+                pretrained_dyn[f"LayerNorm_{i}"]["bias"],
+            )
     else:
         class _DynamicsNet(nn.Module):
             @nn.compact
@@ -253,21 +270,24 @@ def _init_lora_xs_dynamics(
                 return simnorm(x, simnorm_dim_v, simnorm_tau)
 
         key, k_init = jax.random.split(key)
-        pretrained_dyn = _DynamicsNet().init(
-            k_init, jnp.ones((latent_dim + dim_action,))
-        )["params"]
+        init_p = _DynamicsNet().init(k_init, jnp.ones((latent_dim + dim_action,)))["params"]
+        def _get_layer(i):
+            return (
+                init_p[f"Dense_{i}"]["kernel"],
+                init_p[f"Dense_{i}"]["bias"],
+                init_p[f"LayerNorm_{i}"]["scale"],
+                init_p[f"LayerNorm_{i}"]["bias"],
+            )
 
-    # frozen_layers stores SVD factors (always in closure) and backbone weights
-    # (in closure only when frozen_backbone=True).
     frozen_layers = []
-    backbone_params = {}  # populated when frozen_backbone=False
-    adapter_params = {}   # populated when frozen_adapter=False
+    backbone_params = {}
+    adapter_params = {}
+
+    # Compute input dims per layer for P/Q shapes.
+    in_dims = [latent_dim + dim_action] + list(features[:-1])
 
     for i in range(len(features)):
-        W = pretrained_dyn[f"Dense_{i}"]["kernel"]
-        b = pretrained_dyn[f"Dense_{i}"]["bias"]
-        ln_scale = pretrained_dyn[f"LayerNorm_{i}"]["scale"]
-        ln_bias = pretrained_dyn[f"LayerNorm_{i}"]["bias"]
+        W, b, ln_scale, ln_bias = _get_layer(i)
 
         layer = {"adapted": i in adapt_layers}
 
@@ -279,15 +299,20 @@ def _init_lora_xs_dynamics(
             }
 
         if i in adapt_layers:
-            U_full, S_full, Vh_full = jnp.linalg.svd(W, full_matrices=False)
-            layer.update({
-                "U": U_full[:, :svd_rank],
-                "Sigma": S_full[:svd_rank],
-                "V": Vh_full[:svd_rank, :].T,
-            })
-            if not frozen_adapter:
-                key, k = jax.random.split(key)
-                adapter_params[f"R_{i}"] = jax.random.normal(k, (svd_rank, svd_rank)) * r_init_std
+            d_in, d_out = in_dims[i], features[i]
+
+            if freeze_subspace:
+                # P and Q come from a pretrained LoRA-XS checkpoint, baked into closure.
+                P = pretrained["adapter"][f"P_{i}"]
+                Q = pretrained["adapter"][f"Q_{i}"]
+                layer.update({"P": P, "Q": Q})
+            else:
+                key, kp, kq = jax.random.split(key, 3)
+                adapter_params[f"P_{i}"] = jax.random.normal(kp, (d_in, rank)) * 0.01
+                adapter_params[f"Q_{i}"] = jax.random.normal(kq, (d_out, rank)) * 0.01
+
+            key, kr = jax.random.split(key)
+            adapter_params[f"R_{i}"] = jax.random.normal(kr, (rank, rank)) * r_init_std
 
         frozen_layers.append(layer)
 
@@ -307,9 +332,14 @@ def _init_lora_xs_dynamics(
                 ln_scale = bl["ln_scale"]
                 ln_bias = bl["ln_bias"]
 
-            if not frozen_adapter and layer["adapted"]:
+            if layer["adapted"]:
+                if freeze_subspace:
+                    P, Q = layer["P"], layer["Q"]
+                else:
+                    P = params["adapter"][f"P_{i}"]
+                    Q = params["adapter"][f"Q_{i}"]
                 R = params["adapter"][f"R_{i}"]
-                W_eff = W + layer["U"] @ (layer["Sigma"][:, None] * R) @ layer["V"].T
+                W_eff = W + P @ R @ Q.T
                 x = x @ W_eff + b
             else:
                 x = x @ W + b
@@ -324,8 +354,7 @@ def _init_lora_xs_dynamics(
     dyn_params = {}
     if not frozen_backbone:
         dyn_params["backbone"] = backbone_params
-    if not frozen_adapter:
-        dyn_params["adapter"] = adapter_params
+    dyn_params["adapter"] = adapter_params
 
     return Dynamics(predict=predict), dyn_params
 
