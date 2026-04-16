@@ -3,7 +3,7 @@
     "wandb_project": "cheetah_ft_latent",
     "seed": 44,
     "save_dir": "./data/models/cheetah_fomaml",
-    "pretrained_path": "./data/models/cheetah_tdmpc2/20260415_231700/final.pkl",
+
     "checkpoint_enabled": true,
     "checkpoint_freq": 100000,
     "num_agents": 1,
@@ -60,7 +60,7 @@
         2,
         3
       ],
-      "frozen_backbone": true,
+      "frozen_backbone": false,
       "frozen_adapter": false
     },
     "critic": {
