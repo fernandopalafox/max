@@ -196,14 +196,10 @@ def _init_lora_xs_dynamics(
     pretrained: dict = None,
 ) -> tuple[Dynamics, dict]:
     """
-    LoRA-XS dynamics: frozen pretrained MLP with trainable low-rank R matrices.
+    LoRA-XS dynamics with independent backbone / adapter freeze control.
 
-    pretrained should be the dense dynamics Flax params (e.g. from a prior dense run).
-    The dense weights are baked into the forward pass via SVD decomposition.
-    Only the R matrices (one r×r matrix per layer) are trainable.
     Effective weight: W_eff = W + U @ diag(Sigma) @ R @ V^T.
-
-    Param count: num_layers * r^2 (e.g. 3 layers, r=16 → 768 params).
+    U, Sigma, V are computed once at init from pretrained weights and stay fixed.
 
     config["dynamics"]:
         type:              str, "dense_lora_xs"
@@ -212,8 +208,18 @@ def _init_lora_xs_dynamics(
         svd_rank:          int, LoRA rank r
         r_init_std:        float, std for R init
         adapt_layers:      list[int], indices of layers to adapt (rest frozen)
+        frozen_backbone:   bool
+            true  — backbone (W, b, ln) baked into closure; not in returned params
+            false — backbone params returned under "backbone" key; full forward pass
+        frozen_adapter:    bool
+            true  — no R matrices returned; LoRA correction is zeroed out
+            false — R matrices returned under "adapter" key
 
-    Returns dyn_params = {"R_0": ..., "R_1": ..., ...} for adapted layers only.
+    Returned params structure:
+        frozen_backbone=true,  frozen_adapter=false -> {"adapter": {"R_0": ..., ...}}
+        frozen_backbone=false, frozen_adapter=false -> {"backbone": {...}, "adapter": {...}}
+        frozen_backbone=false, frozen_adapter=true  -> {"backbone": {...}}
+        frozen_backbone=true,  frozen_adapter=true  -> {} (degenerate)
     """
     dyn_cfg = config["dynamics"]
     features = dyn_cfg["dynamics_features"]
@@ -222,6 +228,8 @@ def _init_lora_xs_dynamics(
     svd_rank: int = dyn_cfg["svd_rank"]
     r_init_std: float = dyn_cfg["r_init_std"]
     adapt_layers: set = set(dyn_cfg["adapt_layers"])
+    frozen_backbone: bool = dyn_cfg["frozen_backbone"]
+    frozen_adapter: bool = dyn_cfg["frozen_adapter"]
 
     latent_dim: int = config["encoder"]["encoder_features"][-1]
     dim_action: int = config["dim_action"]
@@ -249,15 +257,26 @@ def _init_lora_xs_dynamics(
             k_init, jnp.ones((latent_dim + dim_action,))
         )["params"]
 
+    # frozen_layers stores SVD factors (always in closure) and backbone weights
+    # (in closure only when frozen_backbone=True).
     frozen_layers = []
-    R_init = {}
+    backbone_params = {}  # populated when frozen_backbone=False
+    adapter_params = {}   # populated when frozen_adapter=False
+
     for i in range(len(features)):
         W = pretrained_dyn[f"Dense_{i}"]["kernel"]
         b = pretrained_dyn[f"Dense_{i}"]["bias"]
         ln_scale = pretrained_dyn[f"LayerNorm_{i}"]["scale"]
         ln_bias = pretrained_dyn[f"LayerNorm_{i}"]["bias"]
 
-        layer = {"W": W, "b": b, "ln_scale": ln_scale, "ln_bias": ln_bias, "adapted": i in adapt_layers}
+        layer = {"adapted": i in adapt_layers}
+
+        if frozen_backbone:
+            layer.update({"W": W, "b": b, "ln_scale": ln_scale, "ln_bias": ln_bias})
+        else:
+            backbone_params[f"layer_{i}"] = {
+                "W": W, "b": b, "ln_scale": ln_scale, "ln_bias": ln_bias
+            }
 
         if i in adapt_layers:
             U_full, S_full, Vh_full = jnp.linalg.svd(W, full_matrices=False)
@@ -266,29 +285,49 @@ def _init_lora_xs_dynamics(
                 "Sigma": S_full[:svd_rank],
                 "V": Vh_full[:svd_rank, :].T,
             })
-            key, k = jax.random.split(key)
-            R_init[f"R_{i}"] = jax.random.normal(k, (svd_rank, svd_rank)) * r_init_std
+            if not frozen_adapter:
+                key, k = jax.random.split(key)
+                adapter_params[f"R_{i}"] = jax.random.normal(k, (svd_rank, svd_rank)) * r_init_std
 
         frozen_layers.append(layer)
 
     n_layers = len(features)
 
-    def _forward(R_params: Any, x: jnp.ndarray) -> jnp.ndarray:
+    def _forward(params: Any, x: jnp.ndarray) -> jnp.ndarray:
         for i, layer in enumerate(frozen_layers):
-            if layer["adapted"]:
-                R = R_params[f"R_{i}"]
-                W_eff = layer["W"] + layer["U"] @ (layer["Sigma"][:, None] * R) @ layer["V"].T
-                x = x @ W_eff + layer["b"]
+            if frozen_backbone:
+                W = layer["W"]
+                b = layer["b"]
+                ln_scale = layer["ln_scale"]
+                ln_bias = layer["ln_bias"]
             else:
-                x = x @ layer["W"] + layer["b"]
-            x = layer["ln_scale"] * jax.nn.standardize(x, axis=-1, epsilon=1e-6) + layer["ln_bias"]
+                bl = params["backbone"][f"layer_{i}"]
+                W = bl["W"]
+                b = bl["b"]
+                ln_scale = bl["ln_scale"]
+                ln_bias = bl["ln_bias"]
+
+            if not frozen_adapter and layer["adapted"]:
+                R = params["adapter"][f"R_{i}"]
+                W_eff = W + layer["U"] @ (layer["Sigma"][:, None] * R) @ layer["V"].T
+                x = x @ W_eff + b
+            else:
+                x = x @ W + b
+
+            x = ln_scale * jax.nn.standardize(x, axis=-1, epsilon=1e-6) + ln_bias
             x = mish(x) if i < n_layers - 1 else simnorm(x, simnorm_dim_v, simnorm_tau)
         return x
 
     def predict(mean_params: Any, z: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
         return _forward(mean_params, jnp.concatenate([z, action], axis=-1))
 
-    return Dynamics(predict=predict), R_init
+    dyn_params = {}
+    if not frozen_backbone:
+        dyn_params["backbone"] = backbone_params
+    if not frozen_adapter:
+        dyn_params["adapter"] = adapter_params
+
+    return Dynamics(predict=predict), dyn_params
 
 
 def _init_tiny_lora_dynamics(

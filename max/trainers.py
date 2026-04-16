@@ -512,19 +512,23 @@ def init_meta_tdmpc2_trainer(
         actions_full = batch["actions"]   # (B, H+1, dim_a)
         rewards_full = batch["rewards"]   # (B, H+1)
 
-        # ---- Inner adaptation: one GD step over the full batch jointly ----
-        # ψ' has the same shape as ψ — shared across all trajectories.
+        # ---- Inner adaptation: one GD step on adapter params only ----
+        # Only params["mean"]["dynamics"]["adapter"] is inner-adapted;
+        # backbone (if any) is held fixed during the inner step.
         # Second-order gradients flow through this for full MAML.
         enc_params_sg = jax.lax.stop_gradient(params["mean"]["encoder"])
-        def inner_loss(p):
+        dyn_params = params["mean"]["dynamics"]
+        def inner_loss(adapter):
+            full_dyn = dyn_params | {"adapter": adapter}
             z0 = encode_batch(enc_params_sg, obs_full[:, 0])
             z1_tgt = jax.lax.stop_gradient(encode_batch(enc_params_sg, obs_full[:, 1]))
-            return jnp.mean((infer_batch(p, z0, actions_full[:, 0]) - z1_tgt) ** 2)
+            return jnp.mean((infer_batch(full_dyn, z0, actions_full[:, 0]) - z1_tgt) ** 2)
 
-        inner_grad = jax.grad(inner_loss)(params["mean"]["dynamics"])
-        psi_adapted = jax.tree_util.tree_map(
-            lambda p, g: p - meta_lr_inner * g, params["mean"]["dynamics"], inner_grad
+        adapter_grad = jax.grad(inner_loss)(dyn_params["adapter"])
+        adapter_adapted = jax.tree_util.tree_map(
+            lambda p, g: p - meta_lr_inner * g, dyn_params["adapter"], adapter_grad
         )
+        psi_adapted = dyn_params | {"adapter": adapter_adapted}
 
         # ---- Meta-test views ----
         obs = obs_full[:, 1:]
@@ -873,28 +877,31 @@ def init_fomaml_tdmpc2_trainer(
     def train_step(train_state, batch, parameters, key):
         key, wm_key, pi_key = jax.random.split(key, 3)
 
-        # Inner adaptation: one gradient step over the full batch of first transitions.
-        # Single shared ψ' (same shape as ψ) — no per-trajectory vmap needed.
+        # Inner adaptation: one gradient step on adapter params only.
+        # Only parameters["mean"]["dynamics"]["adapter"] is inner-adapted;
+        # backbone (if any) is held fixed during the inner step.
         enc_params_sg = jax.lax.stop_gradient(parameters["mean"]["encoder"])
-        psi = parameters["mean"]["dynamics"]
+        dyn_params = parameters["mean"]["dynamics"]
 
-        def inner_loss(p):
+        def inner_loss(adapter):
+            full_dyn = dyn_params | {"adapter": adapter}
             z0 = encode_batch(enc_params_sg, batch["states"][:, 0])
             z1_tgt = jax.lax.stop_gradient(encode_batch(enc_params_sg, batch["states"][:, 1]))
-            z_pred = infer_batch(p, z0, batch["actions"][:, 0])
+            z_pred = infer_batch(full_dyn, z0, batch["actions"][:, 0])
             return jnp.mean((z_pred - z1_tgt) ** 2)
 
-        inner_grad = jax.grad(inner_loss)(psi)
-        psi_adapted = jax.tree_util.tree_map(
-            lambda p, g: p - meta_lr_inner * g, psi, inner_grad
+        inner_grad = jax.grad(inner_loss)(dyn_params["adapter"])
+        adapter_adapted = jax.tree_util.tree_map(
+            lambda p, g: p - meta_lr_inner * g, dyn_params["adapter"], inner_grad
         )
 
-        # Straight-through: forward uses ψ' values, backward routes to ψ.
-        # psi_fomaml == psi_adapted numerically; d(psi_fomaml)/d(psi) = I.
-        psi_fomaml = jax.tree_util.tree_map(
+        # Straight-through: forward uses adapted values, backward routes to original adapter.
+        # adapter_fomaml == adapter_adapted numerically; d(adapter_fomaml)/d(adapter) = I.
+        adapter_fomaml = jax.tree_util.tree_map(
             lambda pa, p: jax.lax.stop_gradient(pa) + (p - jax.lax.stop_gradient(p)),
-            psi_adapted, psi,
+            adapter_adapted, dyn_params["adapter"],
         )
+        psi_fomaml = dyn_params | {"adapter": adapter_fomaml}
 
         # Substitute ψ_fomaml into params for the outer loss — same structure as vanilla.
         params_fomaml = parameters | {
