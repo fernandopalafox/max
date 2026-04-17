@@ -86,6 +86,8 @@ def init_trainer(
         return init_ekf_efficient_trainer(key, config, encoder, dynamics, init_params)
     if trainer_type == "ekf_batch":
         return init_ekf_batch_trainer(key, config, encoder, dynamics, init_params)
+    if trainer_type == "gd_lora_xs":
+        return init_gd_lora_xs_trainer(key, config, encoder, dynamics, init_params)
 
     raise ValueError(f"Unknown trainer: {trainer_type!r}")
 
@@ -1024,6 +1026,62 @@ def init_ogd_trainer(
 
     trainer = Trainer(train_fn=train_step)
     return trainer, train_state
+
+
+# ---------------------------------------------------------------------------
+# GD LoRA-XS adapter trainer
+# ---------------------------------------------------------------------------
+
+def init_gd_lora_xs_trainer(
+    key: jax.Array,
+    config: dict,
+    encoder: Encoder,
+    dynamics,
+    init_params: dict,
+) -> tuple[Trainer, TrainState]:
+    """
+    Online GD adapter-only trainer for LoRA-XS finetuning experiments.
+
+    Adapts only R_ params in dynamics["adapter"] via one plain GD step per
+    transition. Encoder is stop-gradiented. Everything else unchanged.
+    Compatible with the "latest" sampler (batch_size=1, horizon=1).
+
+    config["trainer"]:
+        meta_lr_inner: float, GD step size
+    """
+    meta_lr_inner: float = config["trainer"]["meta_lr_inner"]
+
+    encode_batch = jax.vmap(encoder.encode, in_axes=(None, 0))
+    infer_batch  = jax.vmap(dynamics.predict, in_axes=(None, 0, 0))
+
+    train_state = TrainState(opt_state={})
+
+    @jax.jit
+    def train_step(train_state, batch, parameters, key):
+        enc_params = jax.lax.stop_gradient(parameters["mean"]["encoder"])
+        dyn_params = parameters["mean"]["dynamics"]
+        adapter    = dyn_params["adapter"]
+        r_params   = {k: v for k, v in adapter.items() if k.startswith("R_")}
+
+        def loss_fn(r):
+            full_dyn = dyn_params | {"adapter": adapter | r}
+            z0     = encode_batch(enc_params, batch["states"][:, 0])
+            z1_tgt = jax.lax.stop_gradient(
+                encode_batch(enc_params, batch["states"][:, 1])
+            )
+            return jnp.mean(
+                (infer_batch(full_dyn, z0, batch["actions"][:, 0]) - z1_tgt) ** 2
+            )
+
+        loss, r_grad = jax.value_and_grad(loss_fn)(r_params)
+        r_new = jax.tree_util.tree_map(
+            lambda p, g: p - meta_lr_inner * g, r_params, r_grad
+        )
+        new_dyn    = dyn_params | {"adapter": adapter | r_new}
+        new_params = parameters | {"mean": parameters["mean"] | {"dynamics": new_dyn}}
+        return train_state, new_params, {"losses/consistency": loss}
+
+    return Trainer(train_fn=train_step), train_state
 
 
 # ---------------------------------------------------------------------------
