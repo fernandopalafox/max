@@ -12,7 +12,7 @@
     "dim_action": 6,
     "eval_freq": 10000,
     "chunk_size": 1000,
-    "plot_eval": true,
+    "plot_eval": false,
     "visualizer": {
       "type": "cheetah"
     },
