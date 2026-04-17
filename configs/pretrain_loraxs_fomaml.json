@@ -7,7 +7,7 @@
     "checkpoint_enabled": true,
     "checkpoint_freq": 100000,
     "num_agents": 1,
-    "max_steps": 1000000,
+    "max_steps": 200000,
     "buffer_size": 1000010,
     "dim_state": 17,
     "dim_action": 6,
