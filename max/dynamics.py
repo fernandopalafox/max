@@ -212,13 +212,14 @@ def _init_lora_xs_dynamics(
         dynamics_features: list[int]
         simnorm_dim_v, simnorm_tau: same as dense variant
         rank:              int, bottleneck rank r
-        r_init_std:        float, std for R init (P and Q use 0.01)
+        r_init_std:        float, std for R init (P and Q init via SVD of W)
         adapt_layers:      list[int], indices of layers to adapt
         frozen_backbone:   bool — true: W/b/ln in closure; false: in params["backbone"]
         frozen_adapter:    bool — must be false; raises if true
         freeze_subspace:   bool
-            false (pretraining): P, Q in params["adapter"] alongside R
-            true  (finetuning):  P, Q baked into closure from pretrained["adapter"]
+            false (pretraining): P, Q init via SVD of W, placed in params["adapter"] as learnable
+            true  (finetuning):  P, Q baked into closure — from pretrained["adapter"] if available,
+                                 else computed via SVD of backbone W (e.g. dense TDMPC2 baseline)
 
     Returned params["mean"]["dynamics"]:
         frozen_backbone=false, freeze_subspace=false -> {"backbone": {...}, "adapter": {P_i, Q_i, R_i, ...}}
@@ -246,8 +247,13 @@ def _init_lora_xs_dynamics(
         f"dynamics_features[-1]={features[-1]} must equal latent_dim={latent_dim}"
     )
 
-    # Build initial backbone weights (random if no pretrained, else from dense Flax params).
-    if pretrained is not None and "params" in pretrained:
+    # Build initial backbone weights.
+    if pretrained is not None and "backbone" in pretrained:
+        # Loading from a LoRA-XS checkpoint (backbone dict with W/b/ln_scale/ln_bias per layer).
+        def _get_layer(i):
+            bl = pretrained["backbone"][f"layer_{i}"]
+            return bl["W"], bl["b"], bl["ln_scale"], bl["ln_bias"]
+    elif pretrained is not None and "params" in pretrained:
         # Loading from a dense Flax checkpoint.
         pretrained_dyn = pretrained["params"]
         def _get_layer(i):
@@ -299,20 +305,30 @@ def _init_lora_xs_dynamics(
             }
 
         if i in adapt_layers:
-            d_in, d_out = in_dims[i], features[i]
-
             if freeze_subspace:
-                # P and Q come from a pretrained LoRA-XS checkpoint, baked into closure.
-                P = pretrained["adapter"][f"P_{i}"]
-                Q = pretrained["adapter"][f"Q_{i}"]
+                if pretrained is not None and "adapter" in pretrained:
+                    # Load P, Q from a pretrained LoRA-XS checkpoint (MAML/FOMAML).
+                    P = pretrained["adapter"][f"P_{i}"]
+                    Q = pretrained["adapter"][f"Q_{i}"]
+                else:
+                    # No pretrained adapter (e.g. dense TDMPC2 baseline): init via SVD
+                    # of the backbone W. Absorb Σ into P to match original LoRA-XS scaling.
+                    U_full, S_full, Vh_full = jnp.linalg.svd(W, full_matrices=False)
+                    P = U_full[:, :rank] * S_full[:rank]
+                    Q = Vh_full[:rank, :].T
                 layer.update({"P": P, "Q": Q})
             else:
-                key, kp, kq = jax.random.split(key, 3)
-                adapter_params[f"P_{i}"] = jax.random.normal(kp, (d_in, rank)) * 0.01
-                adapter_params[f"Q_{i}"] = jax.random.normal(kq, (d_out, rank)) * 0.01
+                # Learnable subspace (pretraining): init P, Q via SVD of backbone W,
+                # absorbing Σ into P so initial scaling matches original LoRA-XS.
+                U_full, S_full, Vh_full = jnp.linalg.svd(W, full_matrices=False)
+                adapter_params[f"P_{i}"] = U_full[:, :rank] * S_full[:rank]
+                adapter_params[f"Q_{i}"] = Vh_full[:rank, :].T
 
-            key, kr = jax.random.split(key)
-            adapter_params[f"R_{i}"] = jax.random.normal(kr, (rank, rank)) * r_init_std
+            if pretrained is not None and "adapter" in pretrained and f"R_{i}" in pretrained["adapter"]:
+                adapter_params[f"R_{i}"] = pretrained["adapter"][f"R_{i}"]
+            else:
+                key, kr = jax.random.split(key)
+                adapter_params[f"R_{i}"] = jax.random.normal(kr, (rank, rank)) * r_init_std
 
         frozen_layers.append(layer)
 
