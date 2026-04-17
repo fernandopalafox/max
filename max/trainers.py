@@ -96,6 +96,10 @@ def init_trainer(
         return init_ekf_batch_trainer(key, config, encoder, dynamics, init_params)
     if trainer_type == "gd_lora_xs":
         return init_gd_lora_xs_trainer(key, config, encoder, dynamics, init_params)
+    if trainer_type == "tdmpc2_loraxs_diag":
+        return init_tdmpc2_loraxs_diag_trainer(
+            key, config, encoder, dynamics, critic, policy, reward, init_params
+        )
 
     raise ValueError(f"Unknown trainer: {trainer_type!r}")
 
@@ -415,6 +419,72 @@ def init_tdmpc2_trainer(
 
     trainer = Trainer(train_fn=train_fn)
     return trainer, train_state
+
+
+# ---------------------------------------------------------------------------
+# TDMPC2 LoRAXS diagnostics trainer
+# ---------------------------------------------------------------------------
+
+
+def init_tdmpc2_loraxs_diag_trainer(
+    key: jax.Array,
+    config: dict,
+    encoder: Encoder,
+    dynamics,
+    critic: Critic,
+    policy: Policy,
+    reward,
+    init_params: dict,
+) -> tuple[Trainer, TrainState]:
+    """
+    TDMPC2 trainer with LoRAXS adapter diagnostics logged alongside losses.
+
+    Computes per-layer L2 norms of P, Q, R and singular values + stable rank of P.
+    Also logs averages over all adapted layers for quick monitoring.
+    """
+    base_trainer, train_state = init_tdmpc2_trainer(
+        key, config, encoder, dynamics, critic, policy, reward, init_params
+    )
+    adapt_layers: list = config["dynamics"]["adapt_layers"]
+
+    @jax.jit
+    def compute_diag(parameters: dict) -> dict:
+        adapter = parameters["mean"]["dynamics"]["adapter"]
+        metrics = {}
+        norm_Ps, norm_Qs, norm_Rs, stable_ranks = [], [], [], []
+        for i in adapt_layers:
+            P = adapter[f"P_{i}"]
+            Q = adapter[f"Q_{i}"]
+            R = adapter[f"R_{i}"]
+            norm_P = jnp.linalg.norm(P)
+            norm_Q = jnp.linalg.norm(Q)
+            norm_R = jnp.linalg.norm(R)
+            metrics[f"diag/norm_P_{i}"] = norm_P
+            metrics[f"diag/norm_Q_{i}"] = norm_Q
+            metrics[f"diag/norm_R_{i}"] = norm_R
+            norm_Ps.append(norm_P)
+            norm_Qs.append(norm_Q)
+            norm_Rs.append(norm_R)
+            sv = jnp.linalg.svd(P, compute_uv=False)
+            for j in range(sv.shape[0]):
+                metrics[f"diag/sv_P_{i}_{j}"] = sv[j]
+            stable_rank = jnp.sum(sv ** 2) / jnp.max(sv ** 2)
+            metrics[f"diag/stable_rank_P_{i}"] = stable_rank
+            stable_ranks.append(stable_rank)
+        metrics["diag/avg_norm_P"] = jnp.mean(jnp.stack(norm_Ps))
+        metrics["diag/avg_norm_Q"] = jnp.mean(jnp.stack(norm_Qs))
+        metrics["diag/avg_norm_R"] = jnp.mean(jnp.stack(norm_Rs))
+        metrics["diag/avg_stable_rank_P"] = jnp.mean(jnp.stack(stable_ranks))
+        return metrics
+
+    def train_fn(train_state, batch, parameters, key):
+        new_train_state, new_parameters, base_metrics = base_trainer.train_fn(
+            train_state, batch, parameters, key
+        )
+        diag_metrics = compute_diag(new_parameters)
+        return new_train_state, new_parameters, {**base_metrics, **diag_metrics}
+
+    return Trainer(train_fn=train_fn), train_state
 
 
 # ---------------------------------------------------------------------------
