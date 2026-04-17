@@ -104,7 +104,7 @@
       "reward_coef": 0.1,
       "value_coef": 0.1,
       "entropy_coef": 1e-4,
-      "meta_lr_inner": 4e-5
+      "meta_lr_inner": 0.01
     },
 
     "sampler": {

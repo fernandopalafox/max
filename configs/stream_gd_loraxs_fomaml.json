@@ -1,11 +1,11 @@
 {
   "training": {
-    "wandb_project": "meta_lora_streaming",
+    "wandb_project": "cheetah_meta_1m_streaming",
     "seed": 44,
     "num_seeds": 3,
     "num_processes": 2,
     "save_dir": "./data/models/stream_gd_loraxs_fomaml",
-    "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah_fomaml/20260416_132247/step_200000.pkl",
+    "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah_fomaml/20260417_022600/step_1000000.pkl",
     "checkpoint_enabled": false,
     "num_agents": 1,
     "max_steps": 10000,
@@ -23,9 +23,7 @@
     "evaluator": {
       "seed": 123,
       "max_steps": 500,
-      "num_episodes": 2,
-      "environment": { "cheetah_mass_scale": 0.5 },
-      "planner": { "type": "mppi" }
+      "num_episodes": 5
     },
 
     "normalizer": {
@@ -86,12 +84,12 @@
       "type": "cheetah",
       "num_agents": 1,
       "max_episode_steps": 500,
-      "cheetah_mass_scale": 0.5
+      "cheetah_mass_scale": 0.1
     },
 
     "trainer": {
       "type": "gd_lora_xs",
-      "meta_lr_inner": 4e-5
+      "meta_lr_inner": 0.01
     },
 
     "sampler": {

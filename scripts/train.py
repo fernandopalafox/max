@@ -1,6 +1,15 @@
 # train.py
 
 import os
+import sys
+import argparse as _ap
+
+_pp = _ap.ArgumentParser(add_help=False)
+_pp.add_argument("--gpu", type=str, default=None)
+_pre, _ = _pp.parse_known_args()
+if _pre.gpu is not None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = _pre.gpu
+
 # os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
 # os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.45"
 os.environ["JAX_COMPILATION_CACHE_DIR"] = "/tmp/jax_cache"
@@ -287,6 +296,7 @@ if __name__ == "__main__":
         default="cheetah.json",
         help="Config filename or absolute path.",
     )
+    parser.add_argument("--gpu", type=str, default=None, help="GPU index (sets CUDA_VISIBLE_DEVICES).")
     args = parser.parse_args()
 
     if os.environ.get("WANDB_SWEEP_ID"):

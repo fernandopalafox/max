@@ -2,7 +2,7 @@
   "training": {
     "wandb_project": "cheetah_ft_latent",
     "seed": 44,
-    "save_dir": "./data/models/cheetah_fomaml",
+    "save_dir": "./data/models/cheetah_fomaml_adam",
 
     "checkpoint_enabled": true,
     "checkpoint_freq": 100000,
@@ -106,7 +106,7 @@
       "cheetah_mass_scale": 1.0
     },
     "trainer": {
-      "type": "fomaml_tdmpc2",
+      "type": "adam_fomaml_tdmpc2",
       "lr": 0.0003,
       "encoder_lr": 0.0001,
       "policy_lr": 0.0003,
@@ -119,7 +119,7 @@
       "reward_coef": 0.1,
       "value_coef": 0.1,
       "entropy_coef": 0.0001,
-      "meta_lr_inner": 0.01
+      "meta_lr_inner": 1e-4
     },
     "sampler": {
       "type": "trajectory_batch",
