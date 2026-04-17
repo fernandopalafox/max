@@ -1316,17 +1316,23 @@ def init_ekf_fomaml_tdmpc2_trainer(
     dim_r: int = flat_r_init.shape[0]
     _, unflatten_dyn = jax.flatten_util.ravel_pytree(init_params["mean"]["dynamics"])
 
+    B: int = config["sampler"]["batch_size"]
+
     meas_cov = jnp.eye(latent_dim) / lr
     P0 = jnp.eye(dim_r) * init_cov_scale
 
+    # obs_fn takes all B first transitions stacked and returns the mean prediction (shape D).
+    # This matches FOMAML's averaging semantics: one EKF step using the full batch,
+    # equivalent to a single Kalman update on the mean innovation across trajectories.
     def observation_fn(flat_r, x):
-        z_t = x[:latent_dim]
-        a_t = x[latent_dim:latent_dim + dim_action]
-        flat_full_dyn = x[latent_dim + dim_action:]
+        z0 = x[:B * latent_dim].reshape(B, latent_dim)
+        a0 = x[B * latent_dim:B * latent_dim + B * dim_action].reshape(B, dim_action)
+        flat_full_dyn = x[B * latent_dim + B * dim_action:]
         full_dyn = unflatten_dyn(flat_full_dyn)
         r = unflatten_r(flat_r)
         full_dyn_adapted = full_dyn | {"adapter": full_dyn["adapter"] | r}
-        return dynamics.predict(full_dyn_adapted, z_t, a_t)
+        preds = jax.vmap(dynamics.predict, in_axes=(None, 0, 0))(full_dyn_adapted, z0, a0)
+        return jnp.mean(preds, axis=0)  # (D,)
 
     estimator = EKFEfficient(
         dynamics_fn=lambda params, _: params,
@@ -1468,7 +1474,9 @@ def init_ekf_fomaml_tdmpc2_trainer(
     def train_step(train_state, batch, parameters, key):
         key, wm_key, pi_key = jax.random.split(key, 3)
 
-        # Inner adaptation: EKF updates on R params using each trajectory's first transition.
+        # Inner adaptation: single EKF step on R params using all B first transitions.
+        # The obs_fn returns mean prediction over the batch, so obs_dim = D (not B*D).
+        # This matches FOMAML's single averaged gradient step exactly.
         enc_params_sg = jax.lax.stop_gradient(parameters["mean"]["encoder"])
         dyn_params = parameters["mean"]["dynamics"]
         adapter = dyn_params["adapter"]
@@ -1483,14 +1491,10 @@ def init_ekf_fomaml_tdmpc2_trainer(
         )  # (B, D)
         a0 = batch["actions"][:, 0]  # (B, dim_a)
 
-        def ekf_scan(carry, x):
-            flat_r_curr, P_curr = carry
-            z_t, a_t, z_next = x
-            inp = jnp.concatenate([z_t, a_t, flat_full_dyn])
-            flat_r_new, P_new, _ = estimator._ekf_fn(flat_r_curr, P_curr, inp, z_next)
-            return (flat_r_new, P_new), None
+        x = jnp.concatenate([z0.ravel(), a0.ravel(), flat_full_dyn])
+        z1_mean = jnp.mean(z1, axis=0)  # (D,) — mean target, matches FOMAML averaging
 
-        (flat_r_adapted, _), _ = jax.lax.scan(ekf_scan, (flat_r, P0), (z0, a0, z1))
+        flat_r_adapted, _, _ = estimator._ekf_fn(flat_r, P0, x, z1_mean)
         r_adapted = unflatten_r(flat_r_adapted)
 
         # Straight-through: forward uses adapted R values, backward routes to original R.
