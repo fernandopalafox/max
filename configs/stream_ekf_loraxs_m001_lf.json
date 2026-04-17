@@ -4,9 +4,7 @@
     "seed": 44,
     "num_seeds": 3,
     "num_processes": 2,
-    "save_dir": "./data/models/stream_ekf_loraxs_m001_lf",
     "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah/20260323_less_features/final.pkl",
-    "checkpoint_enabled": false,
     "num_agents": 1,
     "max_steps": 10000,
     "buffer_size": 1000010,
@@ -145,6 +143,8 @@
       "discount_factor": 0.99,
       "num_elites": 64,
       "max_std": 2.0
-    }
+    },
+    "save_dir": null,
+    "checkpoint_enabled": false
   }
 }
