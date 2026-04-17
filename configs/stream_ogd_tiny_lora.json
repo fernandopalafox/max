@@ -79,7 +79,7 @@
     },
     "trainer": {
       "type": "ogd",
-      "lr": 4e-5,
+      "lr": 1e-3,
       "horizon": 1,
       "temporal_decay": 0.5,
       "grad_clip_norm": 20
