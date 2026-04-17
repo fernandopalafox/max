@@ -4,7 +4,7 @@
     "seed": 44,
     "num_seeds": 3,
     "num_processes": 2,
-    "save_dir": "./data/models/stream_ekf_loraxs",
+    "save_dir": "./data/models/stream_ekf_loraxs_m001",
     "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah_tdmpc2/20260415_231700/step_1000000.pkl",
     "checkpoint_enabled": false,
     "num_agents": 1,
@@ -97,7 +97,7 @@
       "type": "cheetah",
       "num_agents": 1,
       "max_episode_steps": 500,
-      "cheetah_mass_scale": 0.1
+      "cheetah_mass_scale": 0.01
     },
     "trainer": {
       "type": "ekf_efficient",
