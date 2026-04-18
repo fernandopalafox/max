@@ -72,6 +72,10 @@ def init_trainer(
         return init_tdmpc2_trainer(
             key, config, encoder, dynamics, critic, policy, reward, init_params
         )
+    if trainer_type == "tdmpc2frozen":
+        return init_tdmpc2frozen_trainer(
+            key, config, encoder, dynamics, critic, policy, reward, init_params
+        )
     if trainer_type == "meta_tdmpc2":
         return init_meta_tdmpc2_trainer(
             key, config, encoder, dynamics, critic, policy, reward, init_params
@@ -423,6 +427,165 @@ def init_tdmpc2_trainer(
 
     trainer = Trainer(train_fn=train_fn)
     return trainer, train_state
+
+
+# ---------------------------------------------------------------------------
+# TDMPC2-frozen trainer (dynamics-only adaptation)
+# ---------------------------------------------------------------------------
+
+def init_tdmpc2frozen_trainer(
+    key: jax.Array,
+    config: dict,
+    encoder: Encoder,
+    dynamics,
+    critic: Critic,
+    policy: Policy,
+    reward,
+    init_params: dict,
+) -> tuple[Trainer, TrainState]:
+    """
+    TDMPC2 world-model loss, differentiated only w.r.t. dynamics parameters.
+
+    Assumes encoder, reward, critic, and policy are frozen (i.e. their init_*
+    factories return {} and close over pretrained weights). The LoRA-XS
+    dynamics closure controls which subset of its own parameters is trainable
+    (e.g. only R when frozen_backbone=true and freeze_subspace=true), so this
+    trainer is agnostic to that choice — it just updates whatever lives under
+    parameters["mean"]["dynamics"].
+
+    config["trainer"]:
+        lr:               float, Adam LR for dynamics params
+        grad_clip_norm:   float
+        horizon:          int, rollout horizon H
+        discount_factor:  float, gamma
+        temporal_decay:   float, rho^t weighting per timestep
+        consistency_coef: float
+        reward_coef:      float
+        value_coef:       float
+    """
+    tp = config["trainer"]
+    lr: float = tp["lr"]
+    grad_clip_norm: float = tp["grad_clip_norm"]
+    H: int = tp["horizon"]
+    discount_factor: float = tp["discount_factor"]
+    temporal_decay: float = tp["temporal_decay"]
+    consistency_coef: float = tp["consistency_coef"]
+    reward_coef: float = tp["reward_coef"]
+    value_coef: float = tp["value_coef"]
+
+    critic_cfg = config["critic"]
+    num_bins: int = critic_cfg["num_bins"]
+    vmin: float = critic_cfg["vmin"]
+    vmax: float = critic_cfg["vmax"]
+    num_ensemble: int = critic_cfg["num_ensemble"]
+
+    reward_cfg = config["reward"]
+    rew_num_bins: int = reward_cfg["num_bins"]
+    rew_vmin: float = reward_cfg["vmin"]
+    rew_vmax: float = reward_cfg["vmax"]
+
+    dyn_optimizer = optax.chain(
+        optax.clip_by_global_norm(grad_clip_norm),
+        optax.adam(lr),
+    )
+    dyn_opt_state = dyn_optimizer.init(init_params["mean"]["dynamics"])
+    train_state = TrainState(opt_state=dyn_opt_state)
+
+    encode_batch = jax.vmap(encoder.encode, in_axes=(None, 0))
+    infer_batch = jax.vmap(dynamics.predict, in_axes=(None, 0, 0))
+    rew_logits_batch = jax.vmap(reward.logits, in_axes=(None, 0, 0))
+    sample_batch = jax.vmap(policy.sample, in_axes=(None, 0, 0))
+    two_hot_batch_c = jax.vmap(lambda x: two_hot(x, vmin, vmax, num_bins))
+    two_hot_batch_r = jax.vmap(lambda x: two_hot(x, rew_vmin, rew_vmax, rew_num_bins))
+
+    def wm_loss_fn(params: dict, batch: dict, key: jax.Array):
+        obs = batch["states"]
+        actions = batch["actions"]
+        rewards = batch["rewards"]
+        B = obs.shape[0]
+
+        key, pi_key, q_key = jax.random.split(key, 3)
+
+        obs_next_flat = obs[:, 1:].reshape(B * H, -1)
+        z_next_flat_sg = jax.lax.stop_gradient(
+            encode_batch(params["mean"]["encoder"], obs_next_flat)
+        )
+
+        pi_keys_flat = jax.random.split(pi_key, B * H)
+        next_actions_flat, _ = sample_batch(
+            params["mean"]["policy"], z_next_flat_sg, pi_keys_flat
+        )
+
+        q_keys_flat = jax.random.split(q_key, B * H)
+        q_sampled_flat = jax.vmap(
+            critic.subsample, in_axes=(None, 0, 0, 0)
+        )(params["mean"]["ema_critic"], z_next_flat_sg, next_actions_flat, q_keys_flat)
+        q_min_flat = jnp.min(q_sampled_flat, axis=-1)
+        q_min = q_min_flat.reshape(B, H)
+
+        td_targets = jax.lax.stop_gradient(rewards + discount_factor * q_min)
+
+        z0 = encode_batch(params["mean"]["encoder"], obs[:, 0])
+
+        consistency_loss = jnp.zeros(())
+        reward_loss = jnp.zeros(())
+        q_loss = jnp.zeros(())
+
+        z = z0
+        for t in range(H):
+            w = temporal_decay ** t
+            a_t = actions[:, t]
+
+            rew_logits = rew_logits_batch(params["mean"]["reward"], z, a_t)
+            rew_targets = two_hot_batch_r(symlog(rewards[:, t]))
+            reward_loss = reward_loss + w * jnp.mean(soft_ce(rew_logits, rew_targets))
+
+            q_logits_all = critic.logits(params["mean"]["critic"], z, a_t)
+            td_target_th = two_hot_batch_c(symlog(td_targets[:, t]))
+            q_loss_all = jax.vmap(soft_ce, in_axes=(0, None))(q_logits_all, td_target_th)
+            q_loss = q_loss + w * jnp.sum(jnp.mean(q_loss_all, axis=-1))
+
+            z_pred = infer_batch(params["mean"]["dynamics"], z, a_t)
+            z_real = jax.lax.stop_gradient(
+                encode_batch(params["mean"]["encoder"], obs[:, t + 1])
+            )
+            consistency_loss = consistency_loss + w * jnp.mean((z_pred - z_real) ** 2)
+            z = z_pred
+
+        consistency_loss = consistency_loss / H
+        reward_loss = reward_loss / H
+        q_loss = q_loss / (H * num_ensemble)
+
+        total_loss = (
+            consistency_coef * consistency_loss
+            + reward_coef * reward_loss
+            + value_coef * q_loss
+        )
+        metrics = {
+            "losses/consistency": consistency_loss,
+            "losses/reward":      reward_loss,
+            "losses/value":       q_loss,
+            "losses/world_model": total_loss,
+        }
+        return total_loss, metrics
+
+    @jax.jit
+    def train_step(train_state, batch, parameters, key):
+        (loss, metrics), grads = jax.value_and_grad(wm_loss_fn, has_aux=True)(
+            parameters, batch, key
+        )
+        dyn_params = parameters["mean"]["dynamics"]
+        dyn_grads = grads["mean"]["dynamics"]
+        updates, new_opt_state = dyn_optimizer.update(
+            dyn_grads, train_state.opt_state, dyn_params
+        )
+        new_dyn = optax.apply_updates(dyn_params, updates)
+        new_params = parameters | {
+            "mean": parameters["mean"] | {"dynamics": new_dyn}
+        }
+        return TrainState(opt_state=new_opt_state), new_params, metrics
+
+    return Trainer(train_fn=train_step), train_state
 
 
 # ---------------------------------------------------------------------------

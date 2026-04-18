@@ -168,17 +168,30 @@ def prefill_buffer(
     env_step_fn: Callable,
     get_obs_fn: Callable,
     dim_a: int,
-    min_buffer_size: int,
+    prefill_buffer_size: int,
     buffer_size: int,
+    action_min: float,
+    action_max: float,
+    planner=None,
 ) -> RolloutState:
     """
-    Fill the replay buffer with random transitions using a plain Python loop.
-    No planning, no training. After this call rollout_state.buffer_idx >= min_buffer_size
-    so jax.lax.scan can train unconditionally from the first step.
+    Fill the replay buffer using a plain Python loop. No training.
+    If planner is None, uses random actions; otherwise uses the planner.
+    After this call rollout_state.buffer_idx >= prefill_buffer_size so
+    jax.lax.scan can train unconditionally from the first step.
     """
-    for _ in range(min_buffer_size):
-        key, action_key, reset_key = jax.random.split(rollout_state.key, 3)
-        action = jax.random.uniform(action_key, (1, dim_a), minval=-1.0, maxval=1.0)
+    for _ in range(prefill_buffer_size):
+        key, action_key, planner_key, reset_key = jax.random.split(rollout_state.key, 4)
+        if planner is not None:
+            actions, new_planner_state = planner.solve(
+                rollout_state.planner_state.replace(key=planner_key),
+                rollout_state.obs,
+                rollout_state.parameters,
+            )
+            action = actions[0][None, :]
+            rollout_state = rollout_state._replace(planner_state=new_planner_state)
+        else:
+            action = jax.random.uniform(action_key, (1, dim_a), minval=action_min, maxval=action_max)
 
         new_mjx_data, next_obs, rewards, terminated, truncated, _ = env_step_fn(
             rollout_state.mjx_data, rollout_state.episode_len, action

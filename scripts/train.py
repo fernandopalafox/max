@@ -161,18 +161,36 @@ def main(config):
     )
     print(f"[{time.time()-t0:.2f}s] Rollout initialized")
 
-    # ---- Pre-fill buffer with random actions ----
-    sampler_cfg = config["sampler"]
-    min_buffer_size = sampler_cfg["min_buffer_size"]
-    print(f"[{time.time()-t0:.2f}s] Pre-filling buffer ({min_buffer_size} steps)...")
+    # ---- Pre-fill buffer ----
+    prefill_buffer_size = config["prefill_buffer_size"]
+    prefill_planner = planner if config["prefill_with_planner"] else None
+    print(f"[{time.time()-t0:.2f}s] Pre-filling buffer ({prefill_buffer_size} steps)...")
     rollout_state = prefill_buffer(
         rollout_state,
         reset_fn, step_fn, get_obs_fn,
         dim_a=config["dim_action"],
-        min_buffer_size=min_buffer_size,
+        prefill_buffer_size=prefill_buffer_size,
         buffer_size=config["buffer_size"],
+        action_min=config["action_min"],
+        action_max=config["action_max"],
+        planner=prefill_planner,
     )
     print(f"[{time.time()-t0:.2f}s] Buffer pre-filled (buffer_idx={int(rollout_state.buffer_idx)})")
+
+    # ---- Initial SGD burst (mirrors TD-MPC2: prefill_buffer_size gradient steps) ----
+    print(f"[{time.time()-t0:.2f}s] Initial SGD burst ({prefill_buffer_size} steps)...")
+    pretrain_fn = jax.jit(trainer.train)
+    for _ in range(prefill_buffer_size):
+        key, sample_key, train_key = jax.random.split(key, 3)
+        train_data = sampler.sample_jit(sample_key, rollout_state.buffers, rollout_state.buffer_idx)
+        new_train_state, new_parameters, _ = pretrain_fn(
+            rollout_state.train_state, train_data, rollout_state.parameters, train_key
+        )
+        rollout_state = rollout_state._replace(
+            train_state=new_train_state,
+            parameters=new_parameters,
+        )
+    print(f"[{time.time()-t0:.2f}s] Initial SGD burst complete")
 
     # ---- Chunk loop (jax.lax.scan per chunk) ----
     chunk_size = config["chunk_size"]
