@@ -1137,9 +1137,10 @@ def init_bgd_fomaml_tdmpc2_trainer(
     two_hot_batch_r = jax.vmap(lambda x: two_hot(x, rew_vmin, rew_vmax, rew_num_bins))
 
     def wm_loss_fn(params: dict, batch: dict, key: jax.Array):
-        obs = batch["states"]      # (B, H+1, dim_s)
-        actions = batch["actions"] # (B, H, dim_a)
-        rewards = batch["rewards"] # (B, H)
+        # Outer (query) loop uses steps H..2H — fully disjoint from inner (support) steps 0..H.
+        obs = batch["states"][:, H:]      # (B, H+1, dim_s)
+        actions = batch["actions"][:, H:] # (B, H, dim_a)
+        rewards = batch["rewards"][:, H:] # (B, H)
         B = obs.shape[0]
 
         key, pi_key, q_key = jax.random.split(key, 3)
@@ -1227,8 +1228,8 @@ def init_bgd_fomaml_tdmpc2_trainer(
     def train_step(train_state, batch, parameters, key):
         key, wm_key, pi_key = jax.random.split(key, 3)
 
-        # Inner loop: H-step BGD consistency loss on R matrices only.
-        # Matches the deployment adaptation in the ogd trainer exactly.
+        # Inner (support) loop: H-step BGD consistency loss on R matrices only,
+        # using steps 0..H. Matches the deployment ogd adaptation exactly.
         enc_params_sg = jax.lax.stop_gradient(parameters["mean"]["encoder"])
         dyn_params = parameters["mean"]["dynamics"]
         adapter = dyn_params["adapter"]
