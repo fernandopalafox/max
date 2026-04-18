@@ -14,7 +14,6 @@
     "chunk_size": 1,
     "plot_eval": false,
     "save_dir": null,
-    "checkpoint_enabled": false,
     "evaluator": {
       "seed": 123,
       "max_steps": 500,
@@ -146,6 +145,9 @@
       "num_agents": 1,
       "max_episode_steps": 500,
       "cheetah_mass_scale": 0.75
-    }
+    },
+    "save_checkpoints": false,
+    "save_final": false,
+    "checkpoint_freq": 100000
   }
 }

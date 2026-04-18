@@ -51,10 +51,11 @@ def main(config):
     wandb.config.update(config, allow_val_change=True)
     key = jax.random.key(config["seed"])
 
-    save_dir = config.get("save_dir", None)
-    plot_eval = config.get("plot_eval", False)
-    checkpoint_enabled = config.get("checkpoint_enabled", False)
-    checkpoint_freq = config.get("checkpoint_freq", 100000)
+    save_dir = config["save_dir"]
+    plot_eval = config["plot_eval"]
+    save_checkpoints = config["save_checkpoints"]
+    save_final = config["save_final"]
+    checkpoint_freq = config["checkpoint_freq"]
 
     # Create timestamped run directory
     run_dir = None
@@ -62,7 +63,7 @@ def main(config):
         run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = os.path.join(save_dir, run_timestamp)
         os.makedirs(run_dir, exist_ok=True)
-        if checkpoint_enabled:
+        if save_checkpoints:
             print(f"Checkpointing every {checkpoint_freq} steps to {run_dir}/")
 
     # ---- Environment ----
@@ -70,7 +71,7 @@ def main(config):
 
     # ---- Model components ----
     pretrained_params = {}
-    if path := config.get("pretrained_path"):
+    if path := config["pretrained_path"]:
         with open(path, "rb") as f:
             pretrained_params = pickle.load(f)["mean"]
         print(f"Loaded pretrained parameters from {path}")
@@ -162,10 +163,7 @@ def main(config):
 
     # ---- Pre-fill buffer with random actions ----
     sampler_cfg = config["sampler"]
-    min_buffer_size = sampler_cfg.get(
-        "min_buffer_size",
-        sampler_cfg["batch_size"] + sampler_cfg["horizon"],
-    )
+    min_buffer_size = sampler_cfg["min_buffer_size"]
     print(f"[{time.time()-t0:.2f}s] Pre-filling buffer ({min_buffer_size} steps)...")
     rollout_state = prefill_buffer(
         rollout_state,
@@ -242,14 +240,15 @@ def main(config):
             print(f"[Step {step}] chunk={dt:.2f}s ({sps:.0f} steps/s)")
 
         # ---- Checkpoint ----
-        if checkpoint_enabled and run_dir and chunk_idx % checkpoint_chunk_freq == 0:
+        if save_checkpoints and run_dir and chunk_idx % checkpoint_chunk_freq == 0:
             ckpt_path = os.path.join(run_dir, f"step_{step}.pkl")
             with open(ckpt_path, "wb") as f:
                 pickle.dump(jax.device_get(rollout_state.parameters), f)
             print(f"Checkpoint saved: {ckpt_path}")
 
     # ---- Save final parameters ----
-    if run_dir:
+    if save_final:
+        assert run_dir, "save_final requires save_dir to be set"
         file_path = os.path.join(run_dir, "final.pkl")
         print(f"\nSaving final parameters to {file_path}...")
         with open(file_path, "wb") as f:
@@ -310,8 +309,8 @@ if __name__ == "__main__":
         CONFIG = full_config["training"]
 
         run_name_base = args.run_name or "cheetah_tdmpc2"
-        num_seeds = CONFIG.get("num_seeds", 1)
-        num_processes = CONFIG.get("num_processes", 1)
+        num_seeds = CONFIG["num_seeds"]
+        num_processes = CONFIG["num_processes"]
 
         if num_processes > 1:
             # Derive per-process seeds using Python random (not JAX) so the
@@ -362,9 +361,9 @@ if __name__ == "__main__":
                 run_config["wandb_run_name"] = run_name
 
                 wandb.init(
-                    project=run_config.get("wandb_project", "cheetah_tdmpc2"),
+                    project=run_config["wandb_project"],
                     config=run_config,
-                    name=run_config.get("wandb_run_name"),
+                    name=run_config["wandb_run_name"],
                     reinit=True,
                 )
                 main(run_config)

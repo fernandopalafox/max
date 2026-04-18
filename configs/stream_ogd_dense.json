@@ -138,6 +138,10 @@
       "max_std": 2.0
     },
     "save_dir": null,
-    "checkpoint_enabled": false
+    "save_checkpoints": false,
+    "save_final": false,
+    "checkpoint_freq": 100000,
+    "num_seeds": 1,
+    "num_processes": 1
   }
 }
