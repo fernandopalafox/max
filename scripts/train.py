@@ -276,14 +276,18 @@ def run_sweep():
 
 
 if __name__ == "__main__":
+    import sys
+    import shutil
+    import subprocess
+    import tempfile
+
     parser = argparse.ArgumentParser(description="Run TDMPC2 training.")
     parser.add_argument("--run-name", type=str, default=None)
-    parser.add_argument("--num-seeds", type=int, default=1)
     parser.add_argument(
         "--config",
         type=str,
         default="cheetah.json",
-        help="Config filename in configs folder.",
+        help="Config filename or absolute path.",
     )
     args = parser.parse_args()
 
@@ -304,14 +308,14 @@ if __name__ == "__main__":
         seed_keys = jax.random.split(base_key, args.num_seeds)
         seeds = [int(jax.random.bits(k)) for k in seed_keys]
 
-        for seed_idx, seed in enumerate(seeds, start=1):
-            print(f"--- Starting run seed {seed_idx}/{args.num_seeds} ---")
-            run_config = copy.deepcopy(CONFIG)
-            run_config["seed"] = seed
-            run_name = run_name_base
-            if args.num_seeds > 1:
-                run_name = f"{run_name}_{seed_idx}"
-            run_config["wandb_run_name"] = run_name
+            for seed_idx, seed in enumerate(seeds, start=1):
+                print(f"--- Starting run {seed_idx}/{num_seeds} ---")
+                run_config = copy.deepcopy(CONFIG)
+                run_config["seed"] = seed
+                run_name = run_name_base
+                if num_seeds > 1:
+                    run_name = f"{run_name}_{seed_idx}"
+                run_config["wandb_run_name"] = run_name
 
             project_name = run_config.get("wandb_project")
             if not project_name:
