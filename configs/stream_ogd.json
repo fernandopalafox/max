@@ -2,9 +2,9 @@
   "training": {
     "wandb_project": "fewshot-cheetah",
     "seed": 44,
-    "save_dir": "./data/models/cheetah",
-    "checkpoint_enabled": true,
-    "checkpoint_freq": 100000,
+    "save_dir": "/home/fp5275/repos/max/data/models/cheetah",
+    "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah/20260323_less_features/final.pkl",
+    "checkpoint_enabled": false,
     "num_agents": 1,
     "max_steps": 10000,
     "buffer_size": 1000010,
@@ -33,7 +33,7 @@
       "encoder_features": [256, 128, 64],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
-      "frozen": false
+      "frozen": true
     },
 
     "dynamics": {
@@ -53,7 +53,7 @@
       "vmax": 10.0,
       "dropout": 0.01,
       "num_subsample": 2,
-      "frozen": false
+      "frozen": true
     },
 
     "policy": {
@@ -61,7 +61,7 @@
       "features": [512, 512],
       "log_std_min": -10,
       "log_std_max": 2,
-      "frozen": false
+      "frozen": true
     },
 
     "reward": {
@@ -70,7 +70,7 @@
       "num_bins": 101,
       "vmin": -10.0,
       "vmax": 10.0,
-      "frozen": false
+      "frozen": true
     },
 
     "environment": {
@@ -81,22 +81,18 @@
     },
 
     "trainer": {
-      "type": "tdmpc2",
-      "lr": 3e-4,
-      "encoder_lr": 1e-4,
-      "policy_lr": 3e-4,
-      "grad_clip_norm": 20,
-      "horizon": 3,
-      "discount_factor": 0.99,
+      "type": "ogd",
+      "lr": 4e-5,
+      "horizon": 1,
       "temporal_decay": 0.5,
       "grad_clip_norm": 20
     },
 
     "sampler": {
-      "type": "trajectory_batch",
-      "batch_size": 256,
-      "horizon": 3,
-      "min_buffer_size": 257
+      "type": "latest",
+      "batch_size": 1,
+      "horizon": 1,
+      "min_buffer_size": 1
     },
 
     "state_labels": [
@@ -107,7 +103,7 @@
 
     "planner": {
       "type": "mppi",
-      "info_weight": 10.0,
+      "info_weight": 0.0,
       "info_horizon": 1,
       "meas_noise_scale": 1.0,
       "horizon": 3,
