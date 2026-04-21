@@ -25,7 +25,15 @@ def init_visualizer(config) -> Visualizer:
         return _init_humanoid_visualizer(config)
     elif vis_type == "quadruped":
         return _init_quadruped_visualizer(config)
+    elif vis_type == "walker":
+        return _init_walker_visualizer(config)
     raise ValueError(f"Unknown visualizer type: {vis_type!r}")
+
+
+def _init_walker_visualizer(config) -> Visualizer:
+    def visualize(trajectory):
+        return _create_walker_video(trajectory.xpos, trajectory.qvel)
+    return Visualizer(visualize=visualize)
 
 
 def _init_cheetah_visualizer(config) -> Visualizer:
@@ -444,6 +452,131 @@ def _batch_kinematics(states):
         p(tfx, tfz), p(fkx, fkz), p(fax, faz), p(ftx, ftz),  # front leg
     ], axis=1)  # (T, 10, 2)
     return pts, rootx, rootz
+
+
+def _create_walker_video(xpos, qvel, max_frames=300, save_path=None, fps=40):
+    """
+    Creates an MP4 video of the planar walker as a stick figure using pre-computed body positions.
+
+    Body order (mujoco_playground WalkerWalk):
+        0: world, 1: torso, 2: right_thigh, 3: right_leg, 4: right_foot,
+        5: left_thigh, 6: left_leg, 7: left_foot
+
+    Args:
+        xpos: (T, nbody, 3) or (N, T, nbody, 3) array of body Cartesian positions
+        qvel: (T, nv) or (N, T, nv) array of generalized velocities
+        max_frames: subsample to at most this many frames
+        save_path: path for the .mp4 file (temp file if None)
+        fps: frames per second
+    Returns:
+        Path to the saved MP4.
+    """
+    import tempfile
+
+    xpos = np.array(xpos)
+    qvel = np.array(qvel)
+
+    # Use first episode when batched
+    if xpos.ndim == 4:
+        xpos = xpos[0]
+    if qvel.ndim == 3:
+        qvel = qvel[0]
+
+    if len(xpos) > max_frames:
+        idx = np.linspace(0, len(xpos) - 1, max_frames, dtype=int)
+        xpos = xpos[idx]
+        qvel = qvel[idx]
+
+    T = len(xpos)
+
+    # Body indices (0=world excluded from xpos in some conventions — here xpos includes world)
+    # mujoco xpos[0] = world (at origin), so body i corresponds to xpos[i]
+    TORSO      = 1
+    R_THIGH    = 2
+    R_SHIN     = 3
+    R_FOOT     = 4
+    L_THIGH    = 5
+    L_SHIN     = 6
+    L_FOOT     = 7
+
+    torso_x = xpos[:, TORSO, 0]
+    torso_z = xpos[:, TORSO, 2]
+    # qvel[1] = rootx velocity (forward)
+    forward_vel = qvel[:, 1] if qvel.shape[1] > 1 else np.zeros(T)
+
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=100)
+    ax.set_xlim(-1.5, 1.5)
+    ax.set_ylim(-0.2, 2.0)
+    ax.set_aspect('equal')
+    ax.set_xlabel('X (m, walker-relative)')
+    ax.set_ylabel('Z (m)')
+    ax.grid(True, alpha=0.3)
+    ax.axhspan(-0.3, 0, color='#8B4513', alpha=0.3)
+    ax.plot([-1.5, 1.5], [0, 0], 'k-', linewidth=2)
+
+    torso_line,  = ax.plot([], [], 'b-',  linewidth=6, solid_capstyle='round')
+    r_thigh,     = ax.plot([], [], 'r-',  linewidth=4, solid_capstyle='round')
+    r_shin,      = ax.plot([], [], 'r-',  linewidth=3, solid_capstyle='round')
+    r_foot,      = ax.plot([], [], 'r-',  linewidth=2, solid_capstyle='round')
+    l_thigh,     = ax.plot([], [], 'g-',  linewidth=4, solid_capstyle='round')
+    l_shin,      = ax.plot([], [], 'g-',  linewidth=3, solid_capstyle='round')
+    l_foot,      = ax.plot([], [], 'g-',  linewidth=2, solid_capstyle='round')
+    joints,      = ax.plot([], [], 'ko',  markersize=5, zorder=5)
+    info_text    = ax.text(0.02, 0.95, '', transform=ax.transAxes,
+                           verticalalignment='top', fontsize=8)
+
+    all_artists = [torso_line, r_thigh, r_shin, r_foot,
+                   l_thigh, l_shin, l_foot, joints, info_text]
+
+    def init():
+        for a in all_artists:
+            if hasattr(a, 'set_data'):
+                a.set_data([], [])
+        info_text.set_text('')
+        return tuple(all_artists)
+
+    def _seg(body_a, body_b, frame):
+        ox = torso_x[frame]
+        xa, za = xpos[frame, body_a, 0] - ox, xpos[frame, body_a, 2]
+        xb, zb = xpos[frame, body_b, 0] - ox, xpos[frame, body_b, 2]
+        return [xa, xb], [za, zb]
+
+    def animate(frame):
+        ox = torso_x[frame]
+
+        # Torso: draw as a vertical segment centered at torso xpos
+        tx = xpos[frame, TORSO, 0] - ox
+        tz = xpos[frame, TORSO, 2]
+        torso_line.set_data([tx, tx], [tz - 0.15, tz + 0.15])
+
+        r_thigh.set_data(*_seg(TORSO, R_THIGH, frame))
+        r_shin.set_data(*_seg(R_THIGH, R_SHIN, frame))
+        r_foot.set_data(*_seg(R_SHIN, R_FOOT, frame))
+
+        l_thigh.set_data(*_seg(TORSO, L_THIGH, frame))
+        l_shin.set_data(*_seg(L_THIGH, L_SHIN, frame))
+        l_foot.set_data(*_seg(L_SHIN, L_FOOT, frame))
+
+        jx = xpos[frame, [R_THIGH, R_SHIN, R_FOOT, L_THIGH, L_SHIN, L_FOOT], 0] - ox
+        jz = xpos[frame, [R_THIGH, R_SHIN, R_FOOT, L_THIGH, L_SHIN, L_FOOT], 2]
+        joints.set_data(jx, jz)
+
+        info_text.set_text(
+            f't={frame/fps:.2f}s  x={torso_x[frame]:.1f}m  vel={forward_vel[frame]:.2f}m/s  '
+            f'z={torso_z[frame]:.2f}m'
+        )
+        return tuple(all_artists)
+
+    anim = FuncAnimation(fig, animate, init_func=init,
+                         frames=T, interval=1000/fps, blit=True)
+
+    if save_path is None:
+        save_path = tempfile.mktemp(suffix='.mp4')
+
+    anim.save(save_path, writer='ffmpeg', fps=fps,
+              extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
+    plt.close(fig)
+    return save_path
 
 
 def _create_cheetah_video(states, max_frames=300, save_path=None, fps=50, ghost_alpha=0.3):
