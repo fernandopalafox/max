@@ -14,6 +14,7 @@
     "action_max": 1.0,
     "prefill_buffer_size": 1,
     "prefill_with_planner": false,
+    "sgd_burst_steps": 1,
     "eval_freq": 1000,
     "chunk_size": 1,
     "plot_eval": false,
@@ -55,10 +56,7 @@
         1,
         2,
         3
-      ],
-      "frozen_backbone": true,
-      "frozen_adapter": false,
-      "freeze_subspace": true
+      ]
     },
     "critic": {
       "type": "ensemble",
