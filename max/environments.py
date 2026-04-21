@@ -16,6 +16,8 @@ def init_env(config: Dict[str, Any]):
         return _make_humanoid_env(config)
     elif env_type == "quadruped":
         return _make_quadruped_env(config)
+    elif env_type == "walker":
+        return _make_walker_env(config)
     else:
         raise ValueError(f"Unknown environment: {env_type!r}")
 
@@ -278,5 +280,100 @@ def _make_quadruped_env(config: Dict[str, Any]):
             return obs_or_timestep
         # Otherwise it's a timestep from reset_fn
         return _extract_obs(obs_or_timestep)
+
+    return reset_fn, step_fn, get_obs_fn
+
+
+def _make_walker_env(config: Dict[str, Any]):
+    """
+    Factory function that wraps mujoco_playground WalkerWalk environment.
+
+    Internal state: mjx.Data (full MuJoCo physics state)
+    Observation: 24D = [orientations (14D), height (1D), qvel (9D)]
+        orientations: xmat[body, 0, 0] and xmat[body, 0, 2] for each of 7 bodies (world excluded)
+        height: xmat[torso, 2, 2] (upright component)
+        velocity: qvel (9D)
+    Action: 6D torques in [-1, 1]
+    """
+    from mujoco_playground import registry
+    from mujoco_playground._src import mjx_env
+    from mujoco_playground._src import reward as reward_fns
+    from mujoco import mjx
+
+    env_cfg = config["environment"]
+    max_episode_steps = env_cfg.get("max_episode_steps", 1000)
+
+    print(f"Initializing environment: walker")
+
+    env = registry.load('WalkerWalk')
+    mjx_model = env.mjx_model
+    mj_model = env.mj_model
+
+    torso_id = mj_model.body("torso").id
+    sensor_id = mj_model.sensor("torso_subtreelinvel").id
+    sensor_adr = int(mj_model.sensor_adr[sensor_id])
+
+    _STAND_HEIGHT = 1.2
+    _WALK_SPEED = 1.0
+
+    @jax.jit
+    def reset_fn(key: jax.random.PRNGKey) -> mjx.Data:
+        env_state = env.reset(key)
+        return env_state.data
+
+    @jax.jit
+    def step_fn(
+        data: mjx.Data,
+        step_count: int,
+        action: jnp.ndarray,
+    ):
+        a = action.squeeze()
+        # ctrl_dt=0.025, sim_dt=0.0025 => 10 substeps per control step
+        next_data = mjx_env.step(mjx_model, data, a, 10)
+
+        obs = get_obs_fn(next_data)
+
+        # Standing reward
+        torso_height = next_data.xpos[torso_id, 2]
+        standing = reward_fns.tolerance(
+            torso_height,
+            bounds=(_STAND_HEIGHT, float("inf")),
+            margin=_STAND_HEIGHT / 2,
+        )
+        torso_upright = next_data.xmat[torso_id, 2, 2]
+        upright = (1 + torso_upright) / 2
+        stand_reward = (3 * standing + upright) / 4
+
+        # Move reward
+        horizontal_velocity = next_data.sensordata[sensor_adr]
+        move_reward = reward_fns.tolerance(
+            horizontal_velocity,
+            bounds=(_WALK_SPEED, float("inf")),
+            margin=_WALK_SPEED / 2,
+            value_at_margin=0.5,
+            sigmoid="linear",
+        )
+
+        reward = stand_reward * (5 * move_reward + 1) / 6
+        rewards = jnp.array([reward])
+
+        done = jnp.isnan(next_data.qpos).any() | jnp.isnan(next_data.qvel).any()
+        terminated = done
+        truncated = step_count >= max_episode_steps
+
+        info = {
+            "horizontal_velocity": horizontal_velocity,
+            "torso_height": torso_height,
+        }
+
+        return next_data, obs, rewards, terminated, truncated, info
+
+    @jax.jit
+    def get_obs_fn(data: mjx.Data) -> jnp.ndarray:
+        """Returns 24D observation: [orientations (14D), height (1D), qvel (9D)]."""
+        orientations = data.xmat[1:, [0, 0], [0, 2]].ravel()
+        height = data.xmat[torso_id, 2, 2]
+        obs = jnp.concatenate([orientations, height.reshape(1), data.qvel])
+        return obs[None, :]  # Add agent dimension
 
     return reset_fn, step_fn, get_obs_fn
