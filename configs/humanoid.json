@@ -1,25 +1,29 @@
 {
   "training": {
-    "wandb_project": "fewshot-cheetah",
-    "seed": 44,
-    "save_dir": "./data/models/cheetah",
+    "wandb_project": "tdmpc2-humanoid",
+    "seed": 43,
+    "save_dir": "./data/models/humanoid",
     "checkpoint_enabled": true,
     "checkpoint_freq": 100000,
     "num_agents": 1,
-    "max_steps": 10000,
+    "max_steps": 100000,
     "buffer_size": 1000010,
-    "dim_state": 17,
-    "dim_action": 6,
-    "eval_freq": 1000,
+    "dim_state": 54,
+    "dim_action": 21,
+    "eval_freq": 10000,
     "chunk_size": 1,
-    "plot_eval": false,
+    "plot_eval": true,
+
+    "visualizer": {
+      "type": "humanoid"
+    },
 
     "evaluator": {
       "seed": 123,
       "max_steps": 500,
       "num_episodes": 5,
       "environment": {},
-      "planner": {"type": "mppi"}
+      "planner": {}
     },
 
     "normalizer": {
@@ -38,9 +42,11 @@
 
     "dynamics": {
       "type": "dense_last_layer",
-      "dynamics_features": [512, 512, 128, 64],
+      "dynamics_features": [512, 512, 256, 64],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
+      "svd_rank": 64,
+      "r_init_std": 1e-5,
       "frozen": false
     },
 
@@ -74,46 +80,55 @@
     },
 
     "environment": {
-      "type": "cheetah",
+      "type": "humanoid",
       "num_agents": 1,
       "max_episode_steps": 500,
-      "cheetah_mass_scale": 0.1
+      "humanoid_mass_scale": 1.0
     },
 
     "trainer": {
-      "type": "tdmpc2",
+      "type": "ogd",
       "lr": 3e-4,
-      "encoder_lr": 1e-4,
+      "encoder_lr": 3e-4,
       "policy_lr": 3e-4,
       "grad_clip_norm": 20,
-      "horizon": 3,
+      "horizon": 1,
       "discount_factor": 0.99,
       "temporal_decay": 0.5,
-      "grad_clip_norm": 20
+      "ema_decay": 0.99,
+      "consistency_coef": 20.0,
+      "reward_coef": 0.1,
+      "value_coef": 0.1,
+      "entropy_coef": 1e-4
     },
 
     "sampler": {
       "type": "trajectory_batch",
       "batch_size": 256,
       "horizon": 3,
-      "min_buffer_size": 257
+      "min_buffer_size": 259
     },
 
     "state_labels": [
-      "rootz", "rooty", "bthigh", "bshin", "bfoot", "fthigh", "fshin", "ffoot",
-      "vel_x", "vel_z", "vel_y", "vel_bthigh", "vel_bshin", "vel_bfoot",
-      "vel_fthigh", "vel_fshin", "vel_ffoot"
+      "root_z", "root_y", "root_x_vel", "root_y_vel", "root_z_vel", "root_y_omega",
+      "chest_y", "chest_z", "neck_y", "neck_z",
+      "right_shoulder1", "right_shoulder2", "right_elbow",
+      "left_shoulder1", "left_shoulder2", "left_elbow",
+      "right_hip_x", "right_hip_z", "right_knee", "right_ankle",
+      "left_hip_x", "left_hip_z", "left_knee", "left_ankle",
+      "vel_chest_y", "vel_chest_z", "vel_neck_y", "vel_neck_z",
+      "vel_right_shoulder1", "vel_right_shoulder2", "vel_right_elbow",
+      "vel_left_shoulder1", "vel_left_shoulder2", "vel_left_elbow",
+      "vel_right_hip_x", "vel_right_hip_z", "vel_right_knee", "vel_right_ankle",
+      "vel_left_hip_x", "vel_left_hip_z", "vel_left_knee", "vel_left_ankle"
     ],
 
     "planner": {
       "type": "mppi",
-      "info_weight": 10.0,
-      "info_horizon": 1,
-      "meas_noise_scale": 1.0,
       "horizon": 3,
-      "num_iterations": 1,
-      "dim_control": 6,
-      "batch_size": 64,
+      "num_iterations": 6,
+      "dim_control": 21,
+      "batch_size": 512,
       "num_pi_trajs": 24,
       "temperature": 0.5,
       "min_std": 0.05,

@@ -123,7 +123,8 @@ def main(config):
     wandb.config.update({"num_params_total": total_n})
     print(f"[{time.time()-t0:.2f}s] Components ready  (total={total_n:,})")
 
-    print(f"Starting TDMPC2 cheetah training for {config['max_steps']} steps")
+    env_type = config.get("environment", {}).get("type", "unknown")
+    print(f"Starting TDMPC2 {env_type} training for {config['max_steps']} steps")
 
     # ---- Initial evaluation ----
     print(f"[{time.time()-t0:.2f}s] Running initial evaluation...")
@@ -254,8 +255,9 @@ def run_sweep():
     """Entry point for wandb sweep agents."""
     wandb.init()
 
+    config_name = os.environ.get("CONFIG", "cheetah.json")
     config_path = os.path.join(
-        os.path.dirname(__file__), "..", "configs", "cheetah.json"
+        os.path.dirname(__file__), "..", "configs", config_name
     )
     with open(config_path, "r") as f:
         full_config = json.load(f)
@@ -299,48 +301,12 @@ if __name__ == "__main__":
             full_config = json.load(f)
         CONFIG = full_config["training"]
 
-        run_name_base = args.run_name or "cheetah_tdmpc2"
-        num_seeds = CONFIG.get("num_seeds", 1)
-        num_processes = CONFIG.get("num_processes", 1)
+        env_type = CONFIG.get("environment", {}).get("type", "unknown")
+        run_name_base = args.run_name or f"tdmpc2_{env_type}"
 
-        if num_processes > 1:
-            # Derive per-process seeds using Python random (not JAX) so the
-            # parent process never initializes a CUDA context — otherwise the
-            # parent and each subprocess would hold simultaneous CUDA contexts
-            # on the same GPU, causing OOM.
-            import random
-            rng = random.Random(CONFIG["seed"])
-            proc_seeds = [rng.randint(0, 2**31) for _ in range(num_processes)]
-
-            for proc_idx, proc_seed in enumerate(proc_seeds, start=1):
-                print(f"--- Starting process {proc_idx}/{num_processes} ---")
-                if os.path.exists("/tmp/jax_cache"):
-                    shutil.rmtree("/tmp/jax_cache")
-
-                proc_config = copy.deepcopy(CONFIG)
-                proc_config["seed"] = proc_seed
-                proc_config["num_processes"] = 1  # prevent recursion
-                proc_config["process_idx"] = proc_idx
-
-                with tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".json", delete=False
-                ) as f:
-                    json.dump({"training": proc_config}, f, indent=2)
-                    tmp_path = f.name
-
-                proc_run_name = f"{run_name_base}_p{proc_idx}"
-                subprocess.run(
-                    [sys.executable, __file__,
-                     "--config", tmp_path,
-                     "--run-name", proc_run_name],
-                    cwd=os.path.dirname(os.path.abspath(__file__)),
-                )
-                os.unlink(tmp_path)
-
-        else:
-            base_key = jax.random.key(CONFIG["seed"])
-            seed_keys = jax.random.split(base_key, num_seeds)
-            seeds = [int(jax.random.bits(k)) for k in seed_keys]
+        base_key = jax.random.key(CONFIG["seed"])
+        seed_keys = jax.random.split(base_key, args.num_seeds)
+        seeds = [int(jax.random.bits(k)) for k in seed_keys]
 
             for seed_idx, seed in enumerate(seeds, start=1):
                 print(f"--- Starting run {seed_idx}/{num_seeds} ---")
@@ -351,13 +317,18 @@ if __name__ == "__main__":
                     run_name = f"{run_name}_{seed_idx}"
                 run_config["wandb_run_name"] = run_name
 
-                wandb.init(
-                    project=run_config.get("wandb_project", "cheetah_tdmpc2"),
-                    config=run_config,
-                    name=run_config.get("wandb_run_name"),
-                    reinit=True,
-                )
-                main(run_config)
-                wandb.finish()
+            project_name = run_config.get("wandb_project")
+            if not project_name:
+                env_type = run_config.get("environment", {}).get("type", "unknown")
+                project_name = f"tdmpc2-{env_type}"
+
+            wandb.init(
+                project=project_name,
+                config=run_config,
+                name=run_config.get("wandb_run_name"),
+                reinit=True,
+            )
+            main(run_config)
+            wandb.finish()
 
         print("All experiments complete.")
