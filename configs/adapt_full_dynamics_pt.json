@@ -1,11 +1,11 @@
 {
   "training": {
     "wandb_project": "test_adaptation",
-    "wandb_group": "loraxs_pt",
+    "wandb_group": "dynamics_pt",
     "seed": 44,
     "num_seeds": 1,
     "num_processes": 1,
-    "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah/baseline_loraxs/run_2/20260429_082050/final.pkl",
+    "pretrained_path": null,
     "num_agents": 1,
     "max_steps": 500000,
     "buffer_size": 1000010,
@@ -48,7 +48,7 @@
       "frozen": true
     },
     "dynamics": {
-      "type": "dense_lora_xs",
+      "type": "dense",
       "dynamics_features": [
         512,
         512,
@@ -57,14 +57,7 @@
       ],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
-      "rank": 48,
-      "r_init_std": 1e-05,
-      "adapt_layers": [
-        0,
-        1,
-        2,
-        3
-      ]
+      "frozen": false
     },
     "critic": {
       "type": "ensemble",

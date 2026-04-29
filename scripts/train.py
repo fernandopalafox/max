@@ -384,6 +384,7 @@ if __name__ == "__main__":
                     project=run_config["wandb_project"],
                     config=run_config,
                     name=run_config["wandb_run_name"],
+                    group=run_config.get("wandb_group"),
                     reinit=True,
                 )
                 main(run_config)

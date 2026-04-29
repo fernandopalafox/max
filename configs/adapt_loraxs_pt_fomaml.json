@@ -1,6 +1,7 @@
 {
   "training": {
     "wandb_project": "test_adaptation",
+    "wandb_group": "loraxs_pt_fomaml",
     "seed": 44,
     "num_seeds": 1,
     "num_processes": 1,
