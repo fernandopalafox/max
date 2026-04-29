@@ -4,9 +4,9 @@
     "seed": 44,
     "num_seeds": 1,
     "num_processes": 1,
-    "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah/baseline_new/final.pkl",
+    "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah/baseline_new/run_2/final.pkl",
     "num_agents": 1,
-    "max_steps": 1000000,
+    "max_steps": 500000,
     "buffer_size": 1000010,
     "dim_state": 17,
     "dim_action": 6,
@@ -44,7 +44,7 @@
       ],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
-      "frozen": true
+      "frozen": false
     },
     "dynamics": {
       "type": "dense",
@@ -70,7 +70,7 @@
       "vmax": 10.0,
       "dropout": 0.01,
       "num_subsample": 2,
-      "frozen": true
+      "frozen": false
     },
     "policy": {
       "type": "squashed_gaussian",
@@ -80,7 +80,7 @@
       ],
       "log_std_min": -10,
       "log_std_max": 2,
-      "frozen": true
+      "frozen": false
     },
     "reward": {
       "type": "mlp",
@@ -91,18 +91,22 @@
       "num_bins": 101,
       "vmin": -10.0,
       "vmax": 10.0,
-      "frozen": true
+      "frozen": false
     },
     "trainer": {
-      "type": "tdmpc2frozen",
+      "type": "tdmpc2",
       "lr": 0.0003,
+      "encoder_lr": 9e-05,
+      "policy_lr": 0.0003,
       "grad_clip_norm": 20,
       "horizon": 3,
       "discount_factor": 0.99,
       "temporal_decay": 0.5,
+      "ema_decay": 0.99,
       "consistency_coef": 20.0,
       "reward_coef": 0.1,
-      "value_coef": 0.1
+      "value_coef": 0.1,
+      "entropy_coef": 0.0001
     },
     "sampler": {
       "type": "trajectory_batch",
