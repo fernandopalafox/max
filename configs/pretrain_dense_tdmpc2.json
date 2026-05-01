@@ -1,22 +1,29 @@
 {
   "training": {
-    "wandb_project": "fewshot-cheetah",
+    "wandb_project": "cheetah_ft_latent",
     "seed": 44,
-    "save_dir": "/home/fp5275/repos/max/data/models/cheetah",
-    "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah/20260323_less_features/final.pkl",
-    "checkpoint_enabled": false,
+    "save_dir": "./data/models/cheetah_tdmpc2",
+    "checkpoint_freq": 100000,
     "num_agents": 1,
-    "max_steps": 10000,
+    "max_steps": 1000000,
     "buffer_size": 1000010,
     "dim_state": 17,
     "dim_action": 6,
-    "eval_freq": 1000,
-    "chunk_size": 1,
+    "action_min": -1.0,
+    "action_max": 1.0,
+    "prefill_buffer_size": 2500,
+    "prefill_with_planner": false,
+    "sgd_burst_steps": 2500,
+    "eval_freq": 10000,
+    "chunk_size": 1000,
     "plot_eval": false,
+    "visualizer": {
+      "type": "cheetah"
+    },
     "evaluator": {
       "seed": 123,
       "max_steps": 500,
-      "num_episodes": 5,
+      "num_episodes": 2,
       "environment": {},
       "planner": {
         "type": "mppi"
@@ -36,10 +43,10 @@
       ],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
-      "frozen": true
+      "frozen": false
     },
     "dynamics": {
-      "type": "dense_lora_xs",
+      "type": "dense",
       "dynamics_features": [
         512,
         512,
@@ -48,14 +55,6 @@
       ],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
-      "svd_rank": 48,
-      "r_init_std": 1e-05,
-      "adapt_layers": [
-        0,
-        1,
-        2,
-        3
-      ],
       "frozen": false
     },
     "critic": {
@@ -70,7 +69,7 @@
       "vmax": 10.0,
       "dropout": 0.01,
       "num_subsample": 2,
-      "frozen": true
+      "frozen": false
     },
     "policy": {
       "type": "squashed_gaussian",
@@ -80,7 +79,7 @@
       ],
       "log_std_min": -10,
       "log_std_max": 2,
-      "frozen": true
+      "frozen": false
     },
     "reward": {
       "type": "mlp",
@@ -91,25 +90,34 @@
       "num_bins": 101,
       "vmin": -10.0,
       "vmax": 10.0,
-      "frozen": true
+      "frozen": false
     },
     "environment": {
       "type": "cheetah",
       "num_agents": 1,
       "max_episode_steps": 500,
-      "cheetah_mass_scale": 0.1
+      "cheetah_mass_scale": 1.0
     },
     "trainer": {
-      "type": "ekf_efficient",
-      "lr": 10.0,
-      "jitter": 0.0,
-      "init_cov_scale": 0.01
+      "type": "tdmpc2",
+      "lr": 0.0003,
+      "encoder_lr": 9e-05,
+      "policy_lr": 0.0003,
+      "grad_clip_norm": 20,
+      "horizon": 3,
+      "discount_factor": 0.99,
+      "temporal_decay": 0.5,
+      "ema_decay": 0.99,
+      "consistency_coef": 20.0,
+      "reward_coef": 0.1,
+      "value_coef": 0.1,
+      "entropy_coef": 0.0001
     },
     "sampler": {
-      "type": "latest",
-      "batch_size": 1,
-      "horizon": 1,
-      "min_buffer_size": 1
+      "type": "trajectory_batch",
+      "batch_size": 256,
+      "horizon": 3,
+      "min_buffer_size": 2500
     },
     "state_labels": [
       "rootz",
@@ -136,15 +144,20 @@
       "info_horizon": 1,
       "meas_noise_scale": 1.0,
       "horizon": 3,
-      "num_iterations": 1,
+      "num_iterations": 6,
       "dim_control": 6,
-      "batch_size": 64,
+      "batch_size": 512,
       "num_pi_trajs": 24,
       "temperature": 0.5,
       "min_std": 0.05,
       "discount_factor": 0.99,
       "num_elites": 64,
       "max_std": 2.0
-    }
+    },
+    "save_checkpoints": true,
+    "save_final": true,
+    "pretrained_path": null,
+    "num_seeds": 1,
+    "num_processes": 1
   }
 }
