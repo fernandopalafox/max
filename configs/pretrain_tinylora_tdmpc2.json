@@ -2,7 +2,7 @@
   "training": {
     "wandb_project": "cheetah_ft_latent",
     "seed": 44,
-    "save_dir": "./data/models/cheetah_tdmpc2",
+    "save_dir": "./data/models/cheetah_tdmpc2_tinylora",
     "checkpoint_freq": 100000,
     "num_agents": 1,
     "max_steps": 1000000,
@@ -46,7 +46,7 @@
       "frozen": false
     },
     "dynamics": {
-      "type": "dense",
+      "type": "dense_tiny_lora",
       "dynamics_features": [
         512,
         512,
@@ -55,6 +55,15 @@
       ],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
+      "svd_rank": 64,
+      "steering_dim": 16,
+      "projection_seed": 42,
+      "adapt_layers": [
+        0,
+        1,
+        2,
+        3
+      ],
       "frozen": false
     },
     "critic": {
@@ -101,7 +110,7 @@
     "trainer": {
       "type": "tdmpc2",
       "lr": 0.0003,
-      "encoder_lr": 9e-05,
+      "encoder_lr": 0.0001,
       "policy_lr": 0.0003,
       "grad_clip_norm": 20,
       "horizon": 3,

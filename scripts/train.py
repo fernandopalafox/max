@@ -1,9 +1,18 @@
 # train.py
 
 import os
+import sys
+import argparse as _ap
+
+_pp = _ap.ArgumentParser(add_help=False)
+_pp.add_argument("--gpu", type=str, default=None)
+_pre, _ = _pp.parse_known_args()
+if _pre.gpu is not None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = _pre.gpu
+
 # os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
 # os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.45"
-os.environ["JAX_COMPILATION_CACHE_DIR"] = "/tmp/jax_cache"
+os.environ["JAX_COMPILATION_CACHE_DIR"] = os.path.expanduser("~/.cache/jax_cache")
 os.environ["JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] = "0"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
@@ -42,10 +51,11 @@ def main(config):
     wandb.config.update(config, allow_val_change=True)
     key = jax.random.key(config["seed"])
 
-    save_dir = config.get("save_dir", None)
-    plot_eval = config.get("plot_eval", False)
-    checkpoint_enabled = config.get("checkpoint_enabled", False)
-    checkpoint_freq = config.get("checkpoint_freq", 100000)
+    save_dir = config["save_dir"]
+    plot_eval = config["plot_eval"]
+    save_checkpoints = config["save_checkpoints"]
+    save_final = config["save_final"]
+    checkpoint_freq = config["checkpoint_freq"]
 
     # Create timestamped run directory
     run_dir = None
@@ -53,7 +63,7 @@ def main(config):
         run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = os.path.join(save_dir, run_timestamp)
         os.makedirs(run_dir, exist_ok=True)
-        if checkpoint_enabled:
+        if save_checkpoints:
             print(f"Checkpointing every {checkpoint_freq} steps to {run_dir}/")
 
     # ---- Environment ----
@@ -61,7 +71,7 @@ def main(config):
 
     # ---- Model components ----
     pretrained_params = {}
-    if path := config.get("pretrained_path"):
+    if path := config["pretrained_path"]:
         with open(path, "rb") as f:
             pretrained_params = pickle.load(f)["mean"]
         print(f"Loaded pretrained parameters from {path}")
@@ -152,21 +162,38 @@ def main(config):
     )
     print(f"[{time.time()-t0:.2f}s] Rollout initialized")
 
-    # ---- Pre-fill buffer with random actions ----
-    sampler_cfg = config["sampler"]
-    min_buffer_size = sampler_cfg.get(
-        "min_buffer_size",
-        sampler_cfg["batch_size"] + sampler_cfg["horizon"],
-    )
-    print(f"[{time.time()-t0:.2f}s] Pre-filling buffer ({min_buffer_size} steps)...")
+    # ---- Pre-fill buffer ----
+    prefill_buffer_size = config["prefill_buffer_size"]
+    prefill_planner = planner if config["prefill_with_planner"] else None
+    print(f"[{time.time()-t0:.2f}s] Pre-filling buffer ({prefill_buffer_size} steps)...")
     rollout_state = prefill_buffer(
         rollout_state,
         reset_fn, step_fn, get_obs_fn,
         dim_a=config["dim_action"],
-        min_buffer_size=min_buffer_size,
+        prefill_buffer_size=prefill_buffer_size,
         buffer_size=config["buffer_size"],
+        action_min=config["action_min"],
+        action_max=config["action_max"],
+        planner=prefill_planner,
     )
     print(f"[{time.time()-t0:.2f}s] Buffer pre-filled (buffer_idx={int(rollout_state.buffer_idx)})")
+
+    # ---- Initial SGD burst ----
+    sgd_burst_steps = config["sgd_burst_steps"]
+    if sgd_burst_steps > 0:
+        print(f"[{time.time()-t0:.2f}s] Initial SGD burst ({sgd_burst_steps} steps)...")
+        pretrain_fn = jax.jit(trainer.train)
+        for _ in range(sgd_burst_steps):
+            key, sample_key, train_key = jax.random.split(key, 3)
+            train_data = sampler.sample_jit(sample_key, rollout_state.buffers, rollout_state.buffer_idx)
+            new_train_state, new_parameters, _ = pretrain_fn(
+                rollout_state.train_state, train_data, rollout_state.parameters, train_key
+            )
+            rollout_state = rollout_state._replace(
+                train_state=new_train_state,
+                parameters=new_parameters,
+            )
+        print(f"[{time.time()-t0:.2f}s] Initial SGD burst complete")
 
     # ---- Chunk loop (jax.lax.scan per chunk) ----
     chunk_size = config["chunk_size"]
@@ -191,7 +218,8 @@ def main(config):
 
         # ---- Log mean train metrics for this chunk ----
         mean_metrics = {k: float(jnp.mean(v)) for k, v in chunk_out.train_metrics.items()}
-        wandb.log(mean_metrics, step=step)
+        sps = chunk_size / dt
+        wandb.log({**mean_metrics, "train/steps_per_second": sps}, step=step)
 
         # ---- Log episode stats from buffer ----
         curr_idx = int(rollout_state.buffer_idx)
@@ -209,7 +237,6 @@ def main(config):
             )
 
         # ---- Evaluation ----
-        sps = chunk_size / dt
         if chunk_idx % eval_every == 0:
             t_eval = time.time()
             eval_results = evaluator.evaluate(rollout_state.parameters)
@@ -234,14 +261,15 @@ def main(config):
             print(f"[Step {step}] chunk={dt:.2f}s ({sps:.0f} steps/s)")
 
         # ---- Checkpoint ----
-        if checkpoint_enabled and run_dir and chunk_idx % checkpoint_chunk_freq == 0:
+        if save_checkpoints and run_dir and chunk_idx % checkpoint_chunk_freq == 0:
             ckpt_path = os.path.join(run_dir, f"step_{step}.pkl")
             with open(ckpt_path, "wb") as f:
                 pickle.dump(jax.device_get(rollout_state.parameters), f)
             print(f"Checkpoint saved: {ckpt_path}")
 
     # ---- Save final parameters ----
-    if run_dir:
+    if save_final:
+        assert run_dir, "save_final requires save_dir to be set"
         file_path = os.path.join(run_dir, "final.pkl")
         print(f"\nSaving final parameters to {file_path}...")
         with open(file_path, "wb") as f:
@@ -285,6 +313,7 @@ if __name__ == "__main__":
         default="cheetah.json",
         help="Config filename in configs folder.",
     )
+    parser.add_argument("--gpu", type=str, default=None, help="GPU index (sets CUDA_VISIBLE_DEVICES).")
     args = parser.parse_args()
 
     if os.environ.get("WANDB_SWEEP_ID"):
@@ -297,12 +326,48 @@ if __name__ == "__main__":
             full_config = json.load(f)
         CONFIG = full_config["training"]
 
-        env_type = CONFIG.get("environment", {}).get("type", "unknown")
-        run_name_base = args.run_name or f"tdmpc2_{env_type}"
+        run_name_base = args.run_name or "cheetah_tdmpc2"
+        num_seeds = CONFIG["num_seeds"]
+        num_processes = CONFIG["num_processes"]
 
-        base_key = jax.random.key(CONFIG["seed"])
-        seed_keys = jax.random.split(base_key, args.num_seeds)
-        seeds = [int(jax.random.bits(k)) for k in seed_keys]
+        if num_processes > 1:
+            # Derive per-process seeds using Python random (not JAX) so the
+            # parent process never initializes a CUDA context — otherwise the
+            # parent and each subprocess would hold simultaneous CUDA contexts
+            # on the same GPU, causing OOM.
+            import random
+            rng = random.Random(CONFIG["seed"])
+            proc_seeds = [rng.randint(0, 2**31) for _ in range(num_processes)]
+
+            for proc_idx, proc_seed in enumerate(proc_seeds, start=1):
+                print(f"--- Starting process {proc_idx}/{num_processes} ---")
+                if os.path.exists("/tmp/jax_cache"):
+                    shutil.rmtree("/tmp/jax_cache")
+
+                proc_config = copy.deepcopy(CONFIG)
+                proc_config["seed"] = proc_seed
+                proc_config["num_processes"] = 1  # prevent recursion
+                proc_config["process_idx"] = proc_idx
+
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", delete=False
+                ) as f:
+                    json.dump({"training": proc_config}, f, indent=2)
+                    tmp_path = f.name
+
+                proc_run_name = f"{run_name_base}_p{proc_idx}"
+                subprocess.run(
+                    [sys.executable, __file__,
+                     "--config", tmp_path,
+                     "--run-name", proc_run_name],
+                    cwd=os.path.dirname(os.path.abspath(__file__)),
+                )
+                os.unlink(tmp_path)
+
+        else:
+            base_key = jax.random.key(CONFIG["seed"])
+            seed_keys = jax.random.split(base_key, num_seeds)
+            seeds = [int(jax.random.bits(k)) for k in seed_keys]
 
         for seed_idx, seed in enumerate(seeds, start=1):
             print(f"--- Starting run seed {seed_idx}/{args.num_seeds} ---")
@@ -313,18 +378,14 @@ if __name__ == "__main__":
                 run_name = f"{run_name}_{seed_idx}"
             run_config["wandb_run_name"] = run_name
 
-            project_name = run_config.get("wandb_project")
-            if not project_name:
-                env_type = run_config.get("environment", {}).get("type", "unknown")
-                project_name = f"tdmpc2-{env_type}"
-
-            wandb.init(
-                project=project_name,
-                config=run_config,
-                name=run_config.get("wandb_run_name"),
-                reinit=True,
-            )
-            main(run_config)
-            wandb.finish()
+                wandb.init(
+                    project=run_config["wandb_project"],
+                    config=run_config,
+                    name=run_config["wandb_run_name"],
+                    group=run_config.get("wandb_group"),
+                    reinit=True,
+                )
+                main(run_config)
+                wandb.finish()
 
         print("All experiments complete.")

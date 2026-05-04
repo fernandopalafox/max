@@ -1,30 +1,31 @@
 {
   "training": {
-    "wandb_project": "cheetah_ft_latent",
+    "wandb_project": "test_adaptation",
     "seed": 44,
-    "save_dir": "./data/models/cheetah_tdmpc2",
-    "checkpoint_freq": 100000,
+    "num_seeds": 1,
+    "num_processes": 1,
+    "pretrained_path": "/home/fp5275/repos/max/data/models/cheetah/baseline_new/run_2/final.pkl",
     "num_agents": 1,
-    "max_steps": 1000000,
+    "max_steps": 500000,
     "buffer_size": 1000010,
     "dim_state": 17,
     "dim_action": 6,
     "action_min": -1.0,
     "action_max": 1.0,
-    "prefill_buffer_size": 2500,
-    "prefill_with_planner": false,
-    "sgd_burst_steps": 2500,
+    "prefill_buffer_size": 259,
+    "prefill_with_planner": true,
+    "sgd_burst_steps": 0,
     "eval_freq": 10000,
     "chunk_size": 1000,
     "plot_eval": false,
-    "visualizer": {
-      "type": "cheetah"
-    },
+    "save_dir": null,
     "evaluator": {
       "seed": 123,
       "max_steps": 500,
-      "num_episodes": 2,
-      "environment": {},
+      "num_episodes": 5,
+      "environment": {
+        "cheetah_mass_scale": 0.1
+      },
       "planner": {
         "type": "mppi"
       }
@@ -92,12 +93,6 @@
       "vmax": 10.0,
       "frozen": false
     },
-    "environment": {
-      "type": "cheetah",
-      "num_agents": 1,
-      "max_episode_steps": 500,
-      "cheetah_mass_scale": 1.0
-    },
     "trainer": {
       "type": "tdmpc2",
       "lr": 0.0003,
@@ -117,7 +112,29 @@
       "type": "trajectory_batch",
       "batch_size": 256,
       "horizon": 3,
-      "min_buffer_size": 2500
+      "min_buffer_size": 259
+    },
+    "environment": {
+      "type": "cheetah",
+      "num_agents": 1,
+      "max_episode_steps": 500,
+      "cheetah_mass_scale": 0.1
+    },
+    "planner": {
+      "type": "mppi",
+      "info_weight": 0.0,
+      "info_horizon": 1,
+      "meas_noise_scale": 1.0,
+      "horizon": 3,
+      "num_iterations": 6,
+      "dim_control": 6,
+      "batch_size": 512,
+      "num_pi_trajs": 24,
+      "temperature": 0.5,
+      "min_std": 0.05,
+      "discount_factor": 0.99,
+      "num_elites": 64,
+      "max_std": 2.0
     },
     "state_labels": [
       "rootz",
@@ -138,26 +155,8 @@
       "vel_fshin",
       "vel_ffoot"
     ],
-    "planner": {
-      "type": "mppi",
-      "info_weight": 0.0,
-      "info_horizon": 1,
-      "meas_noise_scale": 1.0,
-      "horizon": 3,
-      "num_iterations": 6,
-      "dim_control": 6,
-      "batch_size": 512,
-      "num_pi_trajs": 24,
-      "temperature": 0.5,
-      "min_std": 0.05,
-      "discount_factor": 0.99,
-      "num_elites": 64,
-      "max_std": 2.0
-    },
-    "save_checkpoints": true,
-    "save_final": true,
-    "pretrained_path": null,
-    "num_seeds": 1,
-    "num_processes": 1
+    "save_checkpoints": false,
+    "save_final": false,
+    "checkpoint_freq": 100000
   }
 }
