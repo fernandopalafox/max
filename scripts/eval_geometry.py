@@ -8,13 +8,16 @@ Computes two metrics per checkpoint (averaged across adapted layers):
   diag_mean_Chat  : mean diagonal of C_hat = Z^T Z / N  (target: 1.0)
   offdiag_rms_Chat: RMS off-diagonal of C_hat  (target: 0.0)
 
+C_hat is estimated using latent states from real environment rollouts with the
+saved encoder and policy, so the observation distribution matches training.
+
 Appends one row to a CSV results table.
 
 Usage:
   python scripts/eval_geometry.py \\
       --trainer_type loraxs_regularized \\
       --run_name run_1 \\
-      --checkpoint_path data/models/cheetah_tdmpc2_loraxs_regularized/20260505_144429 \\
+      --checkpoint_path data/models/cheetah/baseline_loraxs_regularized/run_1 \\
       --csv results/geometry.csv
 """
 
@@ -31,6 +34,8 @@ import jax.numpy as jnp
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from max.dynamics import init_dynamics
+from max.encoders import init_encoder
+from max.environments import init_env
 
 # Map trainer_type to its config file
 CONFIGS = {
@@ -48,18 +53,47 @@ def _matrix_metrics(M, rank):
 
 
 def _normalize_adapter_keys(adapter):
-    """Rename old P_i/Q_i keys to new B_i/A_i convention if needed."""
+    """Rename old P_i/Q_i keys to new A_i/B_i convention if needed."""
     if any(k.startswith("P_") for k in adapter):
         renamed = {}
         for k, v in adapter.items():
             if k.startswith("P_"):
-                renamed["B_" + k[2:]] = v   # P_i (d_in, rank) -> B_i
+                renamed["B_" + k[2:]] = v   # P_i (d_in, rank)  -> B_i
             elif k.startswith("Q_"):
                 renamed["A_" + k[2:]] = v   # Q_i (d_out, rank) -> A_i
             else:
                 renamed[k] = v
         return renamed
     return adapter
+
+
+def _collect_latents(config, enc_params, n_samples, key):
+    """Run random-action rollouts and return encoded latent states."""
+    reset_fn, step_fn, get_obs_fn = init_env(config)
+    encoder, _ = init_encoder(key, config)
+    encode_fn = jax.jit(lambda obs: encoder.encode(enc_params, obs.squeeze(0)))
+
+    dim_action = config["dim_action"]
+    latents = []
+
+    key, rk = jax.random.split(key)
+    env_state = reset_fn(rk)
+    obs = get_obs_fn(env_state)
+
+    while len(latents) < n_samples:
+        z = encode_fn(obs)
+        latents.append(z)
+
+        key, ak, sk = jax.random.split(key, 3)
+        action = jax.random.uniform(ak, (dim_action,), minval=-1.0, maxval=1.0)
+        env_state, obs, _, terminated, truncated, _ = step_fn(env_state, len(latents), action)
+
+        if terminated or truncated:
+            key, rk = jax.random.split(key)
+            env_state = reset_fn(rk)
+            obs = get_obs_fn(env_state)
+
+    return jnp.stack(latents[:n_samples])  # (n_samples, latent_dim)
 
 
 def main():
@@ -73,7 +107,7 @@ def main():
     parser.add_argument("--csv", default="results/geometry.csv",
                         help="CSV file to append results to")
     parser.add_argument("--n_samples", type=int, default=1024,
-                        help="Random samples for C_hat estimation")
+                        help="Environment samples for C_hat estimation")
     args = parser.parse_args()
 
     if args.trainer_type == "dense":
@@ -88,7 +122,6 @@ def main():
 
     adapt_layers = config["dynamics"]["adapt_layers"]
     rank         = config["dynamics"]["rank"]
-    latent_dim   = config["encoder"]["encoder_features"][-1]
     dim_action   = config["dim_action"]
 
     # Load checkpoint
@@ -108,22 +141,19 @@ def main():
         diag_AtA_per_layer.append(d)
         offdiag_AtA_per_layer.append(o)
 
-    diag_mean_AtA    = float(jnp.mean(jnp.array(diag_AtA_per_layer)))
-    offdiag_rms_AtA  = float(jnp.mean(jnp.array(offdiag_AtA_per_layer)))
+    diag_mean_AtA   = float(jnp.mean(jnp.array(diag_AtA_per_layer)))
+    offdiag_rms_AtA = float(jnp.mean(jnp.array(offdiag_AtA_per_layer)))
 
-    # ---- C_hat metrics (random inputs through predict_with_activations) ----
-    # Init dynamics with pretrained=None (Case 1) to get the Dynamics object.
-    # predict_with_activations reads all weights from its params argument,
-    # so we can pass the loaded checkpoint params directly.
+    # ---- C_hat metrics (real env latents through predict_with_activations) ----
     key = jax.random.key(42)
-    dynamics, _ = init_dynamics(key, config, pretrained=None)
+    z_real = _collect_latents(config, params["mean"]["encoder"], args.n_samples, key)
 
-    key, kz, ka = jax.random.split(key, 3)
-    z_rand = jax.random.normal(kz, (args.n_samples, latent_dim))
+    key, ka = jax.random.split(key)
     a_rand = jax.random.uniform(ka, (args.n_samples, dim_action), minval=-1.0, maxval=1.0)
 
-    infer_batch = jax.vmap(dynamics.predict_with_activations, in_axes=(None, 0, 0))
-    _, bh_dict = infer_batch(dyn_params, z_rand, a_rand)
+    dynamics, _ = init_dynamics(key, config, pretrained=None)
+    infer_batch = jax.jit(jax.vmap(dynamics.predict_with_activations, in_axes=(None, 0, 0)))
+    _, bh_dict = infer_batch(dyn_params, z_real, a_rand)
 
     diag_Chat_per_layer, offdiag_Chat_per_layer = [], []
     for i in adapt_layers:
@@ -149,8 +179,8 @@ def main():
             ])
         writer.writerow([
             args.trainer_type, args.run_name,
-            f"{diag_mean_AtA:.4f}",   f"{offdiag_rms_AtA:.4f}",
-            f"{diag_mean_Chat:.4f}",  f"{offdiag_rms_Chat:.4f}",
+            f"{diag_mean_AtA:.4f}",  f"{offdiag_rms_AtA:.4f}",
+            f"{diag_mean_Chat:.4f}", f"{offdiag_rms_Chat:.4f}",
         ])
 
     print(f"trainer_type={args.trainer_type}  run_name={args.run_name}")
