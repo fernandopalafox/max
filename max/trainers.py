@@ -581,7 +581,8 @@ def init_tdmpc2_regularized_trainer(
         reward_loss = reward_loss / H
         q_loss = q_loss / (H * num_ensemble)
 
-        # L_A: structural orthonormality on A matrices (no forward pass needed)
+        # L_A: structural orthonormality on A matrices (paper's A, output-side projection)
+        # A_i shape: (d_out, rank); target: A_i^T @ A_i = I_r
         adapter_A_loss = jnp.zeros(())
         for i in adapt_layers:
             A_i = params["mean"]["dynamics"]["adapter"][f"A_{i}"]  # (d_out, rank)

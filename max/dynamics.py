@@ -280,12 +280,12 @@ def _init_lora_xs_dynamics(
         if i in adapt_layers:
             if case == 1:
                 U, S, Vh = jnp.linalg.svd(W, full_matrices=False)
-                adapter_params[f"A_{i}"] = U[:, :rank] * S[:rank]
-                adapter_params[f"B_{i}"] = Vh[:rank, :].T
+                adapter_params[f"A_{i}"] = Vh[:rank, :].T          # (d_out, rank) — paper's A
+                adapter_params[f"B_{i}"] = U[:, :rank] * S[:rank]  # (d_in,  rank) — paper's B^T
             elif case == 2:
                 U, S, Vh = jnp.linalg.svd(W, full_matrices=False)
-                layer["A"] = U[:, :rank] * S[:rank]
-                layer["B"] = Vh[:rank, :].T
+                layer["A"] = Vh[:rank, :].T
+                layer["B"] = U[:, :rank] * S[:rank]
             else:
                 layer["A"] = pretrained["adapter"][f"A_{i}"]
                 layer["B"] = pretrained["adapter"][f"B_{i}"]
@@ -310,8 +310,8 @@ def _init_lora_xs_dynamics(
                 A = params["adapter"][f"A_{i}"] if case == 1 else layer["A"]
                 B = params["adapter"][f"B_{i}"] if case == 1 else layer["B"]
                 R = params["adapter"][f"R_{i}"]
-                bh_activations[i] = x @ B  # bottleneck activation: (..., rank)
-                x = x @ (W + A @ R @ B.T) + b
+                bh_activations[i] = x @ B  # bottleneck activation: z = Bh in paper notation
+                x = x @ (W + B @ R @ A.T) + b
             else:
                 x = x @ W + b
 
