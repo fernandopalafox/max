@@ -2,7 +2,7 @@
   "training": {
     "wandb_project": "cheetah_ft_latent",
     "seed": 44,
-    "save_dir": "./data/models/cheetah_tdmpc2_loraxs_regularized",
+    "save_dir": "./data/models/cheetah/baseline_loraxs_regularized",
     "checkpoint_freq": 100000,
     "num_agents": 1,
     "max_steps": 1000000,
