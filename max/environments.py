@@ -140,20 +140,20 @@ def _make_humanoid_env(config: Dict[str, Any]):
     env_cfg = config["environment"]
     max_episode_steps = env_cfg.get("max_episode_steps", 500)
     humanoid_mass_scale = env_cfg.get("humanoid_mass_scale", 1.0)
+    humanoid_friction_scale = env_cfg.get("humanoid_friction_scale", 1.0)
+    humanoid_gravity_scale = env_cfg.get("humanoid_gravity_scale", 1.0)
 
     print(f"Initializing environment: humanoid")
 
-    # Load environment and extract models (closed over)
     env = registry.load('HumanoidRun')
+    mj_model = env.mj_model
 
-    # Apply mass scaling if specified
-    if humanoid_mass_scale != 1.0:
+    if humanoid_mass_scale != 1.0 or humanoid_friction_scale != 1.0 or humanoid_gravity_scale != 1.0:
         import mujoco
-        mj_model = env.mj_model
-        # Scale both mass and inertia
         mj_model.body_mass[:] *= humanoid_mass_scale
         mj_model.body_inertia[:] *= humanoid_mass_scale
-        # Recalculate dependent constants
+        mj_model.geom_friction[:] *= humanoid_friction_scale
+        mj_model.opt.gravity[:] *= humanoid_gravity_scale
         mj_data = mujoco.MjData(mj_model)
         mujoco.mj_setConst(mj_model, mj_data)
         mjx_model = mjx.put_model(mj_model)
@@ -318,12 +318,26 @@ def _make_walker_env(config: Dict[str, Any]):
 
     env_cfg = config["environment"]
     max_episode_steps = env_cfg.get("max_episode_steps", 1000)
+    walker_mass_scale = env_cfg.get("walker_mass_scale", 1.0)
+    walker_friction_scale = env_cfg.get("walker_friction_scale", 1.0)
+    walker_gravity_scale = env_cfg.get("walker_gravity_scale", 1.0)
 
     print(f"Initializing environment: walker")
 
     env = registry.load('WalkerWalk')
-    mjx_model = env.mjx_model
     mj_model = env.mj_model
+
+    if walker_mass_scale != 1.0 or walker_friction_scale != 1.0 or walker_gravity_scale != 1.0:
+        import mujoco
+        mj_model.body_mass[:] *= walker_mass_scale
+        mj_model.body_inertia[:] *= walker_mass_scale
+        mj_model.geom_friction[:] *= walker_friction_scale
+        mj_model.opt.gravity[:] *= walker_gravity_scale
+        mj_data = mujoco.MjData(mj_model)
+        mujoco.mj_setConst(mj_model, mj_data)
+        mjx_model = mjx.put_model(mj_model)
+    else:
+        mjx_model = env.mjx_model
 
     torso_id = mj_model.body("torso").id
     sensor_id = mj_model.sensor("torso_subtreelinvel").id
@@ -409,12 +423,26 @@ def _make_walker_run_env(config: Dict[str, Any]):
 
     env_cfg = config["environment"]
     max_episode_steps = env_cfg.get("max_episode_steps", 1000)
+    walker_mass_scale = env_cfg.get("walker_mass_scale", 1.0)
+    walker_friction_scale = env_cfg.get("walker_friction_scale", 1.0)
+    walker_gravity_scale = env_cfg.get("walker_gravity_scale", 1.0)
 
     print("Initializing environment: walker_run")
 
     env = registry.load("WalkerRun")
-    mjx_model = env.mjx_model
     mj_model = env.mj_model
+
+    if walker_mass_scale != 1.0 or walker_friction_scale != 1.0 or walker_gravity_scale != 1.0:
+        import mujoco
+        mj_model.body_mass[:] *= walker_mass_scale
+        mj_model.body_inertia[:] *= walker_mass_scale
+        mj_model.geom_friction[:] *= walker_friction_scale
+        mj_model.opt.gravity[:] *= walker_gravity_scale
+        mj_data = mujoco.MjData(mj_model)
+        mujoco.mj_setConst(mj_model, mj_data)
+        mjx_model = mjx.put_model(mj_model)
+    else:
+        mjx_model = env.mjx_model
 
     torso_id = mj_model.body("torso").id
     sensor_id = mj_model.sensor("torso_subtreelinvel").id
@@ -481,12 +509,26 @@ def _make_ball_in_cup_env(config: Dict[str, Any]):
 
     env_cfg = config["environment"]
     max_episode_steps = env_cfg.get("max_episode_steps", 1000)
+    ball_in_cup_mass_scale = env_cfg.get("ball_in_cup_mass_scale", 1.0)
+    ball_in_cup_friction_scale = env_cfg.get("ball_in_cup_friction_scale", 1.0)
+    ball_in_cup_gravity_scale = env_cfg.get("ball_in_cup_gravity_scale", 1.0)
 
     print("Initializing environment: ball_in_cup")
 
     env = registry.load("BallInCup")
-    mjx_model = env.mjx_model
     mj_model = env.mj_model
+
+    if ball_in_cup_mass_scale != 1.0 or ball_in_cup_friction_scale != 1.0 or ball_in_cup_gravity_scale != 1.0:
+        import mujoco
+        mj_model.body_mass[:] *= ball_in_cup_mass_scale
+        mj_model.body_inertia[:] *= ball_in_cup_mass_scale
+        mj_model.geom_friction[:] *= ball_in_cup_friction_scale
+        mj_model.opt.gravity[:] *= ball_in_cup_gravity_scale
+        mj_data = mujoco.MjData(mj_model)
+        mujoco.mj_setConst(mj_model, mj_data)
+        mjx_model = mjx.put_model(mj_model)
+    else:
+        mjx_model = env.mjx_model
 
     target_site_id = int(mj_model.site("target").id)
     ball_body_id = int(mj_model.body("ball").id)
@@ -542,11 +584,26 @@ def _make_cartpole_env(config: Dict[str, Any], registry_name: str):
 
     env_cfg = config["environment"]
     max_episode_steps = env_cfg.get("max_episode_steps", 1000)
+    cartpole_mass_scale = env_cfg.get("cartpole_mass_scale", 1.0)
+    cartpole_friction_scale = env_cfg.get("cartpole_friction_scale", 1.0)
+    cartpole_gravity_scale = env_cfg.get("cartpole_gravity_scale", 1.0)
 
     print(f"Initializing environment: {registry_name.lower()}")
 
     env = registry.load(registry_name)
-    mjx_model = env.mjx_model
+    mj_model = env.mj_model
+
+    if cartpole_mass_scale != 1.0 or cartpole_friction_scale != 1.0 or cartpole_gravity_scale != 1.0:
+        import mujoco
+        mj_model.body_mass[:] *= cartpole_mass_scale
+        mj_model.body_inertia[:] *= cartpole_mass_scale
+        mj_model.geom_friction[:] *= cartpole_friction_scale
+        mj_model.opt.gravity[:] *= cartpole_gravity_scale
+        mj_data = mujoco.MjData(mj_model)
+        mujoco.mj_setConst(mj_model, mj_data)
+        mjx_model = mjx.put_model(mj_model)
+    else:
+        mjx_model = env.mjx_model
 
     @jax.jit
     def reset_fn(key: jax.random.PRNGKey) -> mjx.Data:
@@ -606,12 +663,26 @@ def _make_finger_spin_env(config: Dict[str, Any]):
 
     env_cfg = config["environment"]
     max_episode_steps = env_cfg.get("max_episode_steps", 1000)
+    finger_spin_mass_scale = env_cfg.get("finger_spin_mass_scale", 1.0)
+    finger_spin_friction_scale = env_cfg.get("finger_spin_friction_scale", 1.0)
+    finger_spin_gravity_scale = env_cfg.get("finger_spin_gravity_scale", 1.0)
 
     print("Initializing environment: finger_spin")
 
     env = registry.load("FingerSpin")
-    mjx_model = env.mjx_model
     mj_model = env.mj_model
+
+    if finger_spin_mass_scale != 1.0 or finger_spin_friction_scale != 1.0 or finger_spin_gravity_scale != 1.0:
+        import mujoco
+        mj_model.body_mass[:] *= finger_spin_mass_scale
+        mj_model.body_inertia[:] *= finger_spin_mass_scale
+        mj_model.geom_friction[:] *= finger_spin_friction_scale
+        mj_model.opt.gravity[:] *= finger_spin_gravity_scale
+        mj_data = mujoco.MjData(mj_model)
+        mujoco.mj_setConst(mj_model, mj_data)
+        mjx_model = mjx.put_model(mj_model)
+    else:
+        mjx_model = env.mjx_model
 
     def _sadr(name):
         return int(mj_model.sensor_adr[mj_model.sensor(name).id])
@@ -680,12 +751,26 @@ def _make_hopper_hop_env(config: Dict[str, Any]):
 
     env_cfg = config["environment"]
     max_episode_steps = env_cfg.get("max_episode_steps", 1000)
+    hopper_hop_mass_scale = env_cfg.get("hopper_hop_mass_scale", 1.0)
+    hopper_hop_friction_scale = env_cfg.get("hopper_hop_friction_scale", 1.0)
+    hopper_hop_gravity_scale = env_cfg.get("hopper_hop_gravity_scale", 1.0)
 
     print("Initializing environment: hopper_hop")
 
     env = registry.load("HopperHop")
-    mjx_model = env.mjx_model
     mj_model = env.mj_model
+
+    if hopper_hop_mass_scale != 1.0 or hopper_hop_friction_scale != 1.0 or hopper_hop_gravity_scale != 1.0:
+        import mujoco
+        mj_model.body_mass[:] *= hopper_hop_mass_scale
+        mj_model.body_inertia[:] *= hopper_hop_mass_scale
+        mj_model.geom_friction[:] *= hopper_hop_friction_scale
+        mj_model.opt.gravity[:] *= hopper_hop_gravity_scale
+        mj_data = mujoco.MjData(mj_model)
+        mujoco.mj_setConst(mj_model, mj_data)
+        mjx_model = mjx.put_model(mj_model)
+    else:
+        mjx_model = env.mjx_model
 
     torso_id = int(mj_model.body("torso").id)
     foot_id  = int(mj_model.body("foot").id)
@@ -759,12 +844,26 @@ def _make_reacher_env(config: Dict[str, Any], registry_name: str):
 
     env_cfg = config["environment"]
     max_episode_steps = env_cfg.get("max_episode_steps", 1000)
+    reacher_mass_scale = env_cfg.get("reacher_mass_scale", 1.0)
+    reacher_friction_scale = env_cfg.get("reacher_friction_scale", 1.0)
+    reacher_gravity_scale = env_cfg.get("reacher_gravity_scale", 1.0)
 
     print(f"Initializing environment: {registry_name.lower()}")
 
     env = registry.load(registry_name)
-    mjx_model = env.mjx_model
     mj_model = env.mj_model
+
+    if reacher_mass_scale != 1.0 or reacher_friction_scale != 1.0 or reacher_gravity_scale != 1.0:
+        import mujoco
+        mj_model.body_mass[:] *= reacher_mass_scale
+        mj_model.body_inertia[:] *= reacher_mass_scale
+        mj_model.geom_friction[:] *= reacher_friction_scale
+        mj_model.opt.gravity[:] *= reacher_gravity_scale
+        mj_data = mujoco.MjData(mj_model)
+        mujoco.mj_setConst(mj_model, mj_data)
+        mjx_model = mjx.put_model(mj_model)
+    else:
+        mjx_model = env.mjx_model
 
     finger_geom_id = int(mj_model.geom("finger").id)
     target_geom_id = int(mj_model.geom("target").id)

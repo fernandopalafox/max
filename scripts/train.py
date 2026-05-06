@@ -378,14 +378,14 @@ if __name__ == "__main__":
                 run_name = f"{run_name}_{seed_idx}"
             run_config["wandb_run_name"] = run_name
 
-                wandb.init(
-                    project=run_config["wandb_project"],
-                    config=run_config,
-                    name=run_config["wandb_run_name"],
-                    group=run_config.get("wandb_group"),
-                    reinit=True,
-                )
-                main(run_config)
-                wandb.finish()
+            wandb.init(
+                project=run_config["wandb_project"],
+                config=run_config,
+                name=run_config["wandb_run_name"],
+                group=run_config.get("wandb_group"),
+                reinit=True,
+            )
+            main(run_config)
+            wandb.finish()
 
         print("All experiments complete.")
