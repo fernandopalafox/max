@@ -42,6 +42,7 @@ CONFIGS = {
     "dense":               "configs/pretrain_dense_tdmpc2.json",
     "loraxs":              "configs/pretrain_loraxs_tdmpc2.json",
     "loraxs_regularized":  "configs/pretrain_loraxs_regularized_tdmpc2.json",
+    "loraxs_init":         "configs/pretrain_loraxs_tdmpc2.json",  # SVD init from dense checkpoint
 }
 
 
@@ -99,7 +100,7 @@ def _collect_latents(config, enc_params, n_samples, key):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--trainer_type", required=True,
-                        choices=["dense", "loraxs", "loraxs_regularized"])
+                        choices=["dense", "loraxs", "loraxs_regularized", "loraxs_init"])
     parser.add_argument("--run_name", required=True,
                         help="Label for this run, e.g. run_1")
     parser.add_argument("--checkpoint_path", required=True,
@@ -113,6 +114,8 @@ def main():
     if args.trainer_type == "dense":
         print("dense trainer has no adapter matrices — nothing to evaluate.")
         return
+
+    is_init = args.trainer_type == "loraxs_init"
 
     # Load config
     repo_root = os.path.join(os.path.dirname(__file__), "..")
@@ -129,31 +132,53 @@ def main():
     with open(ckpt_file, "rb") as f:
         params = pickle.load(f)
 
-    dyn_params = params["mean"]["dynamics"]
-    dyn_params["adapter"] = _normalize_adapter_keys(dyn_params["adapter"])
+    key = jax.random.key(42)
 
-    # ---- A^T A metrics (direct from params, no data needed) ----
-    diag_AtA_per_layer, offdiag_AtA_per_layer = [], []
-    for i in adapt_layers:
-        A_i = jnp.array(dyn_params["adapter"][f"A_{i}"])  # (d_out, rank)
-        AtA = A_i.T @ A_i                                  # (rank, rank)
-        d, o = _matrix_metrics(AtA, rank)
-        diag_AtA_per_layer.append(d)
-        offdiag_AtA_per_layer.append(o)
+    if is_init:
+        # Dense checkpoint: extract A/B via SVD of each W, init Case 2 dynamics
+        dense_p = params["mean"]["dynamics"]["params"]
+
+        diag_AtA_per_layer, offdiag_AtA_per_layer = [], []
+        for i in adapt_layers:
+            W = jnp.array(dense_p[f"Dense_{i}"]["kernel"])  # (d_in, d_out)
+            U, S, Vh = jnp.linalg.svd(W, full_matrices=False)
+            A_i = Vh[:rank, :].T          # (d_out, rank)
+            AtA = A_i.T @ A_i
+            d, o = _matrix_metrics(AtA, rank)
+            diag_AtA_per_layer.append(d)
+            offdiag_AtA_per_layer.append(o)
+
+        # Init Case 2 dynamics (A/B frozen via SVD, fresh R)
+        dynamics, r_params = init_dynamics(key, config, pretrained=params["mean"]["dynamics"])
+        enc_params = params["mean"]["encoder"]
+        infer_dyn_params = r_params
+    else:
+        dyn_params = params["mean"]["dynamics"]
+        dyn_params["adapter"] = _normalize_adapter_keys(dyn_params["adapter"])
+
+        diag_AtA_per_layer, offdiag_AtA_per_layer = [], []
+        for i in adapt_layers:
+            A_i = jnp.array(dyn_params["adapter"][f"A_{i}"])  # (d_out, rank)
+            AtA = A_i.T @ A_i
+            d, o = _matrix_metrics(AtA, rank)
+            diag_AtA_per_layer.append(d)
+            offdiag_AtA_per_layer.append(o)
+
+        dynamics, _ = init_dynamics(key, config, pretrained=None)
+        enc_params = params["mean"]["encoder"]
+        infer_dyn_params = dyn_params
 
     diag_mean_AtA   = float(jnp.mean(jnp.array(diag_AtA_per_layer)))
     offdiag_rms_AtA = float(jnp.mean(jnp.array(offdiag_AtA_per_layer)))
 
     # ---- C_hat metrics (real env latents through predict_with_activations) ----
-    key = jax.random.key(42)
-    z_real = _collect_latents(config, params["mean"]["encoder"], args.n_samples, key)
+    z_real = _collect_latents(config, enc_params, args.n_samples, key)
 
     key, ka = jax.random.split(key)
     a_rand = jax.random.uniform(ka, (args.n_samples, dim_action), minval=-1.0, maxval=1.0)
 
-    dynamics, _ = init_dynamics(key, config, pretrained=None)
     infer_batch = jax.jit(jax.vmap(dynamics.predict_with_activations, in_axes=(None, 0, 0)))
-    _, bh_dict = infer_batch(dyn_params, z_real, a_rand)
+    _, bh_dict = infer_batch(infer_dyn_params, z_real, a_rand)
 
     diag_Chat_per_layer, offdiag_Chat_per_layer = [], []
     for i in adapt_layers:

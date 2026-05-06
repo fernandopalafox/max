@@ -1,3 +1,4 @@
 trainer_type,run_name,diag_mean_AtA,offdiag_rms_AtA,diag_mean_Chat,offdiag_rms_Chat
 loraxs_regularized,run_1,0.9999,0.0008,0.9639,0.3286
 loraxs,run_1,14.4132,1.4447,0.6159,0.1981
+loraxs_init,run_1,1.0001,0.0000,70.9650,57.1899
