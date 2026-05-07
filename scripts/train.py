@@ -316,6 +316,9 @@ if __name__ == "__main__":
         help="Config filename or absolute path.",
     )
     parser.add_argument("--gpu", type=str, default=None, help="GPU index (sets CUDA_VISIBLE_DEVICES).")
+    parser.add_argument("--save-dir", type=str, default=None, help="Override training.save_dir in config.")
+    parser.add_argument("--seed", type=int, default=None, help="Override training.seed in config.")
+    parser.add_argument("--pretrained-path", type=str, default=None, help="Override training.pretrained_path in config.")
     args = parser.parse_args()
 
     if os.environ.get("WANDB_SWEEP_ID"):
@@ -327,6 +330,13 @@ if __name__ == "__main__":
         with open(config_path, "r") as f:
             full_config = json.load(f)
         CONFIG = full_config["training"]
+
+        if args.save_dir is not None:
+            CONFIG["save_dir"] = args.save_dir
+        if args.seed is not None:
+            CONFIG["seed"] = args.seed
+        if args.pretrained_path is not None:
+            CONFIG["pretrained_path"] = args.pretrained_path
 
         run_name_base = args.run_name or "cheetah_tdmpc2"
         num_seeds = CONFIG["num_seeds"]

@@ -5,11 +5,12 @@ Evaluate LoRA-XS adapter geometry from a pretrained checkpoint.
 Computes two metrics per checkpoint (averaged across adapted layers):
   diag_mean_AtA   : mean diagonal of A^T A  (target: 1.0)
   offdiag_rms_AtA : RMS off-diagonal of A^T A  (target: 0.0)
-  diag_mean_Chat  : mean diagonal of C_hat = Z^T Z / N  (target: 1.0)
+  diag_mean_Chat  : mean diagonal of C_hat = Bh^T Bh / N  (target: 1.0)
   offdiag_rms_Chat: RMS off-diagonal of C_hat  (target: 0.0)
 
-C_hat is estimated using latent states from real environment rollouts with the
-saved encoder and policy, so the observation distribution matches training.
+C_hat is estimated using latent states from MPPI-planned rollouts with the
+checkpoint's own policy/critic/encoder/reward — same setup as training eval —
+so the observation distribution matches what the model actually sees.
 
 Appends one row to a CSV results table.
 
@@ -17,7 +18,7 @@ Usage:
   python scripts/eval_geometry.py \\
       --trainer_type loraxs_regularized \\
       --run_name run_1 \\
-      --checkpoint_path data/models/cheetah/baseline_loraxs_regularized/run_1 \\
+      --checkpoint_path data/models/cheetah/baseline_loraxs_regularized/run_1/TIMESTAMP/final.pkl \\
       --csv results/geometry.csv
 """
 
@@ -27,6 +28,7 @@ import csv
 import argparse
 import json
 import pickle
+import copy
 
 import jax
 import jax.numpy as jnp
@@ -35,13 +37,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from max.dynamics import init_dynamics
 from max.encoders import init_encoder
+from max.critics import init_critic
+from max.policies import init_policy
+from max.rewards import init_reward_model
 from max.environments import init_env
+from max.planners import init_planner
 
-# Map trainer_type to its config file
+# Map trainer_type to its pretraining config file
 CONFIGS = {
-    "dense":               "configs/pretrain_dense_tdmpc2.json",
     "loraxs":              "configs/pretrain_loraxs_tdmpc2.json",
     "loraxs_regularized":  "configs/pretrain_loraxs_regularized_tdmpc2.json",
+    "loraxs_reg_Cfix":     "configs/pretrain_loraxs_reg_Cfix_tdmpc2.json",
     "loraxs_init":         "configs/pretrain_loraxs_tdmpc2.json",  # SVD init from dense checkpoint
 }
 
@@ -59,65 +65,83 @@ def _normalize_adapter_keys(adapter):
         renamed = {}
         for k, v in adapter.items():
             if k.startswith("P_"):
-                renamed["B_" + k[2:]] = v   # P_i (d_in, rank)  -> B_i
+                renamed["B_" + k[2:]] = v
             elif k.startswith("Q_"):
-                renamed["A_" + k[2:]] = v   # Q_i (d_out, rank) -> A_i
+                renamed["A_" + k[2:]] = v
             else:
                 renamed[k] = v
         return renamed
     return adapter
 
 
-def _collect_latents(config, enc_params, n_samples, key):
-    """Run random-action rollouts and return encoded latent states."""
+def _collect_planner_data(config, full_params, encoder, dynamics, reward, critic, policy, n_samples, key):
+    """
+    Run MPPI-guided rollouts and return (latents, actions) pairs.
+    Mirrors the training evaluator exactly: uses evaluator config for env/planner setup.
+    """
+    evaluator_cfg = config.get("evaluator", {})
+    max_steps = evaluator_cfg.get("max_steps", config["environment"]["max_episode_steps"])
+
+    # Build env config with evaluator overrides (but we always use training env here)
     reset_fn, step_fn, get_obs_fn = init_env(config)
-    encoder, _ = init_encoder(key, config)
-    encode_fn = jax.jit(lambda obs: encoder.encode(enc_params, obs.squeeze(0)))
 
-    dim_action = config["dim_action"]
+    # Build planner config with evaluator overrides
+    planner_config = {**config}
+    planner_overrides = evaluator_cfg.get("planner", {})
+    if planner_overrides:
+        planner_config["planner"] = {**config["planner"], **planner_overrides}
+
+    key, planner_key = jax.random.split(key)
+    planner, init_planner_state = init_planner(
+        planner_config, key=planner_key,
+        encoder=encoder, dynamics=dynamics, reward=reward, critic=critic, policy=policy,
+    )
+
+    encode_single = jax.jit(
+        lambda obs: encoder.encode(full_params["mean"]["encoder"], obs)
+    )
+
     latents = []
-
-    key, rk = jax.random.split(key)
-    env_state = reset_fn(rk)
-    obs = get_obs_fn(env_state)
+    actions_list = []
 
     while len(latents) < n_samples:
-        z = encode_fn(obs)
-        latents.append(z)
+        key, reset_key, pk = jax.random.split(key, 3)
+        env_state = reset_fn(reset_key)
+        planner_state = init_planner_state.replace(key=pk)
 
-        key, ak, sk = jax.random.split(key, 3)
-        action = jax.random.uniform(ak, (dim_action,), minval=-1.0, maxval=1.0)
-        env_state, obs, _, terminated, truncated, _ = step_fn(env_state, len(latents), action)
+        for _ in range(max_steps):
+            if len(latents) >= n_samples:
+                break
+            obs = get_obs_fn(env_state).squeeze(0)
+            z = encode_single(obs)
+            planned_actions, planner_state = planner.solve(planner_state, obs, full_params)
+            a = planned_actions[0]
+            latents.append(z)
+            actions_list.append(a)
+            env_state, _, _, terminated, truncated, _ = step_fn(env_state, len(latents), a[None, :])
+            if terminated or truncated:
+                break
 
-        if terminated or truncated:
-            key, rk = jax.random.split(key)
-            env_state = reset_fn(rk)
-            obs = get_obs_fn(env_state)
-
-    return jnp.stack(latents[:n_samples])  # (n_samples, latent_dim)
+    return (
+        jnp.stack(latents[:n_samples]),   # (n_samples, latent_dim)
+        jnp.stack(actions_list[:n_samples]),  # (n_samples, dim_action)
+    )
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--trainer_type", required=True,
-                        choices=["dense", "loraxs", "loraxs_regularized", "loraxs_init"])
-    parser.add_argument("--run_name", required=True,
-                        help="Label for this run, e.g. run_1")
-    parser.add_argument("--checkpoint_path", required=True,
-                        help="Directory containing final.pkl")
+                        choices=["loraxs", "loraxs_regularized", "loraxs_reg_Cfix", "loraxs_init"])
+    parser.add_argument("--run_name", required=True, help="Label for this run, e.g. run_1")
+    parser.add_argument("--checkpoint_path", required=True, help="Path to final.pkl")
     parser.add_argument("--csv", default="results/geometry.csv",
                         help="CSV file to append results to")
     parser.add_argument("--n_samples", type=int, default=1024,
-                        help="Environment samples for C_hat estimation")
+                        help="Number of (z, a) pairs for C_hat estimation")
     args = parser.parse_args()
-
-    if args.trainer_type == "dense":
-        print("dense trainer has no adapter matrices — nothing to evaluate.")
-        return
 
     is_init = args.trainer_type == "loraxs_init"
 
-    # Load config
     repo_root = os.path.join(os.path.dirname(__file__), "..")
     config_path = os.path.join(repo_root, CONFIGS[args.trainer_type])
     with open(config_path) as f:
@@ -125,65 +149,80 @@ def main():
 
     adapt_layers = config["dynamics"]["adapt_layers"]
     rank         = config["dynamics"]["rank"]
-    dim_action   = config["dim_action"]
 
-    # Load checkpoint
-    ckpt_file = os.path.join(args.checkpoint_path, "final.pkl")
-    with open(ckpt_file, "rb") as f:
-        params = pickle.load(f)
+    with open(args.checkpoint_path, "rb") as f:
+        ckpt = pickle.load(f)
 
     key = jax.random.key(42)
+    key, enc_key, dyn_key, critic_key, policy_key = jax.random.split(key, 5)
 
     if is_init:
-        # Dense checkpoint: extract A/B via SVD of each W, init Case 2 dynamics
-        dense_p = params["mean"]["dynamics"]["params"]
+        # Dense checkpoint: SVD-initialize adapter, keep dense policy/encoder/critic/reward
+        dense_mean = ckpt["mean"]
+        encoder,      enc_params    = init_encoder(enc_key, config,    pretrained=dense_mean.get("encoder"))
+        dynamics,     dyn_params    = init_dynamics(dyn_key, config,   pretrained=dense_mean.get("dynamics"))
+        critic,       critic_params = init_critic(critic_key, config,  pretrained=dense_mean.get("critic"))
+        policy,       policy_params = init_policy(policy_key, config,  pretrained=dense_mean.get("policy"))
+        reward_model, reward_params = init_reward_model(config,        pretrained=dense_mean.get("reward"))
 
+        # A^T A metrics from SVD-initialized adapter
         diag_AtA_per_layer, offdiag_AtA_per_layer = [], []
         for i in adapt_layers:
-            W = jnp.array(dense_p[f"Dense_{i}"]["kernel"])  # (d_in, d_out)
+            W = jnp.array(dense_mean["dynamics"]["params"][f"Dense_{i}"]["kernel"])
             U, S, Vh = jnp.linalg.svd(W, full_matrices=False)
-            A_i = Vh[:rank, :].T          # (d_out, rank)
-            AtA = A_i.T @ A_i
-            d, o = _matrix_metrics(AtA, rank)
+            A_i = Vh[:rank, :].T  # (d_out, rank)
+            d, o = _matrix_metrics(A_i.T @ A_i, rank)
             diag_AtA_per_layer.append(d)
             offdiag_AtA_per_layer.append(o)
-
-        # Init Case 2 dynamics (A/B frozen via SVD, fresh R)
-        dynamics, r_params = init_dynamics(key, config, pretrained=params["mean"]["dynamics"])
-        enc_params = params["mean"]["encoder"]
-        infer_dyn_params = r_params
     else:
-        dyn_params = params["mean"]["dynamics"]
-        dyn_params["adapter"] = _normalize_adapter_keys(dyn_params["adapter"])
+        mean = ckpt["mean"]
+        mean["dynamics"]["adapter"] = _normalize_adapter_keys(mean["dynamics"]["adapter"])
+
+        encoder,      enc_params    = init_encoder(enc_key, config,    pretrained=mean.get("encoder"))
+        dynamics,     dyn_params    = init_dynamics(dyn_key, config,   pretrained=mean.get("dynamics"))
+        critic,       critic_params = init_critic(critic_key, config,  pretrained=mean.get("critic"))
+        policy,       policy_params = init_policy(policy_key, config,  pretrained=mean.get("policy"))
+        reward_model, reward_params = init_reward_model(config,        pretrained=mean.get("reward"))
 
         diag_AtA_per_layer, offdiag_AtA_per_layer = [], []
         for i in adapt_layers:
-            A_i = jnp.array(dyn_params["adapter"][f"A_{i}"])  # (d_out, rank)
-            AtA = A_i.T @ A_i
-            d, o = _matrix_metrics(AtA, rank)
+            A_i = jnp.array(mean["dynamics"]["adapter"][f"A_{i}"])  # (d_out, rank)
+            d, o = _matrix_metrics(A_i.T @ A_i, rank)
             diag_AtA_per_layer.append(d)
             offdiag_AtA_per_layer.append(o)
-
-        dynamics, _ = init_dynamics(key, config, pretrained=None)
-        enc_params = params["mean"]["encoder"]
-        infer_dyn_params = dyn_params
 
     diag_mean_AtA   = float(jnp.mean(jnp.array(diag_AtA_per_layer)))
     offdiag_rms_AtA = float(jnp.mean(jnp.array(offdiag_AtA_per_layer)))
 
-    # ---- C_hat metrics (real env latents through predict_with_activations) ----
-    z_real = _collect_latents(config, enc_params, args.n_samples, key)
+    # Build full params dict for the planner (same structure as train.py)
+    full_params = {
+        "mean": {
+            "encoder":    enc_params,
+            "dynamics":   dyn_params,
+            "reward":     reward_params,
+            "critic":     critic_params,
+            "ema_critic": copy.deepcopy(critic_params),
+            "policy":     policy_params,
+        },
+        "normalizer": ckpt.get("normalizer", {
+            "q_scale": jnp.array(config["normalizer"]["critic"]["q_scale_init"], dtype=jnp.float32)
+        }),
+    }
 
-    key, ka = jax.random.split(key)
-    a_rand = jax.random.uniform(ka, (args.n_samples, dim_action), minval=-1.0, maxval=1.0)
+    key, rollout_key = jax.random.split(key)
+    z_data, a_data = _collect_planner_data(
+        config, full_params, encoder, dynamics, reward_model, critic, policy,
+        args.n_samples, rollout_key,
+    )
 
+    # C_hat from bottleneck activations on the collected (z, a) pairs
     infer_batch = jax.jit(jax.vmap(dynamics.predict_with_activations, in_axes=(None, 0, 0)))
-    _, bh_dict = infer_batch(infer_dyn_params, z_real, a_rand)
+    _, bh_dict = infer_batch(dyn_params, z_data, a_data)
 
     diag_Chat_per_layer, offdiag_Chat_per_layer = [], []
     for i in adapt_layers:
         Bh = bh_dict[i]                         # (n_samples, rank)
-        C_hat = Bh.T @ Bh / args.n_samples      # (rank, rank)
+        C_hat = Bh.T @ Bh / args.n_samples
         d, o = _matrix_metrics(C_hat, rank)
         diag_Chat_per_layer.append(d)
         offdiag_Chat_per_layer.append(o)
@@ -191,7 +230,7 @@ def main():
     diag_mean_Chat   = float(jnp.mean(jnp.array(diag_Chat_per_layer)))
     offdiag_rms_Chat = float(jnp.mean(jnp.array(offdiag_Chat_per_layer)))
 
-    # ---- Append row to CSV ----
+    # Append row to CSV
     os.makedirs(os.path.dirname(os.path.abspath(args.csv)), exist_ok=True)
     write_header = not os.path.exists(args.csv)
     with open(args.csv, "a", newline="") as f:
