@@ -117,11 +117,22 @@ def _make_cartpole_balance_env(config: Dict[str, Any]):
 
     env_cfg = config["environment"]
     max_episode_steps = env_cfg["max_episode_steps"]
+    cartpole_pole_mass_scale = env_cfg.get("cartpole_pole_mass_scale", 1.0)
 
     print("Initializing environment: cartpole_balance")
 
     env = registry.load('CartpoleBalance')
-    mjx_model = env.mjx_model
+
+    if cartpole_pole_mass_scale != 1.0:
+        import mujoco
+        mj_model = env.mj_model
+        pole_idx = mj_model.body('pole_1').id
+        mj_model.body_mass[pole_idx] *= cartpole_pole_mass_scale
+        mj_model.body_inertia[pole_idx] *= cartpole_pole_mass_scale
+        mujoco.mj_setConst(mj_model, mujoco.MjData(mj_model))
+        mjx_model = mjx.put_model(mj_model)
+    else:
+        mjx_model = env.mjx_model
 
     slider_qposadr = env._slider_qposadr
     hinge_1_qposadr = env._hinge_1_qposadr
