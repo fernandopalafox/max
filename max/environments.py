@@ -12,6 +12,8 @@ def init_env(config: Dict[str, Any]):
     env_type = config["environment"]["type"]
     if env_type == "cheetah":
         return _make_cheetah_env(config)
+    elif env_type == "cartpole_balance":
+        return _make_cartpole_balance_env(config)
     else:
         raise ValueError(f"Unknown environment: {env_type!r}")
 
@@ -98,5 +100,77 @@ def _make_cheetah_env(config: Dict[str, Any]):
         """Returns 17D observation: [qpos[1:], qvel] from mjx.Data."""
         obs = jnp.concatenate([data.qpos[1:], data.qvel])
         return obs[None, :]  # Add agent dimension
+
+    return reset_fn, step_fn, get_obs_fn
+
+
+def _make_cartpole_balance_env(config: Dict[str, Any]):
+    """
+    Factory for CartpoleBalance from mujoco_playground.
+
+    Observation: 5D = [cart_pos, pole_cos, pole_sin, cart_vel, pole_vel]
+    Action: 1D cart force in [-1, 1]
+    """
+    from mujoco_playground import registry
+    from mujoco_playground._src import mjx_env, reward as reward_lib
+    from mujoco import mjx
+
+    env_cfg = config["environment"]
+    max_episode_steps = env_cfg["max_episode_steps"]
+
+    print("Initializing environment: cartpole_balance")
+
+    env = registry.load('CartpoleBalance')
+    mjx_model = env.mjx_model
+
+    slider_qposadr = env._slider_qposadr
+    hinge_1_qposadr = env._hinge_1_qposadr
+
+    @jax.jit
+    def reset_fn(key: jax.random.PRNGKey) -> mjx.Data:
+        env_state = env.reset(key)
+        return env_state.data
+
+    @jax.jit
+    def step_fn(data: mjx.Data, step_count: int, action: jnp.ndarray):
+        a = action.reshape(-1)  # (dim_action,) — mjx_env.step requires shape [nu]
+        next_data = mjx_env.step(mjx_model, data, a, 1)
+
+        obs = get_obs_fn(next_data)
+
+        pole_angle_cos = next_data.xmat[2, 2, 2]
+        upright = (pole_angle_cos + 1) / 2
+
+        cart_position = next_data.qpos[slider_qposadr]
+        centered = (1 + reward_lib.tolerance(cart_position, margin=2)) / 2
+
+        small_control = (4 + reward_lib.tolerance(
+            a[0], margin=1, value_at_margin=0, sigmoid="quadratic"
+        )) / 5
+
+        angular_vel = next_data.qvel[1:]
+        small_velocity = (1 + reward_lib.tolerance(angular_vel, margin=5).min()) / 2
+
+        r = upright * small_control * small_velocity * centered
+        rewards = jnp.array([r])
+
+        done = jnp.isnan(next_data.qpos).any() | jnp.isnan(next_data.qvel).any()
+        terminated = done
+        truncated = step_count >= max_episode_steps
+
+        return next_data, obs, rewards, terminated, truncated, {}
+
+    @jax.jit
+    def get_obs_fn(data: mjx.Data) -> jnp.ndarray:
+        cart_position = data.qpos[slider_qposadr]
+        pole_angle_cos = data.xmat[2:, 2, 2]
+        pole_angle_sin = data.xmat[2:, 0, 2]
+        obs = jnp.concatenate([
+            cart_position.reshape(1),
+            pole_angle_cos,
+            pole_angle_sin,
+            data.qvel,
+        ])
+        return obs[None, :]
 
     return reset_fn, step_fn, get_obs_fn

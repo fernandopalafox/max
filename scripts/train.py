@@ -133,7 +133,7 @@ def main(config):
     wandb.config.update({"num_params_total": total_n})
     print(f"[{time.time()-t0:.2f}s] Components ready  (total={total_n:,})")
 
-    print(f"Starting TDMPC2 cheetah training for {config['max_steps']} steps")
+    print(f"Starting TDMPC2 training for {config['max_steps']} steps")
 
     # ---- Initial evaluation ----
     print(f"[{time.time()-t0:.2f}s] Running initial evaluation...")
@@ -338,7 +338,7 @@ if __name__ == "__main__":
         if args.pretrained_path is not None:
             CONFIG["pretrained_path"] = args.pretrained_path
 
-        run_name_base = args.run_name or "cheetah_tdmpc2"
+        run_name_base = args.run_name or config["environment"]["type"]
         num_seeds = CONFIG["num_seeds"]
         num_processes = CONFIG["num_processes"]
 
