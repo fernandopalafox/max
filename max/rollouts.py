@@ -41,15 +41,16 @@ def _make_scan_step(
     buffer_size: int,
 ) -> Callable:
     def step_fn(carry: RolloutState, _) -> tuple[RolloutState, StepOutputs]:
-        key, planner_key, train_key, sample_key, reset_key = jax.random.split(carry.key, 5)
+        key, planner_key, train_key, sample_key, reset_key, explore_key = jax.random.split(carry.key, 6)
 
         # ---- Plan ----
-        actions, new_planner_state = planner.solve(
+        actions, std, new_planner_state = planner.solve(
             carry.planner_state.replace(key=planner_key),
             carry.obs,
             carry.parameters,
         )
-        action = actions[0][None, :]  # (1, dim_a)
+        # exploration: sample from converged MPPI distribution N(mean, std) matching TDMPC2 training
+        action = jnp.clip(actions[0][None, :] + std[0] * jax.random.normal(explore_key, actions[0][None, :].shape), -1.0, 1.0)
 
         # ---- Env step ----
         new_mjx_data, next_obs, rewards, terminated, truncated, _ = env_step_fn(
@@ -183,12 +184,12 @@ def prefill_buffer(
     for _ in range(prefill_buffer_size):
         key, action_key, planner_key, reset_key = jax.random.split(rollout_state.key, 4)
         if planner is not None:
-            actions, new_planner_state = planner.solve(
+            actions, std, new_planner_state = planner.solve(
                 rollout_state.planner_state.replace(key=planner_key),
                 rollout_state.obs,
                 rollout_state.parameters,
             )
-            action = actions[0][None, :]
+            action = jnp.clip(actions[0][None, :] + std[0] * jax.random.normal(action_key, actions[0][None, :].shape), -1.0, 1.0)
             rollout_state = rollout_state._replace(planner_state=new_planner_state)
         else:
             action = jax.random.uniform(action_key, (1, dim_a), minval=action_min, maxval=action_max)
