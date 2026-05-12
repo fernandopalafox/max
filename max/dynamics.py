@@ -43,6 +43,8 @@ def init_dynamics(
         return _init_dense_last_layer_dynamics(key, config, pretrained=pretrained)
     if variant == "dense_tiny_lora":
         return _init_tiny_lora_dynamics(key, config, pretrained=pretrained)
+    if variant == "dense_lora":
+        return _init_lora_dynamics(key, config, pretrained=pretrained)
 
     raise ValueError(f"Unknown dynamics: {variant!r}")
 
@@ -189,6 +191,65 @@ def _init_dense_last_layer_dynamics(
         return _forward(mean_params, jnp.concatenate([z, action], axis=-1))
 
     return Dynamics(predict=predict), last_params
+
+
+def _init_lora_dynamics(
+    key: jax.Array,
+    config: Any,
+    pretrained: dict = None,
+) -> tuple[Dynamics, dict]:
+    """
+    LoRA dynamics. Effective weight: W_eff = W + B @ A^T
+
+    pretrained must be a dense Flax checkpoint (has "params" key).
+    Backbone frozen (closure). Only adapter {A_i, B_i} is trainable.
+    B init: Kaiming uniform. A init: zeros → delta = 0 at init.
+    Returns {"adapter": {A_i, B_i, ...}}
+    """
+    dyn_cfg = config["dynamics"]
+    features      = dyn_cfg["dynamics_features"]
+    simnorm_dim_v = dyn_cfg["simnorm_dim_v"]
+    simnorm_tau   = dyn_cfg["simnorm_tau"]
+    rank          = dyn_cfg["rank"]
+    adapt_layers  = set(dyn_cfg["adapt_layers"])
+
+    p = pretrained["params"]
+    frozen_layers  = []
+    adapter_params = {}
+
+    for i in range(len(features)):
+        W     = p[f"Dense_{i}"]["kernel"]
+        b     = p[f"Dense_{i}"]["bias"]
+        ln_s  = p[f"LayerNorm_{i}"]["scale"]
+        ln_b  = p[f"LayerNorm_{i}"]["bias"]
+        layer = {"W": W, "b": b, "ln_scale": ln_s, "ln_bias": ln_b, "adapted": i in adapt_layers}
+
+        if i in adapt_layers:
+            d_in, d_out = W.shape
+            key, kb = jax.random.split(key)
+            adapter_params[f"A_{i}"] = jnp.zeros((d_out, rank))
+            adapter_params[f"B_{i}"] = jax.nn.initializers.he_uniform()(kb, (d_in, rank))
+
+        frozen_layers.append(layer)
+
+    n_layers = len(features)
+
+    def _forward(params, x):
+        for i, layer in enumerate(frozen_layers):
+            if layer["adapted"]:
+                A = params["adapter"][f"A_{i}"]
+                B = params["adapter"][f"B_{i}"]
+                x = x @ (layer["W"] + B @ A.T) + layer["b"]
+            else:
+                x = x @ layer["W"] + layer["b"]
+            x = layer["ln_scale"] * jax.nn.standardize(x, axis=-1, epsilon=1e-6) + layer["ln_bias"]
+            x = mish(x) if i < n_layers - 1 else simnorm(x, simnorm_dim_v, simnorm_tau)
+        return x
+
+    def predict(params, z, action):
+        return _forward(params, jnp.concatenate([z, action], axis=-1))
+
+    return Dynamics(predict=predict), {"adapter": adapter_params}
 
 
 def _init_lora_xs_dynamics(
