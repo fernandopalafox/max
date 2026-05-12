@@ -118,17 +118,30 @@ def _make_cartpole_balance_env(config: Dict[str, Any]):
     env_cfg = config["environment"]
     max_episode_steps = env_cfg["max_episode_steps"]
     cartpole_pole_mass_scale = env_cfg.get("cartpole_pole_mass_scale", 1.0)
+    cartpole_pole_length_scale = env_cfg.get("cartpole_pole_length_scale", 1.0)
 
     print("Initializing environment: cartpole_balance")
 
     env = registry.load('CartpoleBalance')
 
-    if cartpole_pole_mass_scale != 1.0:
+    if cartpole_pole_mass_scale != 1.0 or cartpole_pole_length_scale != 1.0:
         import mujoco
         mj_model = env.mj_model
         pole_idx = mj_model.body('pole_1').id
-        mj_model.body_mass[pole_idx] *= cartpole_pole_mass_scale
-        mj_model.body_inertia[pole_idx] *= cartpole_pole_mass_scale
+
+        if cartpole_pole_mass_scale != 1.0:
+            mj_model.body_mass[pole_idx] *= cartpole_pole_mass_scale
+            mj_model.body_inertia[pole_idx] *= cartpole_pole_mass_scale
+
+        if cartpole_pole_length_scale != 1.0:
+            s = cartpole_pole_length_scale
+            pole_geom_idx = mj_model.geom('pole_1').id
+            mj_model.geom_size[pole_geom_idx, 1] *= s       # capsule half-length
+            mj_model.geom_pos[pole_geom_idx, 2] *= s        # capsule center
+            mj_model.body_ipos[pole_idx, 2] *= s            # center of mass
+            mj_model.body_inertia[pole_idx, 0] *= s ** 2    # Ixx
+            mj_model.body_inertia[pole_idx, 1] *= s ** 2    # Iyy
+
         mujoco.mj_setConst(mj_model, mujoco.MjData(mj_model))
         mjx_model = mjx.put_model(mj_model)
     else:
