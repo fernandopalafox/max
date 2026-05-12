@@ -28,13 +28,23 @@ for name, points in data.items():
     rewards = [points[lr] for lr in lrs]
     ax.plot(lrs, rewards, marker="o", color=colors[name], label=labels[name], linewidth=2, markersize=5)
 
+ORACLE_REWARD = 501.5   # mean of 4 seeds, 500k-transition buffer, frozen E_A, OGD lr=3e-4
+SKYLINE_REWARD = 974.0  # mean of 4 seeds, trained from scratch on Task B
+
 ax.set_xscale("log")
 ax.set_xlabel("Learning rate", fontsize=12)
-ax.set_ylabel("Final eval reward (100k steps)", fontsize=12)
+ax.set_ylabel("Final eval reward", fontsize=12)
 ax.set_title("CartPole 5× pole — OGD LR sweep", fontsize=13)
+
+xlim = (5e-7, 2e-1)
+ax.axhline(ORACLE_REWARD, color="gray", linestyle="--", linewidth=1.5,
+           label=f"Oracle (500k transitions, frozen $E_A$): {ORACLE_REWARD:.0f}")
+ax.axhline(SKYLINE_REWARD, color="black", linestyle="--", linewidth=1.5,
+           label=f"Skyline (scratch on Task B): {SKYLINE_REWARD:.0f}")
+
 ax.legend(fontsize=10)
 ax.grid(True, which="both", alpha=0.3)
-ax.set_ylim(300, 580)
+ax.set_ylim(300, 1050)
 
 plt.tight_layout()
 out = "logs/lr_sweep.png"
