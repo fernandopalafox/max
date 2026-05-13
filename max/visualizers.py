@@ -21,7 +21,61 @@ def init_visualizer(config) -> Visualizer:
     vis_type = config["visualizer"]["type"]
     if vis_type == "cheetah":
         return _init_cheetah_visualizer(config)
+    elif vis_type == "humanoid":
+        return _init_humanoid_visualizer(config)
+    elif vis_type == "quadruped":
+        return _init_quadruped_visualizer(config)
+    elif vis_type == "walker":
+        return _init_walker_visualizer(config)
+    elif vis_type == "walker_run":
+        return _init_walker_visualizer(config)  # identical rendering to walker
+    elif vis_type == "ball_in_cup":
+        return _init_ball_in_cup_visualizer(config)
+    elif vis_type == "cartpole":
+        return _init_cartpole_visualizer(config)
+    elif vis_type == "finger_spin":
+        return _init_finger_spin_visualizer(config)
+    elif vis_type == "hopper_hop":
+        return _init_hopper_hop_visualizer(config)
+    elif vis_type == "reacher":
+        return _init_reacher_visualizer(config)
     raise ValueError(f"Unknown visualizer type: {vis_type!r}")
+
+
+def _init_ball_in_cup_visualizer(config) -> Visualizer:
+    def visualize(trajectory):
+        return _create_ball_in_cup_video(trajectory.xpos, trajectory.qpos)
+    return Visualizer(visualize=visualize)
+
+
+def _init_cartpole_visualizer(config) -> Visualizer:
+    def visualize(trajectory):
+        return _create_cartpole_video(trajectory.xpos)
+    return Visualizer(visualize=visualize)
+
+
+def _init_finger_spin_visualizer(config) -> Visualizer:
+    def visualize(trajectory):
+        return _create_finger_spin_video(trajectory.xpos)
+    return Visualizer(visualize=visualize)
+
+
+def _init_hopper_hop_visualizer(config) -> Visualizer:
+    def visualize(trajectory):
+        return _create_hopper_hop_video(trajectory.xpos, trajectory.qvel)
+    return Visualizer(visualize=visualize)
+
+
+def _init_reacher_visualizer(config) -> Visualizer:
+    def visualize(trajectory):
+        return _create_reacher_video(trajectory.xpos)
+    return Visualizer(visualize=visualize)
+
+
+def _init_walker_visualizer(config) -> Visualizer:
+    def visualize(trajectory):
+        return _create_walker_video(trajectory.xpos, trajectory.qvel)
+    return Visualizer(visualize=visualize)
 
 
 def _init_cheetah_visualizer(config) -> Visualizer:
@@ -29,6 +83,372 @@ def _init_cheetah_visualizer(config) -> Visualizer:
         full_states = np.concatenate([trajectory.qpos, trajectory.qvel], axis=-1)
         return _create_cheetah_video(full_states)
     return Visualizer(visualize=visualize)
+
+def _init_humanoid_visualizer(config) -> Visualizer:
+    def visualize(trajectory):
+        return _create_humanoid_video(trajectory.qpos, trajectory.qvel)
+    return Visualizer(visualize=visualize)
+
+def _init_quadruped_visualizer(config) -> Visualizer:
+    def visualize(trajectory):
+        # trajectory is expected to be a dict with 'observations' and 'body_positions'
+        # If it's just observations, we'll create a basic visualization
+        if isinstance(trajectory, dict):
+            if 'body_positions' in trajectory:
+                return _create_quadruped_video(trajectory['body_positions'], trajectory.get('observations'))
+            else:
+                # Fallback: just observations available
+                return _create_quadruped_video_from_obs(trajectory.get('observations'))
+        else:
+            # Assume it's a trajectory object with observations
+            return _create_quadruped_video_from_obs(trajectory)
+    return Visualizer(visualize=visualize)
+
+
+def _create_quadruped_video(body_positions=None, observations=None, max_frames=300, save_path=None, fps=25):
+    """
+    Creates an MP4 video of the quadruped as a stick figure.
+    
+    Args:
+        body_positions: (T, num_bodies, 3) array of body xyz positions from dm_control
+        observations: (T, obs_dim) observation array (optional, for info display)
+        max_frames: subsample to at most this many frames
+        save_path: path for the .mp4 file (temp file if None)
+        fps: frames per second (dm_control typically runs at 25 fps)
+    Returns:
+        Path to the saved MP4.
+    """
+    import tempfile
+    
+    if body_positions is None:
+        # No position data available
+        print("Warning: No body position data in trajectory. Creating placeholder video...")
+        return _create_placeholder_video(save_path, fps)
+    
+    body_positions = np.array(body_positions)
+    if observations is not None:
+        observations = np.array(observations)
+    
+    # Subsample if needed
+    if len(body_positions) > max_frames:
+        idx = np.linspace(0, len(body_positions) - 1, max_frames, dtype=int)
+        body_positions = body_positions[idx]
+        if observations is not None:
+            observations = observations[idx]
+    
+    # For dog/run, typically:
+    # Body 0: torso, Bodies 1-4: front legs (thigh, shin for L/R), 5-8: back legs
+    # Extract x-z positions (side view), ignoring y
+    T = len(body_positions)
+    torso_x = body_positions[:, 0, 0]
+    torso_z = body_positions[:, 0, 2]
+    
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
+    ax.set_xlim(-2, 2)
+    ax.set_ylim(0, 1.5)
+    ax.set_aspect('equal')
+    ax.set_xlabel('X (m, dog-relative)')
+    ax.set_ylabel('Z (m)')
+    ax.grid(True, alpha=0.3)
+    ax.axhspan(-0.5, 0, color='#8B4513', alpha=0.3)
+    ax.plot([-2, 2], [0, 0], 'k-', linewidth=2)
+    
+    torso_line, = ax.plot([], [], 'b-', linewidth=6, solid_capstyle='round')
+    leg_lines = [ax.plot([], [], 'r-', linewidth=3, solid_capstyle='round')[0] for _ in range(8)]
+    joints, = ax.plot([], [], 'ko', markersize=4, zorder=5)
+    info_text = ax.text(0.02, 0.95, '', transform=ax.transAxes,
+                        verticalalignment='top', fontsize=8)
+    
+    all_artists = [torso_line] + leg_lines + [joints, info_text]
+    
+    def init():
+        torso_line.set_data([], [])
+        for line in leg_lines:
+            line.set_data([], [])
+        joints.set_data([], [])
+        info_text.set_text('')
+        return tuple(all_artists)
+    
+    def animate(frame):
+        # Normalize x positions relative to torso
+        x_offset = torso_x[frame]
+        
+        # Draw torso as a line segment
+        if len(body_positions[frame]) > 0:
+            torso_x_rel = body_positions[frame, 0, 0] - x_offset
+            torso_z = body_positions[frame, 0, 2]
+            # Draw torso with some length
+            torso_line.set_data([torso_x_rel - 0.1, torso_x_rel + 0.1], 
+                               [torso_z, torso_z])
+            
+            # Draw legs (pairs of segments)
+            leg_idx = 0
+            joint_xs = []
+            joint_zs = []
+            
+            # Front left and right legs
+            for leg_start in [1, 3]:
+                if leg_start + 1 < len(body_positions[frame]):
+                    x1 = body_positions[frame, leg_start, 0] - x_offset
+                    z1 = body_positions[frame, leg_start, 2]
+                    x2 = body_positions[frame, leg_start + 1, 0] - x_offset
+                    z2 = body_positions[frame, leg_start + 1, 2]
+                    leg_lines[leg_idx].set_data([x1, x2], [z1, z2])
+                    joint_xs.extend([x1, x2])
+                    joint_zs.extend([z1, z2])
+                    leg_idx += 1
+            
+            # Back left and right legs
+            for leg_start in [5, 7]:
+                if leg_start + 1 < len(body_positions[frame]):
+                    x1 = body_positions[frame, leg_start, 0] - x_offset
+                    z1 = body_positions[frame, leg_start, 2]
+                    x2 = body_positions[frame, leg_start + 1, 0] - x_offset
+                    z2 = body_positions[frame, leg_start + 1, 2]
+                    leg_lines[leg_idx].set_data([x1, x2], [z1, z2])
+                    joint_xs.extend([x1, x2])
+                    joint_zs.extend([z1, z2])
+                    leg_idx += 1
+            
+            if joint_xs:
+                joints.set_data(joint_xs[:8], joint_zs[:8])
+            
+            vel_info = ""
+            if observations is not None:
+                vel_info = f"  vel={observations[frame, 0]:.2f}m/s" if len(observations[frame]) > 0 else ""
+            info_text.set_text(f't={frame/fps:.2f}s  x={torso_x[frame]:.1f}m{vel_info}')
+        
+        return tuple(all_artists)
+    
+    anim = FuncAnimation(fig, animate, init_func=init,
+                         frames=len(body_positions), interval=1000/fps, blit=True)
+    
+    if save_path is None:
+        save_path = tempfile.mktemp(suffix='.mp4')
+    
+    anim.save(save_path, writer='ffmpeg', fps=fps,
+              extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
+    plt.close(fig)
+    return save_path
+
+
+def _create_quadruped_video_from_obs(observations, max_frames=300, save_path=None, fps=25):
+    """
+    Creates a placeholder video when only observations are available.
+    Shows observation statistics over time.
+    """
+    import tempfile
+    
+    observations = np.array(observations)
+    if len(observations) > max_frames:
+        idx = np.linspace(0, len(observations) - 1, max_frames, dtype=int)
+        observations = observations[idx]
+    
+    fig, axes = plt.subplots(2, 1, figsize=(10, 6), dpi=100)
+    
+    # Plot 1: Forward velocity if it's in the observation
+    ax1 = axes[0]
+    ax1.set_title('Quadruped Training - Observation Stats')
+    if observations.shape[1] > 0:
+        ax1.plot(observations[:, 0], label='Obs[0] (likely forward_vel)', color='blue')
+    ax1.set_ylabel('Value')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Overall observation magnitude
+    ax2 = axes[1]
+    obs_mag = np.linalg.norm(observations, axis=1)
+    ax2.plot(obs_mag, label='Observation magnitude', color='green')
+    ax2.set_ylabel('||Obs||')
+    ax2.set_xlabel('Frame')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    if save_path is None:
+        save_path = tempfile.mktemp(suffix='.mp4')
+    
+    fig.savefig(save_path.replace('.mp4', '.png'), dpi=100, bbox_inches='tight')
+    plt.close(fig)
+    
+    # Create a simple video from the plot
+    import tempfile
+    from PIL import Image
+    img = Image.open(save_path.replace('.mp4', '.png'))
+    # For now, return the PNG path or create a simple video
+    return save_path.replace('.mp4', '.png')
+
+
+def _create_placeholder_video(save_path=None, fps=25):
+    """Creates a placeholder video when no trajectory data is available."""
+    import tempfile
+    
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
+    ax.text(0.5, 0.5, 'Quadruped Visualization\n(Trajectory data not yet captured)',
+            ha='center', va='center', fontsize=16, transform=ax.transAxes)
+    ax.axis('off')
+    
+    if save_path is None:
+        save_path = tempfile.mktemp(suffix='.mp4')
+    
+    fig.savefig(save_path.replace('.mp4', '.png'), dpi=100, bbox_inches='tight')
+    plt.close(fig)
+    return save_path.replace('.mp4', '.png')
+
+
+
+
+def _create_humanoid_video(qpos, qvel, max_frames=300, save_path=None, fps=50):
+    """
+    Creates an MP4 video showing the humanoid as a stick figure.
+
+    Displays a simplified 2D side-view stick figure with:
+    - Head/Neck
+    - Torso/Chest
+    - Arms (shoulders, elbows)
+    - Legs (hips, knees, ankles)
+
+    Args:
+        qpos: (T, nq) MuJoCo generalized positions
+        qvel: (T, nv) MuJoCo generalized velocities
+        max_frames: subsample to at most this many frames
+        save_path: path for the .mp4 file (temp file if None)
+        fps: frames per second
+    Returns:
+        Path to the saved MP4.
+    """
+    import tempfile
+    
+    qpos = np.array(qpos)
+    qvel = np.array(qvel)
+
+    # Trajectories can come in as (T, nq) or (N, T, nq) where N = num_agents.
+    # The cheetah visualizer treats the leading dim as batch; here we just render
+    # the first agent to keep the visualization simple.
+    if qpos.ndim == 3:
+        qpos = qpos[0]
+    if qvel.ndim == 3:
+        qvel = qvel[0]
+    
+    # Subsample if needed
+    if len(qpos) > max_frames:
+        idx = np.linspace(0, len(qpos) - 1, max_frames, dtype=int)
+        qpos = qpos[idx]
+        qvel = qvel[idx]
+    
+    T = len(qpos)
+
+    # MuJoCo free joint convention for humanoid is typically qpos[:3] = (x, y, z).
+    # We visualize side-view as x vs z.
+    root_x = qpos[:, 0]
+    root_z = qpos[:, 2]
+    forward_vel = qvel[:, 0] if qvel.shape[1] > 0 else np.zeros(T)
+    
+    fig, ax = plt.subplots(figsize=(10, 8), dpi=100)
+    ax.set_xlim(-3, 3)
+    ax.set_ylim(-0.5, 2.5)
+    ax.set_aspect('equal')
+    ax.set_xlabel('X (m, humanoid-relative)')
+    ax.set_ylabel('Z (m)')
+    ax.grid(True, alpha=0.3)
+    ax.axhspan(-0.5, 0, color='#8B4513', alpha=0.3)
+    ax.plot([-3, 3], [0, 0], 'k-', linewidth=2)
+    
+    # Humanoid stick figure elements
+    head_circle = plt.Circle((0, 0), 0.1, color='blue', fill=True)
+    ax.add_patch(head_circle)
+    
+    torso_line,     = ax.plot([], [], 'b-', linewidth=5, solid_capstyle='round')
+    left_arm,       = ax.plot([], [], 'g-', linewidth=3, solid_capstyle='round')
+    right_arm,      = ax.plot([], [], 'g-', linewidth=3, solid_capstyle='round')
+    left_leg,       = ax.plot([], [], 'r-', linewidth=4, solid_capstyle='round')
+    right_leg,      = ax.plot([], [], 'r-', linewidth=4, solid_capstyle='round')
+    
+    joints,         = ax.plot([], [], 'ko', markersize=5, zorder=5)
+    info_text       = ax.text(0.02, 0.95, '', transform=ax.transAxes,
+                              verticalalignment='top', fontsize=9)
+    
+    all_artists = [head_circle, torso_line, left_arm, right_arm, left_leg, right_leg, joints, info_text]
+    
+    def init():
+        torso_line.set_data([], [])
+        left_arm.set_data([], [])
+        right_arm.set_data([], [])
+        left_leg.set_data([], [])
+        right_leg.set_data([], [])
+        joints.set_data([], [])
+        info_text.set_text('')
+        return tuple(all_artists)
+    
+    def animate(frame):
+        x_offset = root_x[frame]
+        z_base = root_z[frame]
+        
+        # Normalized positions (relative to torso center)
+        torso_x = -x_offset
+        torso_z = z_base
+        torso_height = 0.4
+        
+        # Head position
+        head_x = torso_x
+        head_z = torso_z + torso_height + 0.15
+        head_circle.center = (head_x, head_z)
+        
+        # Torso
+        torso_line.set_data([torso_x, torso_x], 
+                           [torso_z + torso_height, torso_z])
+        
+        # Arms (simple representation: point outward from shoulders)
+        shoulder_z = torso_z + torso_height - 0.05
+        left_elbow_x = torso_x - 0.3
+        left_hand_x = torso_x - 0.5
+        left_arm.set_data([torso_x, left_elbow_x, left_hand_x],
+                         [shoulder_z, shoulder_z - 0.1, shoulder_z - 0.25])
+        
+        right_elbow_x = torso_x + 0.3
+        right_hand_x = torso_x + 0.5
+        right_arm.set_data([torso_x, right_elbow_x, right_hand_x],
+                          [shoulder_z, shoulder_z - 0.1, shoulder_z - 0.25])
+        
+        # Legs (simple knee model)
+        hip_z = torso_z
+        knee_offset = 0.2
+        foot_z = 0.05
+        
+        # Left leg
+        left_hip_x = torso_x - 0.1
+        left_knee_x = torso_x - 0.15
+        left_leg.set_data([left_hip_x, left_knee_x, left_hip_x],
+                         [hip_z, hip_z - knee_offset, foot_z])
+        
+        # Right leg
+        right_hip_x = torso_x + 0.1
+        right_knee_x = torso_x + 0.15
+        right_leg.set_data([right_hip_x, right_knee_x, right_hip_x],
+                          [hip_z, hip_z - knee_offset, foot_z])
+        
+        # Draw joint markers
+        jx = np.array([torso_x, head_x, left_elbow_x, left_hand_x, right_elbow_x, 
+                       right_hand_x, left_hip_x, left_knee_x, right_hip_x, right_knee_x])
+        jz = np.array([torso_z, head_z, shoulder_z - 0.1, shoulder_z - 0.25, 
+                       shoulder_z - 0.1, shoulder_z - 0.25, hip_z - knee_offset, foot_z,
+                       hip_z - knee_offset, foot_z])
+        joints.set_data(jx, jz)
+        
+        info_text.set_text(f't={frame/fps:.2f}s  x={root_x[frame]:.1f}m  vel={forward_vel[frame]:.2f}m/s')
+        
+        return tuple(all_artists)
+    
+    anim = FuncAnimation(fig, animate, init_func=init,
+                         frames=T, interval=1000/fps, blit=True)
+    
+    if save_path is None:
+        save_path = tempfile.mktemp(suffix='.mp4')
+    
+    anim.save(save_path, writer='ffmpeg', fps=fps,
+              extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
+    plt.close(fig)
+    return save_path
 
 
 def _batch_kinematics(states):
@@ -74,6 +494,460 @@ def _batch_kinematics(states):
         p(tfx, tfz), p(fkx, fkz), p(fax, faz), p(ftx, ftz),  # front leg
     ], axis=1)  # (T, 10, 2)
     return pts, rootx, rootz
+
+
+def _create_ball_in_cup_video(xpos, qpos, max_frames=300, save_path=None, fps=50):
+    """
+    BallInCup side-view (x-z plane).
+    Bodies: world(0), cup(1), ball(2).
+    """
+    import tempfile
+
+    xpos = np.array(xpos)
+    qpos = np.array(qpos)
+    if xpos.ndim == 4:
+        xpos = xpos[0]
+    if qpos.ndim == 3:
+        qpos = qpos[0]
+    if len(xpos) > max_frames:
+        idx = np.linspace(0, len(xpos) - 1, max_frames, dtype=int)
+        xpos = xpos[idx]
+        qpos = qpos[idx]
+
+    T = len(xpos)
+    CUP, BALL = 1, 2
+    cup_x = xpos[:, CUP, 0]
+
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=100)
+    ax.set_xlim(-0.6, 0.6)
+    ax.set_ylim(-0.8, 0.8)
+    ax.set_aspect('equal')
+    ax.set_xlabel('X (m, cup-relative)')
+    ax.set_ylabel('Z (m)')
+    ax.grid(True, alpha=0.3)
+    ax.axhline(0, color='k', linewidth=1)
+
+    cup_dot,  = ax.plot([], [], 'bs', markersize=12, label='cup')
+    ball_dot, = ax.plot([], [], 'ro', markersize=8,  label='ball')
+    string_ln, = ax.plot([], [], 'k-', linewidth=1)
+    info_text = ax.text(0.02, 0.95, '', transform=ax.transAxes,
+                        verticalalignment='top', fontsize=8)
+    ax.legend(loc='upper right')
+    all_artists = [cup_dot, ball_dot, string_ln, info_text]
+
+    def init():
+        for a in all_artists:
+            if hasattr(a, 'set_data'):
+                a.set_data([], [])
+        info_text.set_text('')
+        return tuple(all_artists)
+
+    def animate(frame):
+        ox = cup_x[frame]
+        cx = xpos[frame, CUP, 0] - ox
+        cz = xpos[frame, CUP, 2]
+        bx = xpos[frame, BALL, 0] - ox
+        bz = xpos[frame, BALL, 2]
+        cup_dot.set_data([cx], [cz])
+        ball_dot.set_data([bx], [bz])
+        string_ln.set_data([cx, bx], [cz, bz])
+        info_text.set_text(f't={frame/fps:.2f}s')
+        return tuple(all_artists)
+
+    anim = FuncAnimation(fig, animate, init_func=init, frames=T, interval=1000/fps, blit=True)
+    if save_path is None:
+        save_path = tempfile.mktemp(suffix='.mp4')
+    anim.save(save_path, writer='ffmpeg', fps=fps,
+              extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
+    plt.close(fig)
+    return save_path
+
+
+def _create_cartpole_video(xpos, max_frames=300, save_path=None, fps=50):
+    """
+    Cartpole side-view.
+    Bodies: world(0), cart(1), pole_1(2).
+    """
+    import tempfile
+
+    xpos = np.array(xpos)
+    if xpos.ndim == 4:
+        xpos = xpos[0]
+    if len(xpos) > max_frames:
+        idx = np.linspace(0, len(xpos) - 1, max_frames, dtype=int)
+        xpos = xpos[idx]
+
+    T = len(xpos)
+    CART, POLE = 1, 2
+
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
+    ax.set_xlim(-3, 3)
+    ax.set_ylim(-0.2, 1.5)
+    ax.set_aspect('equal')
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Z (m)')
+    ax.grid(True, alpha=0.3)
+    ax.axhline(0, color='k', linewidth=2)
+    ax.plot([-3, 3], [0, 0], 'k-', linewidth=2)
+
+    cart_rect, = ax.plot([], [], 'bs', markersize=14)
+    pole_line, = ax.plot([], [], 'r-', linewidth=4, solid_capstyle='round')
+    info_text  = ax.text(0.02, 0.95, '', transform=ax.transAxes,
+                         verticalalignment='top', fontsize=8)
+    all_artists = [cart_rect, pole_line, info_text]
+
+    def init():
+        for a in all_artists:
+            if hasattr(a, 'set_data'):
+                a.set_data([], [])
+        info_text.set_text('')
+        return tuple(all_artists)
+
+    def animate(frame):
+        cx = xpos[frame, CART, 0]
+        cz = xpos[frame, CART, 2]
+        px = xpos[frame, POLE, 0]
+        pz = xpos[frame, POLE, 2]
+        cart_rect.set_data([cx], [cz])
+        pole_line.set_data([cx, px], [cz, pz])
+        info_text.set_text(f't={frame/fps:.2f}s  cart_x={cx:.2f}m')
+        return tuple(all_artists)
+
+    anim = FuncAnimation(fig, animate, init_func=init, frames=T, interval=1000/fps, blit=True)
+    if save_path is None:
+        save_path = tempfile.mktemp(suffix='.mp4')
+    anim.save(save_path, writer='ffmpeg', fps=fps,
+              extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
+    plt.close(fig)
+    return save_path
+
+
+def _create_finger_spin_video(xpos, max_frames=300, save_path=None, fps=50):
+    """
+    FingerSpin top-down (x-y plane).
+    Bodies: world(0), proximal(1), distal(2), spinner(3), target(4).
+    """
+    import tempfile
+
+    xpos = np.array(xpos)
+    if xpos.ndim == 4:
+        xpos = xpos[0]
+    if len(xpos) > max_frames:
+        idx = np.linspace(0, len(xpos) - 1, max_frames, dtype=int)
+        xpos = xpos[idx]
+
+    T = len(xpos)
+    PROX, DIST, SPINNER = 1, 2, 3
+
+    fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
+    ax.set_xlim(-0.3, 0.3)
+    ax.set_ylim(-0.3, 0.3)
+    ax.set_aspect('equal')
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Y (m)')
+    ax.grid(True, alpha=0.3)
+    ax.plot(0, 0, 'k+', markersize=10)
+
+    prox_line,  = ax.plot([], [], 'b-', linewidth=5, solid_capstyle='round')
+    dist_line,  = ax.plot([], [], 'b-', linewidth=4, solid_capstyle='round')
+    spin_dot,   = ax.plot([], [], 'ro', markersize=12)
+    info_text   = ax.text(0.02, 0.95, '', transform=ax.transAxes,
+                          verticalalignment='top', fontsize=8)
+    all_artists = [prox_line, dist_line, spin_dot, info_text]
+
+    def init():
+        for a in all_artists:
+            if hasattr(a, 'set_data'):
+                a.set_data([], [])
+        info_text.set_text('')
+        return tuple(all_artists)
+
+    def animate(frame):
+        ox, oy = xpos[frame, PROX, 0], xpos[frame, PROX, 1]  # proximal anchored near origin
+        dx, dy = xpos[frame, DIST, 0],    xpos[frame, DIST, 1]
+        sx, sy = xpos[frame, SPINNER, 0], xpos[frame, SPINNER, 1]
+        prox_line.set_data([0, ox], [0, oy])
+        dist_line.set_data([ox, dx], [oy, dy])
+        spin_dot.set_data([sx], [sy])
+        info_text.set_text(f't={frame/fps:.2f}s')
+        return tuple(all_artists)
+
+    anim = FuncAnimation(fig, animate, init_func=init, frames=T, interval=1000/fps, blit=True)
+    if save_path is None:
+        save_path = tempfile.mktemp(suffix='.mp4')
+    anim.save(save_path, writer='ffmpeg', fps=fps,
+              extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
+    plt.close(fig)
+    return save_path
+
+
+def _create_hopper_hop_video(xpos, qvel, max_frames=300, save_path=None, fps=50):
+    """
+    HopperHop side-view (x-z plane), centered on torso.
+    Bodies: world(0), torso(1), pelvis(2), thigh(3), calf(4), foot(5).
+    """
+    import tempfile
+
+    xpos = np.array(xpos)
+    qvel = np.array(qvel)
+    if xpos.ndim == 4:
+        xpos = xpos[0]
+    if qvel.ndim == 3:
+        qvel = qvel[0]
+    if len(xpos) > max_frames:
+        idx = np.linspace(0, len(xpos) - 1, max_frames, dtype=int)
+        xpos = xpos[idx]
+        qvel = qvel[idx]
+
+    T = len(xpos)
+    TORSO, PELVIS, THIGH, CALF, FOOT = 1, 2, 3, 4, 5
+    torso_x = xpos[:, TORSO, 0]
+    # qvel[0] = rootx (forward)
+    forward_vel = qvel[:, 0] if qvel.shape[1] > 0 else np.zeros(T)
+
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=100)
+    ax.set_xlim(-1.5, 1.5)
+    ax.set_ylim(-0.1, 2.0)
+    ax.set_aspect('equal')
+    ax.set_xlabel('X (m, torso-relative)')
+    ax.set_ylabel('Z (m)')
+    ax.grid(True, alpha=0.3)
+    ax.axhspan(-0.1, 0, color='#8B4513', alpha=0.3)
+    ax.plot([-1.5, 1.5], [0, 0], 'k-', linewidth=2)
+
+    torso_body, = ax.plot([], [], 'b-',  linewidth=6, solid_capstyle='round')
+    thigh_ln,   = ax.plot([], [], 'r-',  linewidth=4, solid_capstyle='round')
+    calf_ln,    = ax.plot([], [], 'r-',  linewidth=3, solid_capstyle='round')
+    foot_ln,    = ax.plot([], [], 'r-',  linewidth=2, solid_capstyle='round')
+    joints,     = ax.plot([], [], 'ko',  markersize=5, zorder=5)
+    info_text   = ax.text(0.02, 0.95, '', transform=ax.transAxes,
+                          verticalalignment='top', fontsize=8)
+    all_artists = [torso_body, thigh_ln, calf_ln, foot_ln, joints, info_text]
+
+    def init():
+        for a in all_artists:
+            if hasattr(a, 'set_data'):
+                a.set_data([], [])
+        info_text.set_text('')
+        return tuple(all_artists)
+
+    def _seg(b_a, b_b, frame):
+        ox = torso_x[frame]
+        return ([xpos[frame, b_a, 0] - ox, xpos[frame, b_b, 0] - ox],
+                [xpos[frame, b_a, 2],      xpos[frame, b_b, 2]])
+
+    def animate(frame):
+        ox = torso_x[frame]
+        tx = xpos[frame, TORSO, 0] - ox
+        tz = xpos[frame, TORSO, 2]
+        torso_body.set_data([tx, tx], [tz - 0.15, tz + 0.15])
+        thigh_ln.set_data(*_seg(TORSO,  THIGH, frame))
+        calf_ln.set_data( *_seg(THIGH,  CALF,  frame))
+        foot_ln.set_data( *_seg(CALF,   FOOT,  frame))
+        jx = xpos[frame, [THIGH, CALF, FOOT], 0] - ox
+        jz = xpos[frame, [THIGH, CALF, FOOT], 2]
+        joints.set_data(jx, jz)
+        info_text.set_text(
+            f't={frame/fps:.2f}s  x={torso_x[frame]:.1f}m  vel={forward_vel[frame]:.2f}m/s'
+        )
+        return tuple(all_artists)
+
+    anim = FuncAnimation(fig, animate, init_func=init, frames=T, interval=1000/fps, blit=True)
+    if save_path is None:
+        save_path = tempfile.mktemp(suffix='.mp4')
+    anim.save(save_path, writer='ffmpeg', fps=fps,
+              extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
+    plt.close(fig)
+    return save_path
+
+
+def _create_reacher_video(xpos, max_frames=300, save_path=None, fps=50):
+    """
+    Reacher top-down (x-y plane). Arm anchored at origin.
+    Bodies: world(0), arm(1), hand(2), finger(3), target(4).
+    """
+    import tempfile
+
+    xpos = np.array(xpos)
+    if xpos.ndim == 4:
+        xpos = xpos[0]
+    if len(xpos) > max_frames:
+        idx = np.linspace(0, len(xpos) - 1, max_frames, dtype=int)
+        xpos = xpos[idx]
+
+    T = len(xpos)
+    ARM, HAND, FINGER, TARGET = 1, 2, 3, 4
+
+    fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
+    ax.set_xlim(-0.3, 0.3)
+    ax.set_ylim(-0.3, 0.3)
+    ax.set_aspect('equal')
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Y (m)')
+    ax.grid(True, alpha=0.3)
+    ax.plot(0, 0, 'k+', markersize=10)
+
+    arm_ln,    = ax.plot([], [], 'b-', linewidth=5, solid_capstyle='round')
+    hand_ln,   = ax.plot([], [], 'b-', linewidth=4, solid_capstyle='round')
+    finger_dot,= ax.plot([], [], 'bo', markersize=6)
+    target_dot,= ax.plot([], [], 'r*', markersize=14, label='target')
+    info_text  = ax.text(0.02, 0.95, '', transform=ax.transAxes,
+                         verticalalignment='top', fontsize=8)
+    ax.legend(loc='upper right')
+    all_artists = [arm_ln, hand_ln, finger_dot, target_dot, info_text]
+
+    def init():
+        for a in all_artists:
+            if hasattr(a, 'set_data'):
+                a.set_data([], [])
+        info_text.set_text('')
+        return tuple(all_artists)
+
+    def animate(frame):
+        ax_x, ax_y = xpos[frame, ARM,    0], xpos[frame, ARM,    1]
+        hx, hy     = xpos[frame, HAND,   0], xpos[frame, HAND,   1]
+        fx, fy     = xpos[frame, FINGER, 0], xpos[frame, FINGER, 1]
+        tx, ty     = xpos[frame, TARGET, 0], xpos[frame, TARGET, 1]
+        arm_ln.set_data(  [0,   ax_x], [0,   ax_y])
+        hand_ln.set_data( [ax_x, hx],  [ax_y, hy])
+        finger_dot.set_data([fx], [fy])
+        target_dot.set_data([tx], [ty])
+        dist = np.hypot(tx - fx, ty - fy)
+        info_text.set_text(f't={frame/fps:.2f}s  dist={dist:.3f}m')
+        return tuple(all_artists)
+
+    anim = FuncAnimation(fig, animate, init_func=init, frames=T, interval=1000/fps, blit=True)
+    if save_path is None:
+        save_path = tempfile.mktemp(suffix='.mp4')
+    anim.save(save_path, writer='ffmpeg', fps=fps,
+              extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
+    plt.close(fig)
+    return save_path
+
+
+def _create_walker_video(xpos, qvel, max_frames=300, save_path=None, fps=40):
+    """
+    Creates an MP4 video of the planar walker as a stick figure using pre-computed body positions.
+
+    Body order (mujoco_playground WalkerWalk):
+        0: world, 1: torso, 2: right_thigh, 3: right_leg, 4: right_foot,
+        5: left_thigh, 6: left_leg, 7: left_foot
+
+    Args:
+        xpos: (T, nbody, 3) or (N, T, nbody, 3) array of body Cartesian positions
+        qvel: (T, nv) or (N, T, nv) array of generalized velocities
+        max_frames: subsample to at most this many frames
+        save_path: path for the .mp4 file (temp file if None)
+        fps: frames per second
+    Returns:
+        Path to the saved MP4.
+    """
+    import tempfile
+
+    xpos = np.array(xpos)
+    qvel = np.array(qvel)
+
+    # Use first episode when batched
+    if xpos.ndim == 4:
+        xpos = xpos[0]
+    if qvel.ndim == 3:
+        qvel = qvel[0]
+
+    if len(xpos) > max_frames:
+        idx = np.linspace(0, len(xpos) - 1, max_frames, dtype=int)
+        xpos = xpos[idx]
+        qvel = qvel[idx]
+
+    T = len(xpos)
+
+    # Body indices (0=world excluded from xpos in some conventions — here xpos includes world)
+    # mujoco xpos[0] = world (at origin), so body i corresponds to xpos[i]
+    TORSO      = 1
+    R_THIGH    = 2
+    R_SHIN     = 3
+    R_FOOT     = 4
+    L_THIGH    = 5
+    L_SHIN     = 6
+    L_FOOT     = 7
+
+    torso_x = xpos[:, TORSO, 0]
+    torso_z = xpos[:, TORSO, 2]
+    # qvel[1] = rootx velocity (forward)
+    forward_vel = qvel[:, 1] if qvel.shape[1] > 1 else np.zeros(T)
+
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=100)
+    ax.set_xlim(-1.5, 1.5)
+    ax.set_ylim(-0.2, 2.0)
+    ax.set_aspect('equal')
+    ax.set_xlabel('X (m, walker-relative)')
+    ax.set_ylabel('Z (m)')
+    ax.grid(True, alpha=0.3)
+    ax.axhspan(-0.3, 0, color='#8B4513', alpha=0.3)
+    ax.plot([-1.5, 1.5], [0, 0], 'k-', linewidth=2)
+
+    torso_line,  = ax.plot([], [], 'b-',  linewidth=6, solid_capstyle='round')
+    r_thigh,     = ax.plot([], [], 'r-',  linewidth=4, solid_capstyle='round')
+    r_shin,      = ax.plot([], [], 'r-',  linewidth=3, solid_capstyle='round')
+    r_foot,      = ax.plot([], [], 'r-',  linewidth=2, solid_capstyle='round')
+    l_thigh,     = ax.plot([], [], 'g-',  linewidth=4, solid_capstyle='round')
+    l_shin,      = ax.plot([], [], 'g-',  linewidth=3, solid_capstyle='round')
+    l_foot,      = ax.plot([], [], 'g-',  linewidth=2, solid_capstyle='round')
+    joints,      = ax.plot([], [], 'ko',  markersize=5, zorder=5)
+    info_text    = ax.text(0.02, 0.95, '', transform=ax.transAxes,
+                           verticalalignment='top', fontsize=8)
+
+    all_artists = [torso_line, r_thigh, r_shin, r_foot,
+                   l_thigh, l_shin, l_foot, joints, info_text]
+
+    def init():
+        for a in all_artists:
+            if hasattr(a, 'set_data'):
+                a.set_data([], [])
+        info_text.set_text('')
+        return tuple(all_artists)
+
+    def _seg(body_a, body_b, frame):
+        ox = torso_x[frame]
+        xa, za = xpos[frame, body_a, 0] - ox, xpos[frame, body_a, 2]
+        xb, zb = xpos[frame, body_b, 0] - ox, xpos[frame, body_b, 2]
+        return [xa, xb], [za, zb]
+
+    def animate(frame):
+        ox = torso_x[frame]
+
+        # Torso: draw as a vertical segment centered at torso xpos
+        tx = xpos[frame, TORSO, 0] - ox
+        tz = xpos[frame, TORSO, 2]
+        torso_line.set_data([tx, tx], [tz - 0.15, tz + 0.15])
+
+        r_thigh.set_data(*_seg(TORSO, R_THIGH, frame))
+        r_shin.set_data(*_seg(R_THIGH, R_SHIN, frame))
+        r_foot.set_data(*_seg(R_SHIN, R_FOOT, frame))
+
+        l_thigh.set_data(*_seg(TORSO, L_THIGH, frame))
+        l_shin.set_data(*_seg(L_THIGH, L_SHIN, frame))
+        l_foot.set_data(*_seg(L_SHIN, L_FOOT, frame))
+
+        jx = xpos[frame, [R_THIGH, R_SHIN, R_FOOT, L_THIGH, L_SHIN, L_FOOT], 0] - ox
+        jz = xpos[frame, [R_THIGH, R_SHIN, R_FOOT, L_THIGH, L_SHIN, L_FOOT], 2]
+        joints.set_data(jx, jz)
+
+        info_text.set_text(
+            f't={frame/fps:.2f}s  x={torso_x[frame]:.1f}m  vel={forward_vel[frame]:.2f}m/s  '
+            f'z={torso_z[frame]:.2f}m'
+        )
+        return tuple(all_artists)
+
+    anim = FuncAnimation(fig, animate, init_func=init,
+                         frames=T, interval=1000/fps, blit=True)
+
+    if save_path is None:
+        save_path = tempfile.mktemp(suffix='.mp4')
+
+    anim.save(save_path, writer='ffmpeg', fps=fps,
+              extra_args=['-vcodec', 'libx264', '-pix_fmt', 'yuv420p'])
+    plt.close(fig)
+    return save_path
 
 
 def _create_cheetah_video(states, max_frames=300, save_path=None, fps=50, ghost_alpha=0.3):

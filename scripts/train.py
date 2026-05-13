@@ -282,8 +282,9 @@ def run_sweep():
     """Entry point for wandb sweep agents."""
     wandb.init()
 
+    config_name = os.environ.get("CONFIG", "cheetah.json")
     config_path = os.path.join(
-        os.path.dirname(__file__), "..", "configs", "cheetah.json"
+        os.path.dirname(__file__), "..", "configs", config_name
     )
     with open(config_path, "r") as f:
         full_config = json.load(f)
@@ -302,18 +303,14 @@ def run_sweep():
 
 
 if __name__ == "__main__":
-    import sys
-    import shutil
-    import subprocess
-    import tempfile
-
     parser = argparse.ArgumentParser(description="Run TDMPC2 training.")
     parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument("--num-seeds", type=int, default=1)
     parser.add_argument(
         "--config",
         type=str,
         default="cheetah.json",
-        help="Config filename or absolute path.",
+        help="Config filename in configs folder.",
     )
     parser.add_argument("--gpu", type=str, default=None, help="GPU index (sets CUDA_VISIBLE_DEVICES).")
     parser.add_argument("--save-dir", type=str, default=None, help="Override training.save_dir in config.")
@@ -381,23 +378,23 @@ if __name__ == "__main__":
             seed_keys = jax.random.split(base_key, num_seeds)
             seeds = [int(jax.random.bits(k)) for k in seed_keys]
 
-            for seed_idx, seed in enumerate(seeds, start=1):
-                print(f"--- Starting run {seed_idx}/{num_seeds} ---")
-                run_config = copy.deepcopy(CONFIG)
-                run_config["seed"] = seed
-                run_name = run_name_base
-                if num_seeds > 1:
-                    run_name = f"{run_name}_{seed_idx}"
-                run_config["wandb_run_name"] = run_name
+        for seed_idx, seed in enumerate(seeds, start=1):
+            print(f"--- Starting run seed {seed_idx}/{args.num_seeds} ---")
+            run_config = copy.deepcopy(CONFIG)
+            run_config["seed"] = seed
+            run_name = run_name_base
+            if args.num_seeds > 1:
+                run_name = f"{run_name}_{seed_idx}"
+            run_config["wandb_run_name"] = run_name
 
-                wandb.init(
-                    project=run_config["wandb_project"],
-                    config=run_config,
-                    name=run_config["wandb_run_name"],
-                    group=run_config.get("wandb_group"),
-                    reinit=True,
-                )
-                main(run_config)
-                wandb.finish()
+            wandb.init(
+                project=run_config["wandb_project"],
+                config=run_config,
+                name=run_config["wandb_run_name"],
+                group=run_config.get("wandb_group"),
+                reinit=True,
+            )
+            main(run_config)
+            wandb.finish()
 
         print("All experiments complete.")
