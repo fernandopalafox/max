@@ -1,25 +1,28 @@
 {
   "training": {
-    "wandb_project": "cheetah_ft_latent",
+    "wandb_project": "pretrain_cartpole",
     "seed": 44,
-    "save_dir": "./data/models/cheetah/baseline_tinylora_large_fomaml_bgd",
+    "save_dir": "./data/models/cartpole_tdmpc2",
     "checkpoint_freq": 100000,
     "num_agents": 1,
-    "max_steps": 1000000,
+    "max_steps": 500000,
     "buffer_size": 1000010,
-    "dim_state": 17,
-    "dim_action": 6,
+    "dim_state": 5,
+    "dim_action": 1,
     "action_min": -1.0,
     "action_max": 1.0,
     "prefill_buffer_size": 2500,
     "prefill_with_planner": false,
     "sgd_burst_steps": 2500,
-    "eval_freq": 10000,
+    "eval_freq": 50000,
     "chunk_size": 1000,
     "plot_eval": false,
+    "visualizer": {
+      "type": "cheetah"
+    },
     "evaluator": {
       "seed": 123,
-      "max_steps": 500,
+      "max_steps": 1000,
       "num_episodes": 2,
       "environment": {},
       "planner": {
@@ -43,7 +46,7 @@
       "frozen": false
     },
     "dynamics": {
-      "type": "dense_tiny_lora",
+      "type": "dense",
       "dynamics_features": [
         512,
         512,
@@ -52,15 +55,6 @@
       ],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
-      "svd_rank": 64,
-      "steering_dim": 64,
-      "projection_seed": 42,
-      "adapt_layers": [
-        0,
-        1,
-        2,
-        3
-      ],
       "frozen": false
     },
     "critic": {
@@ -99,15 +93,14 @@
       "frozen": false
     },
     "environment": {
-      "type": "cheetah",
+      "type": "cartpole_balance",
       "num_agents": 1,
-      "max_episode_steps": 500,
-      "cheetah_mass_scale": 1.0
+      "max_episode_steps": 1000
     },
     "trainer": {
-      "type": "bgd_fomaml_tinylora_tdmpc2",
+      "type": "tdmpc2",
       "lr": 0.0003,
-      "encoder_lr": 0.0001,
+      "encoder_lr": 9e-05,
       "policy_lr": 0.0003,
       "grad_clip_norm": 20,
       "horizon": 3,
@@ -117,33 +110,20 @@
       "consistency_coef": 20.0,
       "reward_coef": 0.1,
       "value_coef": 0.1,
-      "entropy_coef": 0.0001,
-      "meta_lr_inner": 0.0001
+      "entropy_coef": 0.0001
     },
     "sampler": {
       "type": "trajectory_batch",
       "batch_size": 256,
-      "horizon": 6,
+      "horizon": 3,
       "min_buffer_size": 2500
     },
     "state_labels": [
-      "rootz",
-      "rooty",
-      "bthigh",
-      "bshin",
-      "bfoot",
-      "fthigh",
-      "fshin",
-      "ffoot",
-      "vel_x",
-      "vel_z",
-      "vel_y",
-      "vel_bthigh",
-      "vel_bshin",
-      "vel_bfoot",
-      "vel_fthigh",
-      "vel_fshin",
-      "vel_ffoot"
+      "cart_pos",
+      "pole_cos",
+      "pole_sin",
+      "cart_vel",
+      "pole_vel"
     ],
     "planner": {
       "type": "mppi",
@@ -152,7 +132,7 @@
       "meas_noise_scale": 1.0,
       "horizon": 3,
       "num_iterations": 6,
-      "dim_control": 6,
+      "dim_control": 1,
       "batch_size": 512,
       "num_pi_trajs": 24,
       "temperature": 0.5,

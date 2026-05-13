@@ -23,7 +23,7 @@ def init_env(config: Dict[str, Any]):
     elif env_type == "ball_in_cup":
         return _make_ball_in_cup_env(config)
     elif env_type == "cartpole_balance":
-        return _make_cartpole_env(config, "CartpoleBalance")
+        return _make_cartpole_balance_env(config)
     elif env_type == "cartpole_swingup":
         return _make_cartpole_env(config, "CartpoleSwingup")
     elif env_type == "finger_spin":
@@ -124,6 +124,102 @@ def _make_cheetah_env(config: Dict[str, Any]):
     return reset_fn, step_fn, get_obs_fn
 
 
+def _make_cartpole_balance_env(config: Dict[str, Any]):
+    """
+    Factory for CartpoleBalance from mujoco_playground.
+
+    Observation: 5D = [cart_pos, pole_cos, pole_sin, cart_vel, pole_vel]
+    Action: 1D cart force in [-1, 1]
+    """
+    from mujoco_playground import registry
+    from mujoco_playground._src import mjx_env, reward as reward_lib
+    from mujoco import mjx
+
+    env_cfg = config["environment"]
+    max_episode_steps = env_cfg["max_episode_steps"]
+    cartpole_pole_mass_scale = env_cfg.get("cartpole_pole_mass_scale", 1.0)
+    cartpole_pole_length_scale = env_cfg.get("cartpole_pole_length_scale", 1.0)
+
+    print("Initializing environment: cartpole_balance")
+
+    env = registry.load('CartpoleBalance')
+
+    if cartpole_pole_mass_scale != 1.0 or cartpole_pole_length_scale != 1.0:
+        import mujoco
+        mj_model = env.mj_model
+        pole_idx = mj_model.body('pole_1').id
+
+        if cartpole_pole_mass_scale != 1.0:
+            mj_model.body_mass[pole_idx] *= cartpole_pole_mass_scale
+            mj_model.body_inertia[pole_idx] *= cartpole_pole_mass_scale
+
+        if cartpole_pole_length_scale != 1.0:
+            s = cartpole_pole_length_scale
+            pole_geom_idx = mj_model.geom('pole_1').id
+            mj_model.geom_size[pole_geom_idx, 1] *= s       # capsule half-length
+            mj_model.geom_pos[pole_geom_idx, 2] *= s        # capsule center
+            mj_model.body_ipos[pole_idx, 2] *= s            # center of mass
+            mj_model.body_inertia[pole_idx, 0] *= s ** 2    # Ixx
+            mj_model.body_inertia[pole_idx, 1] *= s ** 2    # Iyy
+
+        mujoco.mj_setConst(mj_model, mujoco.MjData(mj_model))
+        mjx_model = mjx.put_model(mj_model)
+    else:
+        mjx_model = env.mjx_model
+
+    slider_qposadr = env._slider_qposadr
+    hinge_1_qposadr = env._hinge_1_qposadr
+
+    @jax.jit
+    def reset_fn(key: jax.random.PRNGKey) -> mjx.Data:
+        env_state = env.reset(key)
+        return env_state.data
+
+    @jax.jit
+    def step_fn(data: mjx.Data, step_count: int, action: jnp.ndarray):
+        a = action.reshape(-1)  # (dim_action,) — mjx_env.step requires shape [nu]
+        next_data = mjx_env.step(mjx_model, data, a, 1)
+
+        obs = get_obs_fn(next_data)
+
+        pole_angle_cos = next_data.xmat[2, 2, 2]
+        upright = (pole_angle_cos + 1) / 2
+
+        cart_position = next_data.qpos[slider_qposadr]
+        centered = (1 + reward_lib.tolerance(cart_position, margin=2)) / 2
+
+        small_control = (4 + reward_lib.tolerance(
+            a[0], margin=1, value_at_margin=0, sigmoid="quadratic"
+        )) / 5
+
+        angular_vel = next_data.qvel[1:]
+        small_velocity = (1 + reward_lib.tolerance(angular_vel, margin=5).min()) / 2
+
+        r = upright * small_control * small_velocity * centered
+        rewards = jnp.array([r])
+
+        done = jnp.isnan(next_data.qpos).any() | jnp.isnan(next_data.qvel).any()
+        terminated = done
+        truncated = step_count >= max_episode_steps
+
+        return next_data, obs, rewards, terminated, truncated, {}
+
+    @jax.jit
+    def get_obs_fn(data: mjx.Data) -> jnp.ndarray:
+        cart_position = data.qpos[slider_qposadr]
+        pole_angle_cos = data.xmat[2:, 2, 2]
+        pole_angle_sin = data.xmat[2:, 0, 2]
+        obs = jnp.concatenate([
+            cart_position.reshape(1),
+            pole_angle_cos,
+            pole_angle_sin,
+            data.qvel,
+        ])
+        return obs[None, :]
+
+    return reset_fn, step_fn, get_obs_fn
+
+
 def _make_humanoid_env(config: Dict[str, Any]):
     """
     Factory function that wraps mujoco_playground HumanoidRun environment.
@@ -162,7 +258,6 @@ def _make_humanoid_env(config: Dict[str, Any]):
 
     @jax.jit
     def reset_fn(key: jax.random.PRNGKey) -> mjx.Data:
-        """Resets the humanoid environment and returns mjx.Data directly."""
         env_state = env.reset(key)
         return env_state.data
 
@@ -172,38 +267,28 @@ def _make_humanoid_env(config: Dict[str, Any]):
         step_count: int,
         action: jnp.ndarray,
     ):
-        """Steps the humanoid environment forward using mjx.Data directly."""
-        # Two physics steps, reward sampled after each
         a = action.squeeze()
         mid_data = mjx_env.step(mjx_model, data, a, 1)
         next_data = mjx_env.step(mjx_model, mid_data, a, 1)
 
-        # Get observation
         obs = get_obs_fn(next_data)
 
-        # Reward: forward velocity task (clipped to [0, 1] per step, max 2.0 per agent step)
         reward = (jnp.clip(mid_data.qvel[0] / 10.0, 0.0, 1.0)
                   + jnp.clip(next_data.qvel[0] / 10.0, 0.0, 1.0))
         rewards = jnp.array([reward])
 
-        # Check termination (NaN in state)
         done = jnp.isnan(next_data.qpos).any() | jnp.isnan(next_data.qvel).any()
         terminated = done
-
-        # Truncation based on max steps
         truncated = step_count >= max_episode_steps
 
-        info = {
-            "forward_vel": next_data.qvel[0],
-        }
+        info = {"forward_vel": next_data.qvel[0]}
 
         return next_data, obs, rewards, terminated, truncated, info
 
     @jax.jit
     def get_obs_fn(data: mjx.Data) -> jnp.ndarray:
-        """Returns observation: [qpos[1:], qvel] from mjx.Data (excluding root x position)."""
         obs = jnp.concatenate([data.qpos[1:], data.qvel])
-        return obs[None, :]  # Add agent dimension
+        return obs[None, :]
 
     return reset_fn, step_fn, get_obs_fn
 
@@ -215,7 +300,7 @@ def _make_quadruped_env(config: Dict[str, Any]):
     Note: This environment is stateful (dm_control maintains internal state).
     The state returned from step_fn and reset_fn is just the observation (JAX array),
     not the full timestep object. This allows compatibility with JAX's JIT compilation.
-    
+
     Observation: flattened vector of proprioceptive observations
     Action: 10D continuous control
     Reward: forward velocity task from DeepMind Control Suite dog/run
@@ -229,72 +314,44 @@ def _make_quadruped_env(config: Dict[str, Any]):
 
     print(f"Initializing environment: quadruped (dm_control dog/run task)")
 
-    # Load dog-run task from dm_control (closed over)
     env = suite.load(domain_name='dog', task_name='run')
     action_spec = env.action_spec()
 
     def reset_fn(key: jax.random.PRNGKey):
-        """Resets the environment and returns the initial observation as a JAX array."""
         timestep = env.reset()
         obs = _extract_obs(timestep)
         return obs
 
-    def step_fn(
-        obs_state,
-        step_count: int,
-        action: jnp.ndarray,
-    ):
-        """Steps the environment forward.
-        
-        Note: obs_state parameter is the observation from the previous step, but is ignored.
-        The dm_control environment maintains its own internal state between calls.
-        """
-        # Convert JAX array to numpy and clip to action bounds
+    def step_fn(obs_state, step_count: int, action: jnp.ndarray):
         action_np = np.clip(
             np.asarray(action.squeeze()),
             action_spec.minimum,
             action_spec.maximum
         )
-        
-        # Step environment (stateful; ignores obs_state because dm_control manages state internally)
         timestep = env.step(action_np)
-
-        # Extract observation as JAX array (this becomes the new state)
         obs = _extract_obs(timestep)
-
-        # Reward from dm_control
         rewards = jnp.array([timestep.reward])
-
-        # Check termination
         terminated = timestep.step_type == dm_control.dm_env.StepType.LAST
         truncated = step_count >= max_episode_steps
-
         info = {
             "reward": float(timestep.reward),
             "step_type": int(timestep.step_type),
         }
-
-        # Return observation as state (JAX-compatible)
         return obs, obs, rewards, terminated, truncated, info
 
     def _extract_obs(timestep) -> jnp.ndarray:
-        """Extracts and flattens observation from dm_control timestep."""
         obs_dict = timestep.observation
         obs_parts = []
         for key in sorted(obs_dict.keys()):
             val = np.asarray(obs_dict[key])
             obs_parts.append(val.flatten())
         obs_flat = np.concatenate(obs_parts)
-        # Convert to JAX array and add agent batch dimension
         obs_jax = jnp.asarray(obs_flat, dtype=jnp.float32)[None, :]
         return obs_jax
 
     def get_obs_fn(obs_or_timestep) -> jnp.ndarray:
-        """Extracts observation from either timestep (from reset_fn during init) or JAX array (from step_fn)."""
-        # If it's already a JAX array (from step_fn), return it as-is
         if isinstance(obs_or_timestep, jnp.ndarray):
             return obs_or_timestep
-        # Otherwise it's a timestep from reset_fn
         return _extract_obs(obs_or_timestep)
 
     return reset_fn, step_fn, get_obs_fn
@@ -306,9 +363,6 @@ def _make_walker_env(config: Dict[str, Any]):
 
     Internal state: mjx.Data (full MuJoCo physics state)
     Observation: 24D = [orientations (14D), height (1D), qvel (9D)]
-        orientations: xmat[body, 0, 0] and xmat[body, 0, 2] for each of 7 bodies (world excluded)
-        height: xmat[torso, 2, 2] (upright component)
-        velocity: qvel (9D)
     Action: 6D torques in [-1, 1]
     """
     from mujoco_playground import registry
@@ -352,18 +406,11 @@ def _make_walker_env(config: Dict[str, Any]):
         return env_state.data
 
     @jax.jit
-    def step_fn(
-        data: mjx.Data,
-        step_count: int,
-        action: jnp.ndarray,
-    ):
+    def step_fn(data: mjx.Data, step_count: int, action: jnp.ndarray):
         a = action.squeeze()
-        # ctrl_dt=0.025, sim_dt=0.0025 => 10 substeps per control step
         next_data = mjx_env.step(mjx_model, data, a, 10)
-
         obs = get_obs_fn(next_data)
 
-        # Standing reward
         torso_height = next_data.xpos[torso_id, 2]
         standing = reward_fns.tolerance(
             torso_height,
@@ -374,7 +421,6 @@ def _make_walker_env(config: Dict[str, Any]):
         upright = (1 + torso_upright) / 2
         stand_reward = (3 * standing + upright) / 4
 
-        # Move reward
         horizontal_velocity = next_data.sensordata[sensor_adr]
         move_reward = reward_fns.tolerance(
             horizontal_velocity,
@@ -388,23 +434,17 @@ def _make_walker_env(config: Dict[str, Any]):
         rewards = jnp.array([reward])
 
         done = jnp.isnan(next_data.qpos).any() | jnp.isnan(next_data.qvel).any()
-        terminated = done
-        truncated = step_count >= max_episode_steps
-
-        info = {
+        return next_data, obs, rewards, done, step_count >= max_episode_steps, {
             "horizontal_velocity": horizontal_velocity,
             "torso_height": torso_height,
         }
 
-        return next_data, obs, rewards, terminated, truncated, info
-
     @jax.jit
     def get_obs_fn(data: mjx.Data) -> jnp.ndarray:
-        """Returns 24D observation: [orientations (14D), height (1D), qvel (9D)]."""
         orientations = data.xmat[1:, [0, 0], [0, 2]].ravel()
         height = data.xmat[torso_id, 2, 2]
         obs = jnp.concatenate([orientations, height.reshape(1), data.qvel])
-        return obs[None, :]  # Add agent dimension
+        return obs[None, :]
 
     return reset_fn, step_fn, get_obs_fn
 
@@ -533,7 +573,6 @@ def _make_ball_in_cup_env(config: Dict[str, Any]):
     target_site_id = int(mj_model.site("target").id)
     ball_body_id = int(mj_model.body("ball").id)
     ball_geom_id = int(mj_model.geom("ball").id)
-    # target_sz: [x_radius, z_radius] of the cup target site
     target_sz = jnp.array([
         float(mj_model.site_size[target_site_id, 0]),
         float(mj_model.site_size[target_site_id, 2]),
@@ -565,86 +604,6 @@ def _make_ball_in_cup_env(config: Dict[str, Any]):
     @jax.jit
     def get_obs_fn(data: mjx.Data) -> jnp.ndarray:
         return jnp.concatenate([data.qpos, data.qvel])[None, :]
-
-    return reset_fn, step_fn, get_obs_fn
-
-
-def _make_cartpole_env(config: Dict[str, Any], registry_name: str):
-    """
-    Shared factory for CartpoleBalance and CartpoleSwingup.
-
-    Observation: 5D = [cart_pos (1D), pole_cos (1D), pole_sin (1D), qvel (2D)]
-    Action: 1D (slider force)
-    Reward: dense upright * centered * small_control * small_velocity
-    """
-    from mujoco_playground import registry
-    from mujoco_playground._src import mjx_env
-    from mujoco_playground._src import reward as reward_fns
-    from mujoco import mjx
-
-    env_cfg = config["environment"]
-    max_episode_steps = env_cfg.get("max_episode_steps", 1000)
-    cartpole_mass_scale = env_cfg.get("cartpole_mass_scale", 1.0)
-    cartpole_friction_scale = env_cfg.get("cartpole_friction_scale", 1.0)
-    cartpole_gravity_scale = env_cfg.get("cartpole_gravity_scale", 1.0)
-
-    print(f"Initializing environment: {registry_name.lower()}")
-
-    env = registry.load(registry_name)
-    mj_model = env.mj_model
-
-    if cartpole_mass_scale != 1.0 or cartpole_friction_scale != 1.0 or cartpole_gravity_scale != 1.0:
-        import mujoco
-        mj_model.body_mass[:] *= cartpole_mass_scale
-        mj_model.body_inertia[:] *= cartpole_mass_scale
-        mj_model.geom_friction[:] *= cartpole_friction_scale
-        mj_model.opt.gravity[:] *= cartpole_gravity_scale
-        mj_data = mujoco.MjData(mj_model)
-        mujoco.mj_setConst(mj_model, mj_data)
-        mjx_model = mjx.put_model(mj_model)
-    else:
-        mjx_model = env.mjx_model
-
-    @jax.jit
-    def reset_fn(key: jax.random.PRNGKey) -> mjx.Data:
-        return env.reset(key).data
-
-    @jax.jit
-    def step_fn(data: mjx.Data, step_count: int, action: jnp.ndarray):
-        a = action.reshape(-1)
-        # ctrl_dt = sim_dt = 0.01 -> n_substeps = 1
-        next_data = mjx_env.step(mjx_model, data, a, 1)
-        obs = get_obs_fn(next_data)
-
-        pole_cos = next_data.xmat[2, 2, 2]
-        upright = (pole_cos + 1) / 2
-
-        cart_pos = next_data.qpos[0]
-        centered = (1 + reward_fns.tolerance(cart_pos, margin=2.0)) / 2
-
-        small_control = (
-            4 + reward_fns.tolerance(a[0], margin=1.0, value_at_margin=0.0, sigmoid="quadratic")
-        ) / 5
-
-        angular_vel = next_data.qvel[1:]
-        small_velocity = (1 + reward_fns.tolerance(angular_vel, margin=5.0).min()) / 2
-
-        reward = upright * centered * small_control * small_velocity
-        rewards = jnp.array([reward])
-
-        done = jnp.isnan(next_data.qpos).any() | jnp.isnan(next_data.qvel).any()
-        return next_data, obs, rewards, done, step_count >= max_episode_steps, {
-            "upright": upright,
-            "cart_pos": cart_pos,
-        }
-
-    @jax.jit
-    def get_obs_fn(data: mjx.Data) -> jnp.ndarray:
-        cart_pos = data.qpos[0:1]
-        pole_cos = data.xmat[2:, 2, 2]
-        pole_sin = data.xmat[2:, 0, 2]
-        obs = jnp.concatenate([cart_pos, pole_cos, pole_sin, data.qvel])
-        return obs[None, :]
 
     return reset_fn, step_fn, get_obs_fn
 
@@ -704,7 +663,6 @@ def _make_finger_spin_env(config: Dict[str, Any]):
     @jax.jit
     def step_fn(data: mjx.Data, step_count: int, action: jnp.ndarray):
         a = action.reshape(-1)
-        # ctrl_dt=0.02, sim_dt=0.005 -> n_substeps=4
         next_data = mjx_env.step(mjx_model, data, a, 4)
         obs = get_obs_fn(next_data)
 
@@ -792,7 +750,6 @@ def _make_hopper_hop_env(config: Dict[str, Any]):
     @jax.jit
     def step_fn(data: mjx.Data, step_count: int, action: jnp.ndarray):
         a = action.reshape(-1)
-        # ctrl_dt=0.02, sim_dt=0.005 -> n_substeps=4
         next_data = mjx_env.step(mjx_model, data, a, 4)
         obs = get_obs_fn(next_data)
 
@@ -834,8 +791,6 @@ def _make_reacher_env(config: Dict[str, Any], registry_name: str):
     Observation: 6D = [qpos (2D), finger_to_target (2D), qvel (2D)]
     Action: 2D (shoulder/wrist torques)
     Reward: tolerance(finger_to_target_dist, (0, radii))
-        radii = target_geom_radius + finger_geom_radius
-        Easy: radii ~0.06, Hard: radii ~0.025
     """
     from mujoco_playground import registry
     from mujoco_playground._src import mjx_env
@@ -876,7 +831,6 @@ def _make_reacher_env(config: Dict[str, Any], registry_name: str):
     @jax.jit
     def step_fn(data: mjx.Data, step_count: int, action: jnp.ndarray):
         a = action.reshape(-1)
-        # ctrl_dt=0.02, sim_dt=0.005 -> n_substeps=4
         next_data = mjx_env.step(mjx_model, data, a, 4)
         obs = get_obs_fn(next_data)
 
@@ -893,10 +847,79 @@ def _make_reacher_env(config: Dict[str, Any], registry_name: str):
 
     @jax.jit
     def get_obs_fn(data: mjx.Data) -> jnp.ndarray:
-        finger_pos      = data.geom_xpos[finger_geom_id, :2]
-        target_pos      = data.geom_xpos[target_geom_id, :2]
+        finger_pos       = data.geom_xpos[finger_geom_id, :2]
+        target_pos       = data.geom_xpos[target_geom_id, :2]
         finger_to_target = target_pos - finger_pos
         obs = jnp.concatenate([data.qpos, finger_to_target, data.qvel])
+        return obs[None, :]
+
+    return reset_fn, step_fn, get_obs_fn
+
+
+def _make_cartpole_env(config: Dict[str, Any], registry_name: str):
+    """Stub used by cartpole_swingup dispatch."""
+    from mujoco_playground import registry
+    from mujoco_playground._src import mjx_env
+    from mujoco_playground._src import reward as reward_fns
+    from mujoco import mjx
+
+    env_cfg = config["environment"]
+    max_episode_steps = env_cfg.get("max_episode_steps", 1000)
+    cartpole_mass_scale = env_cfg.get("cartpole_mass_scale", 1.0)
+    cartpole_friction_scale = env_cfg.get("cartpole_friction_scale", 1.0)
+    cartpole_gravity_scale = env_cfg.get("cartpole_gravity_scale", 1.0)
+
+    print(f"Initializing environment: {registry_name.lower()}")
+
+    env = registry.load(registry_name)
+    mj_model = env.mj_model
+
+    if cartpole_mass_scale != 1.0 or cartpole_friction_scale != 1.0 or cartpole_gravity_scale != 1.0:
+        import mujoco
+        mj_model.body_mass[:] *= cartpole_mass_scale
+        mj_model.body_inertia[:] *= cartpole_mass_scale
+        mj_model.geom_friction[:] *= cartpole_friction_scale
+        mj_model.opt.gravity[:] *= cartpole_gravity_scale
+        mj_data = mujoco.MjData(mj_model)
+        mujoco.mj_setConst(mj_model, mj_data)
+        mjx_model = mjx.put_model(mj_model)
+    else:
+        mjx_model = env.mjx_model
+
+    @jax.jit
+    def reset_fn(key: jax.random.PRNGKey) -> mjx.Data:
+        return env.reset(key).data
+
+    @jax.jit
+    def step_fn(data: mjx.Data, step_count: int, action: jnp.ndarray):
+        a = action.reshape(-1)
+        next_data = mjx_env.step(mjx_model, data, a, 1)
+        obs = get_obs_fn(next_data)
+
+        pole_cos = next_data.xmat[2, 2, 2]
+        upright = (pole_cos + 1) / 2
+        cart_pos = next_data.qpos[0]
+        centered = (1 + reward_fns.tolerance(cart_pos, margin=2.0)) / 2
+        small_control = (
+            4 + reward_fns.tolerance(a[0], margin=1.0, value_at_margin=0.0, sigmoid="quadratic")
+        ) / 5
+        angular_vel = next_data.qvel[1:]
+        small_velocity = (1 + reward_fns.tolerance(angular_vel, margin=5.0).min()) / 2
+        reward = upright * centered * small_control * small_velocity
+        rewards = jnp.array([reward])
+
+        done = jnp.isnan(next_data.qpos).any() | jnp.isnan(next_data.qvel).any()
+        return next_data, obs, rewards, done, step_count >= max_episode_steps, {
+            "upright": upright,
+            "cart_pos": cart_pos,
+        }
+
+    @jax.jit
+    def get_obs_fn(data: mjx.Data) -> jnp.ndarray:
+        cart_pos = data.qpos[0:1]
+        pole_cos = data.xmat[2:, 2, 2]
+        pole_sin = data.xmat[2:, 0, 2]
+        obs = jnp.concatenate([cart_pos, pole_cos, pole_sin, data.qvel])
         return obs[None, :]
 
     return reset_fn, step_fn, get_obs_fn

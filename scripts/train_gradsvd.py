@@ -1,4 +1,9 @@
-# train.py
+# train_gradsvd.py
+# Adaptation training script using LoRA-XS initialized from scaled gradient SVD.
+# Three changes from train.py:
+#   1. Imports init_gradsvd_lora_xs_dynamics instead of init_dynamics
+#   2. Loads grad_capture.pkl (g_sum_scaled) from --grad-capture-path
+#   3. Passes grad_avg to init_gradsvd_lora_xs_dynamics when initializing dynamics
 
 import os
 import sys
@@ -10,8 +15,6 @@ _pre, _ = _pp.parse_known_args()
 if _pre.gpu is not None:
     os.environ["CUDA_VISIBLE_DEVICES"] = _pre.gpu
 
-# os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
-# os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.45"
 os.environ["JAX_COMPILATION_CACHE_DIR"] = os.path.expanduser("~/.cache/jax_cache")
 os.environ["JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] = "0"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -19,14 +22,13 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import time
 
 import jax
-
 import jax.numpy as jnp
 import numpy as np
 import wandb
 from max.buffers import init_buffer, episodes_from_buffer
 from max.utilities import count_parameters
 from max.environments import init_env
-from max.dynamics import init_dynamics
+from max.dynamics_gradsvd import init_gradsvd_lora_xs_dynamics
 from max.encoders import init_encoder
 from max.critics import init_critic
 from max.policies import init_policy
@@ -76,9 +78,17 @@ def main(config):
             pretrained_params = pickle.load(f)["mean"]
         print(f"Loaded pretrained parameters from {path}")
 
+    # ---- Load gradient capture data (g_sum_scaled = Adam updates) ----
+    with open(config["grad_capture_path"], "rb") as f:
+        gc = pickle.load(f)
+    grad_avg = gc["g_sum_scaled"]
+    print(f"Loaded gradient data from {config['grad_capture_path']}")
+
     key, enc_key, dyn_key, critic_key, policy_key = jax.random.split(key, 5)
     encoder,      enc_parameters    = init_encoder(enc_key, config,    pretrained=pretrained_params.get("encoder"))
-    dynamics,     dyn_parameters    = init_dynamics(dyn_key, config,   pretrained=pretrained_params.get("dynamics"))
+    dynamics,     dyn_parameters    = init_gradsvd_lora_xs_dynamics(
+        dyn_key, config, pretrained=pretrained_params.get("dynamics"), grad_avg=grad_avg
+    )
     critic,       critic_parameters = init_critic(critic_key, config,  pretrained=pretrained_params.get("critic"))
     policy,       policy_parameters = init_policy(policy_key, config,  pretrained=pretrained_params.get("policy"))
     reward_model, reward_parameters = init_reward_model(config,        pretrained=pretrained_params.get("reward"))
@@ -133,7 +143,7 @@ def main(config):
     wandb.config.update({"num_params_total": total_n})
     print(f"[{time.time()-t0:.2f}s] Components ready  (total={total_n:,})")
 
-    print(f"Starting TDMPC2 training for {config['max_steps']} steps")
+    print(f"Starting loraxs_gradsvd adaptation for {config['max_steps']} steps")
 
     # ---- Initial evaluation ----
     print(f"[{time.time()-t0:.2f}s] Running initial evaluation...")
@@ -278,123 +288,62 @@ def main(config):
     print("Run complete.")
 
 
-def run_sweep():
-    """Entry point for wandb sweep agents."""
-    wandb.init()
-
-    config_name = os.environ.get("CONFIG", "cheetah.json")
-    config_path = os.path.join(
-        os.path.dirname(__file__), "..", "configs", config_name
-    )
-    with open(config_path, "r") as f:
-        full_config = json.load(f)
-
-    run_config = copy.deepcopy(full_config["training"])
-
-    for key, value in wandb.config.items():
-        keys = key.split(".")
-        target = run_config
-        for k in keys[:-1]:
-            target = target[k]
-        target[keys[-1]] = value
-
-    main(run_config)
-    wandb.finish()
-
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run TDMPC2 training.")
+    parser = argparse.ArgumentParser(description="LoRA-XS adaptation with gradient SVD initialization.")
     parser.add_argument("--run-name", type=str, default=None)
-    parser.add_argument("--num-seeds", type=int, default=1)
     parser.add_argument(
         "--config",
         type=str,
-        default="cheetah.json",
-        help="Config filename in configs folder.",
+        default="adapt_full_with_loraxs_gradsvd_pt.json",
+        help="Config filename or absolute path.",
     )
     parser.add_argument("--gpu", type=str, default=None, help="GPU index (sets CUDA_VISIBLE_DEVICES).")
     parser.add_argument("--save-dir", type=str, default=None, help="Override training.save_dir in config.")
     parser.add_argument("--seed", type=int, default=None, help="Override training.seed in config.")
     parser.add_argument("--pretrained-path", type=str, default=None, help="Override training.pretrained_path in config.")
+    parser.add_argument("--grad-capture-path", type=str, default=None, help="Override training.grad_capture_path in config.")
     args = parser.parse_args()
 
-    if os.environ.get("WANDB_SWEEP_ID"):
-        run_sweep()
-    else:
-        config_path = os.path.join(
-            os.path.dirname(__file__), "..", "configs", args.config
+    config_path = os.path.join(
+        os.path.dirname(__file__), "..", "configs", args.config
+    )
+    with open(config_path, "r") as f:
+        full_config = json.load(f)
+    CONFIG = full_config["training"]
+
+    if args.save_dir is not None:
+        CONFIG["save_dir"] = args.save_dir
+    if args.seed is not None:
+        CONFIG["seed"] = args.seed
+    if args.pretrained_path is not None:
+        CONFIG["pretrained_path"] = args.pretrained_path
+    if args.grad_capture_path is not None:
+        CONFIG["grad_capture_path"] = args.grad_capture_path
+
+    run_name_base = args.run_name or "loraxs_gradsvd"
+    num_seeds = CONFIG["num_seeds"]
+
+    base_key = jax.random.key(CONFIG["seed"])
+    seed_keys = jax.random.split(base_key, num_seeds)
+    seeds = [int(jax.random.bits(k)) for k in seed_keys]
+
+    for seed_idx, seed in enumerate(seeds, start=1):
+        print(f"--- Starting run {seed_idx}/{num_seeds} ---")
+        run_config = copy.deepcopy(CONFIG)
+        run_config["seed"] = seed
+        run_name = run_name_base
+        if num_seeds > 1:
+            run_name = f"{run_name}_{seed_idx}"
+        run_config["wandb_run_name"] = run_name
+
+        wandb.init(
+            project=run_config["wandb_project"],
+            config=run_config,
+            name=run_config["wandb_run_name"],
+            group=run_config.get("wandb_group"),
+            reinit=True,
         )
-        with open(config_path, "r") as f:
-            full_config = json.load(f)
-        CONFIG = full_config["training"]
+        main(run_config)
+        wandb.finish()
 
-        if args.save_dir is not None:
-            CONFIG["save_dir"] = args.save_dir
-        if args.seed is not None:
-            CONFIG["seed"] = args.seed
-        if args.pretrained_path is not None:
-            CONFIG["pretrained_path"] = args.pretrained_path
-
-        run_name_base = args.run_name or config["environment"]["type"]
-        num_seeds = CONFIG["num_seeds"]
-        num_processes = CONFIG["num_processes"]
-
-        if num_processes > 1:
-            # Derive per-process seeds using Python random (not JAX) so the
-            # parent process never initializes a CUDA context — otherwise the
-            # parent and each subprocess would hold simultaneous CUDA contexts
-            # on the same GPU, causing OOM.
-            import random
-            rng = random.Random(CONFIG["seed"])
-            proc_seeds = [rng.randint(0, 2**31) for _ in range(num_processes)]
-
-            for proc_idx, proc_seed in enumerate(proc_seeds, start=1):
-                print(f"--- Starting process {proc_idx}/{num_processes} ---")
-                if os.path.exists("/tmp/jax_cache"):
-                    shutil.rmtree("/tmp/jax_cache")
-
-                proc_config = copy.deepcopy(CONFIG)
-                proc_config["seed"] = proc_seed
-                proc_config["num_processes"] = 1  # prevent recursion
-                proc_config["process_idx"] = proc_idx
-
-                with tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".json", delete=False
-                ) as f:
-                    json.dump({"training": proc_config}, f, indent=2)
-                    tmp_path = f.name
-
-                proc_run_name = f"{run_name_base}_p{proc_idx}"
-                subprocess.run(
-                    [sys.executable, __file__,
-                     "--config", tmp_path,
-                     "--run-name", proc_run_name],
-                    cwd=os.path.dirname(os.path.abspath(__file__)),
-                )
-                os.unlink(tmp_path)
-
-        else:
-            base_key = jax.random.key(CONFIG["seed"])
-            seed_keys = jax.random.split(base_key, num_seeds)
-            seeds = [int(jax.random.bits(k)) for k in seed_keys]
-
-        for seed_idx, seed in enumerate(seeds, start=1):
-            print(f"--- Starting run seed {seed_idx}/{args.num_seeds} ---")
-            run_config = copy.deepcopy(CONFIG)
-            run_config["seed"] = seed
-            run_name = run_name_base
-            if args.num_seeds > 1:
-                run_name = f"{run_name}_{seed_idx}"
-            run_config["wandb_run_name"] = run_name
-
-            wandb.init(
-                project=run_config["wandb_project"],
-                config=run_config,
-                name=run_config["wandb_run_name"],
-                group=run_config.get("wandb_group"),
-                reinit=True,
-            )
-            main(run_config)
-            wandb.finish()
-
-        print("All experiments complete.")
+    print("All experiments complete.")

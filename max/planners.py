@@ -249,7 +249,7 @@ def create_mppi_planner(
 
             return (new_mean, new_std, iter_key), None
 
-        (final_mean, _final_std, _iter_key), _ = jax.lax.scan(
+        (final_mean, final_std, _iter_key), _ = jax.lax.scan(
             mppi_iteration, (mean, std, iter_key), None, length=num_iterations
         )
 
@@ -257,6 +257,6 @@ def create_mppi_planner(
         shifted_mean = jnp.concatenate([final_mean[1:], final_mean[-1:]], axis=0)
 
         new_state = state.replace(mean=shifted_mean, key=key)
-        return final_mean, new_state
+        return final_mean, final_std, new_state
 
     return Planner(reward_fn=None, solve_fn=solve_fn), initial_state

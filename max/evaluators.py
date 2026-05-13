@@ -99,8 +99,8 @@ def _create_evaluator(
     def _scan_step(carry, step_idx):
         env_state, planner_state, parameters = carry
         state_array = get_obs_fn(env_state).squeeze(0)
-        actions, new_planner_state = planner.solve(planner_state, state_array, parameters)
-        action = actions[0]  # first action of the planned sequence
+        actions, _std, new_planner_state = planner.solve(planner_state, state_array, parameters)
+        action = actions[0]  # eval mode: take mean, no noise
         new_env_state, _, env_rewards, _, _, _ = step_fn(env_state, step_idx, action[None, :])
         return (new_env_state, new_planner_state, parameters), (env_rewards[0], env_state, action)
 

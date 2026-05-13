@@ -1,0 +1,141 @@
+{
+  "training": {
+    "wandb_project": "finetune_cartpole",
+    "wandb_run_name": "lowdata_run1",
+    "seed": 44,
+    "save_dir": "./data/models/cartpole/finetune",
+    "checkpoint_freq": 50000,
+    "num_agents": 1,
+    "dim_state": 5,
+    "dim_action": 1,
+    "action_min": -1.0,
+    "action_max": 1.0,
+    "eval_freq": 50000,
+    "plot_eval": false,
+    "visualizer": {
+      "type": "cheetah"
+    },
+    "evaluator": {
+      "seed": 123,
+      "max_steps": 1000,
+      "num_episodes": 2,
+      "environment": {},
+      "planner": {
+        "type": "mppi"
+      }
+    },
+    "normalizer": {
+      "critic": {
+        "q_scale_init": 1.0
+      }
+    },
+    "encoder": {
+      "type": "proprioceptive",
+      "encoder_features": [
+        256,
+        128,
+        64
+      ],
+      "simnorm_dim_v": 8,
+      "simnorm_tau": 1.0,
+      "frozen": true
+    },
+    "dynamics": {
+      "type": "dense",
+      "dynamics_features": [
+        512,
+        512,
+        128,
+        64
+      ],
+      "simnorm_dim_v": 8,
+      "simnorm_tau": 1.0,
+      "frozen": false
+    },
+    "critic": {
+      "type": "ensemble",
+      "features": [
+        512,
+        512
+      ],
+      "num_ensemble": 5,
+      "num_bins": 101,
+      "vmin": -10.0,
+      "vmax": 10.0,
+      "dropout": 0.01,
+      "num_subsample": 2,
+      "frozen": true
+    },
+    "policy": {
+      "type": "squashed_gaussian",
+      "features": [
+        512,
+        512
+      ],
+      "log_std_min": -10,
+      "log_std_max": 2,
+      "frozen": true
+    },
+    "reward": {
+      "type": "mlp",
+      "features": [
+        512,
+        512
+      ],
+      "num_bins": 101,
+      "vmin": -10.0,
+      "vmax": 10.0,
+      "frozen": true
+    },
+    "environment": {
+      "type": "cartpole_balance",
+      "num_agents": 1,
+      "max_episode_steps": 1000,
+      "cartpole_pole_length_scale": 5.0
+    },
+    "trainer": {
+      "type": "ogd",
+      "lr": 0.0003,
+      "grad_clip_norm": 20,
+      "horizon": 3,
+      "temporal_decay": 0.5
+    },
+    "sampler": {
+      "type": "trajectory_batch",
+      "batch_size": 256,
+      "horizon": 3,
+      "min_buffer_size": 2500
+    },
+    "state_labels": [
+      "cart_pos",
+      "pole_cos",
+      "pole_sin",
+      "cart_vel",
+      "pole_vel"
+    ],
+    "planner": {
+      "type": "mppi",
+      "info_weight": 0.0,
+      "info_horizon": 1,
+      "meas_noise_scale": 1.0,
+      "horizon": 3,
+      "num_iterations": 6,
+      "dim_control": 1,
+      "batch_size": 512,
+      "num_pi_trajs": 24,
+      "temperature": 0.5,
+      "min_std": 0.05,
+      "discount_factor": 0.99,
+      "num_elites": 64,
+      "max_std": 2.0
+    },
+    "pretrained_path": "./data/models/cartpole/baseline_new/run_1/final.pkl",
+    "save_checkpoints": false,
+    "save_final": false,
+    "finetune": {
+      "buffer_path": "./data/collect/cartpole_lowdata/20260512_023312/buffer.npz",
+      "max_steps": 400000
+    },
+    "wandb_group": "lowdata_300k"
+  }
+}

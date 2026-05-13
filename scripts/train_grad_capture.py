@@ -1,4 +1,9 @@
-# train.py
+# train_grad_capture.py
+# Modified training script that captures gradient sums for subspace alignment analysis.
+# Three changes from train.py:
+#   1. Uses init_grad_capture_trainer instead of init_trainer
+#   2. Captures w_initial (initial Dense kernel weights) before training
+#   3. Saves grad_capture.pkl after training completes
 
 import os
 import sys
@@ -10,8 +15,6 @@ _pre, _ = _pp.parse_known_args()
 if _pre.gpu is not None:
     os.environ["CUDA_VISIBLE_DEVICES"] = _pre.gpu
 
-# os.environ['XLA_FLAGS'] = '--xla_gpu_deterministic_ops=true'
-# os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.45"
 os.environ["JAX_COMPILATION_CACHE_DIR"] = os.path.expanduser("~/.cache/jax_cache")
 os.environ["JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] = "0"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -19,7 +22,6 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import time
 
 import jax
-
 import jax.numpy as jnp
 import numpy as np
 import wandb
@@ -31,7 +33,7 @@ from max.encoders import init_encoder
 from max.critics import init_critic
 from max.policies import init_policy
 from max.rewards import init_reward_model
-from max.trainers import init_trainer
+from max.trainers_grad_capture import init_grad_capture_trainer
 from max.samplers import init_sampler
 from max.evaluators import init_evaluator
 from max.planners import init_planner
@@ -96,11 +98,22 @@ def main(config):
         "normalizer": {"q_scale": jnp.array(config["normalizer"]["critic"]["q_scale_init"], dtype=jnp.float32)},
     }
 
-    # ---- Trainer ----
+    # ---- Trainer (grad capture variant) ----
     key, trainer_key = jax.random.split(key)
-    trainer, train_state = init_trainer(
+    trainer, train_state = init_grad_capture_trainer(
         trainer_key, config, encoder, dynamics, critic, policy, reward_model, parameters
     )
+
+    # ---- Capture initial Dense kernel weights before any training ----
+    dense_names = sorted([
+        k for k in parameters["mean"]["dynamics"]["params"]
+        if k.startswith("Dense_")
+    ])
+    w_initial = {
+        name: np.array(parameters["mean"]["dynamics"]["params"][name]["kernel"])
+        for name in dense_names
+    }
+    print(f"Captured w_initial for layers: {dense_names}")
 
     # ---- Sampler, evaluator, planner, buffer ----
     sampler = init_sampler(config["sampler"])
@@ -133,7 +146,7 @@ def main(config):
     wandb.config.update({"num_params_total": total_n})
     print(f"[{time.time()-t0:.2f}s] Components ready  (total={total_n:,})")
 
-    print(f"Starting TDMPC2 training for {config['max_steps']} steps")
+    print(f"Starting TDMPC2 cheetah training for {config['max_steps']} steps")
 
     # ---- Initial evaluation ----
     print(f"[{time.time()-t0:.2f}s] Running initial evaluation...")
@@ -200,6 +213,15 @@ def main(config):
     eval_every = config["eval_freq"] // chunk_size
     checkpoint_chunk_freq = max(1, checkpoint_freq // chunk_size)
 
+    # If capture_last_steps > 0, reset gradient accumulators at the right chunk boundary
+    # so only the final capture_last_steps steps are accumulated.
+    capture_last_steps = config.get("capture_last_steps", 0)
+    capture_last_chunks = capture_last_steps // chunk_size if capture_last_steps > 0 else 0
+    reset_at_chunk = num_chunks - capture_last_chunks if capture_last_chunks > 0 else None
+    if reset_at_chunk is not None:
+        print(f"[{time.time()-t0:.2f}s] Will reset gradient accumulators at step {reset_at_chunk * chunk_size} "
+              f"(capturing last {capture_last_steps} steps only)")
+
     print(f"[{time.time()-t0:.2f}s] Starting scan loop ({num_chunks} chunks of {chunk_size} steps)...")
     print(f"  First chunk triggers JIT compilation — expect a delay.")
 
@@ -214,6 +236,17 @@ def main(config):
         jax.block_until_ready(chunk_out)
         dt = time.time() - t_chunk
         step = chunk_idx * chunk_size
+
+        # Reset gradient accumulators after completing the chunk that ends at reset_at_chunk * chunk_size
+        if reset_at_chunk is not None and chunk_idx == reset_at_chunk:
+            zero_sums = jax.tree_util.tree_map(jnp.zeros_like, rollout_state.train_state.g_sum_unscaled)
+            rollout_state = rollout_state._replace(
+                train_state=rollout_state.train_state.replace(
+                    g_sum_unscaled=zero_sums,
+                    g_sum_scaled=jax.tree_util.tree_map(jnp.zeros_like, rollout_state.train_state.g_sum_scaled),
+                )
+            )
+            print(f"[Step {step}] Gradient accumulators reset — capturing last {capture_last_steps} steps.")
 
         # ---- Log mean train metrics for this chunk ----
         mean_metrics = {k: float(jnp.mean(v)) for k, v in chunk_out.train_metrics.items()}
@@ -275,126 +308,93 @@ def main(config):
             pickle.dump(jax.device_get(rollout_state.parameters), f)
         print(f"Parameters saved to {file_path}")
 
+    # ---- Save gradient capture data ----
+    if run_dir:
+        grad_path = os.path.join(run_dir, "grad_capture.pkl")
+        print(f"Saving gradient capture data to {grad_path}...")
+        w_final = {
+            name: np.array(rollout_state.parameters["mean"]["dynamics"]["params"][name]["kernel"])
+            for name in dense_names
+        }
+        grad_data = {
+            "w_initial": w_initial,
+            "w_final": w_final,
+            "g_sum_unscaled": jax.device_get(rollout_state.train_state.g_sum_unscaled),
+            "g_sum_scaled": jax.device_get(rollout_state.train_state.g_sum_scaled),
+        }
+        with open(grad_path, "wb") as f:
+            pickle.dump(grad_data, f)
+        print(f"Gradient data saved to {grad_path}")
+
     print("Run complete.")
 
 
-def run_sweep():
-    """Entry point for wandb sweep agents."""
-    wandb.init()
-
-    config_name = os.environ.get("CONFIG", "cheetah.json")
-    config_path = os.path.join(
-        os.path.dirname(__file__), "..", "configs", config_name
-    )
-    with open(config_path, "r") as f:
-        full_config = json.load(f)
-
-    run_config = copy.deepcopy(full_config["training"])
-
-    for key, value in wandb.config.items():
-        keys = key.split(".")
-        target = run_config
-        for k in keys[:-1]:
-            target = target[k]
-        target[keys[-1]] = value
-
-    main(run_config)
-    wandb.finish()
-
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run TDMPC2 training.")
+    import sys
+    import shutil
+    import subprocess
+    import tempfile
+
+    parser = argparse.ArgumentParser(description="Run TDMPC2 training with gradient capture.")
     parser.add_argument("--run-name", type=str, default=None)
-    parser.add_argument("--num-seeds", type=int, default=1)
     parser.add_argument(
         "--config",
         type=str,
-        default="cheetah.json",
-        help="Config filename in configs folder.",
+        default="pretrain_grad_capture_tdmpc2.json",
+        help="Config filename or absolute path.",
     )
     parser.add_argument("--gpu", type=str, default=None, help="GPU index (sets CUDA_VISIBLE_DEVICES).")
     parser.add_argument("--save-dir", type=str, default=None, help="Override training.save_dir in config.")
     parser.add_argument("--seed", type=int, default=None, help="Override training.seed in config.")
     parser.add_argument("--pretrained-path", type=str, default=None, help="Override training.pretrained_path in config.")
+    parser.add_argument("--capture-last-steps", type=int, default=None,
+                        help="Only accumulate gradients in the final N steps (resets accumulators at step max_steps-N).")
+    parser.add_argument("--max-steps", type=int, default=None, help="Override max_steps in config.")
     args = parser.parse_args()
 
-    if os.environ.get("WANDB_SWEEP_ID"):
-        run_sweep()
-    else:
-        config_path = os.path.join(
-            os.path.dirname(__file__), "..", "configs", args.config
+    config_path = os.path.join(
+        os.path.dirname(__file__), "..", "configs", args.config
+    )
+    with open(config_path, "r") as f:
+        full_config = json.load(f)
+    CONFIG = full_config["training"]
+
+    if args.capture_last_steps is not None:
+        CONFIG["capture_last_steps"] = args.capture_last_steps
+    if args.max_steps is not None:
+        CONFIG["max_steps"] = args.max_steps
+
+    if args.save_dir is not None:
+        CONFIG["save_dir"] = args.save_dir
+    if args.seed is not None:
+        CONFIG["seed"] = args.seed
+    if args.pretrained_path is not None:
+        CONFIG["pretrained_path"] = args.pretrained_path
+
+    run_name_base = args.run_name or "grad_capture"
+    num_seeds = CONFIG["num_seeds"]
+
+    base_key = jax.random.key(CONFIG["seed"])
+    seed_keys = jax.random.split(base_key, num_seeds)
+    seeds = [int(jax.random.bits(k)) for k in seed_keys]
+
+    for seed_idx, seed in enumerate(seeds, start=1):
+        print(f"--- Starting run {seed_idx}/{num_seeds} ---")
+        run_config = copy.deepcopy(CONFIG)
+        run_config["seed"] = seed
+        run_name = run_name_base
+        if num_seeds > 1:
+            run_name = f"{run_name}_{seed_idx}"
+        run_config["wandb_run_name"] = run_name
+
+        wandb.init(
+            project=run_config["wandb_project"],
+            config=run_config,
+            name=run_config["wandb_run_name"],
+            group=run_config.get("wandb_group"),
+            reinit=True,
         )
-        with open(config_path, "r") as f:
-            full_config = json.load(f)
-        CONFIG = full_config["training"]
+        main(run_config)
+        wandb.finish()
 
-        if args.save_dir is not None:
-            CONFIG["save_dir"] = args.save_dir
-        if args.seed is not None:
-            CONFIG["seed"] = args.seed
-        if args.pretrained_path is not None:
-            CONFIG["pretrained_path"] = args.pretrained_path
-
-        run_name_base = args.run_name or config["environment"]["type"]
-        num_seeds = CONFIG["num_seeds"]
-        num_processes = CONFIG["num_processes"]
-
-        if num_processes > 1:
-            # Derive per-process seeds using Python random (not JAX) so the
-            # parent process never initializes a CUDA context — otherwise the
-            # parent and each subprocess would hold simultaneous CUDA contexts
-            # on the same GPU, causing OOM.
-            import random
-            rng = random.Random(CONFIG["seed"])
-            proc_seeds = [rng.randint(0, 2**31) for _ in range(num_processes)]
-
-            for proc_idx, proc_seed in enumerate(proc_seeds, start=1):
-                print(f"--- Starting process {proc_idx}/{num_processes} ---")
-                if os.path.exists("/tmp/jax_cache"):
-                    shutil.rmtree("/tmp/jax_cache")
-
-                proc_config = copy.deepcopy(CONFIG)
-                proc_config["seed"] = proc_seed
-                proc_config["num_processes"] = 1  # prevent recursion
-                proc_config["process_idx"] = proc_idx
-
-                with tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".json", delete=False
-                ) as f:
-                    json.dump({"training": proc_config}, f, indent=2)
-                    tmp_path = f.name
-
-                proc_run_name = f"{run_name_base}_p{proc_idx}"
-                subprocess.run(
-                    [sys.executable, __file__,
-                     "--config", tmp_path,
-                     "--run-name", proc_run_name],
-                    cwd=os.path.dirname(os.path.abspath(__file__)),
-                )
-                os.unlink(tmp_path)
-
-        else:
-            base_key = jax.random.key(CONFIG["seed"])
-            seed_keys = jax.random.split(base_key, num_seeds)
-            seeds = [int(jax.random.bits(k)) for k in seed_keys]
-
-        for seed_idx, seed in enumerate(seeds, start=1):
-            print(f"--- Starting run seed {seed_idx}/{args.num_seeds} ---")
-            run_config = copy.deepcopy(CONFIG)
-            run_config["seed"] = seed
-            run_name = run_name_base
-            if args.num_seeds > 1:
-                run_name = f"{run_name}_{seed_idx}"
-            run_config["wandb_run_name"] = run_name
-
-            wandb.init(
-                project=run_config["wandb_project"],
-                config=run_config,
-                name=run_config["wandb_run_name"],
-                group=run_config.get("wandb_group"),
-                reinit=True,
-            )
-            main(run_config)
-            wandb.finish()
-
-        print("All experiments complete.")
+    print("All experiments complete.")

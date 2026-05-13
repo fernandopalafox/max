@@ -2,7 +2,7 @@
   "training": {
     "wandb_project": "cheetah_ft_latent",
     "seed": 44,
-    "save_dir": "./data/models/cheetah/baseline_tinylora_fomaml_bgd",
+    "save_dir": "./data/models/cheetah/baseline_loraxs_regularized",
     "checkpoint_freq": 100000,
     "num_agents": 1,
     "max_steps": 1000000,
@@ -17,6 +17,9 @@
     "eval_freq": 10000,
     "chunk_size": 1000,
     "plot_eval": false,
+    "visualizer": {
+      "type": "cheetah"
+    },
     "evaluator": {
       "seed": 123,
       "max_steps": 500,
@@ -43,7 +46,7 @@
       "frozen": false
     },
     "dynamics": {
-      "type": "dense_tiny_lora",
+      "type": "dense_lora_xs",
       "dynamics_features": [
         512,
         512,
@@ -52,16 +55,14 @@
       ],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
-      "svd_rank": 64,
-      "steering_dim": 16,
-      "projection_seed": 42,
+      "rank": 48,
+      "r_init_std": 1e-05,
       "adapt_layers": [
         0,
         1,
         2,
         3
-      ],
-      "frozen": false
+      ]
     },
     "critic": {
       "type": "ensemble",
@@ -105,7 +106,7 @@
       "cheetah_mass_scale": 1.0
     },
     "trainer": {
-      "type": "bgd_fomaml_tinylora_tdmpc2",
+      "type": "tdmpc2_regularized",
       "lr": 0.0003,
       "encoder_lr": 0.0001,
       "policy_lr": 0.0003,
@@ -118,12 +119,13 @@
       "reward_coef": 0.1,
       "value_coef": 0.1,
       "entropy_coef": 0.0001,
-      "meta_lr_inner": 0.0001
+      "adapter_A_coef": 1.0,
+      "adapter_B_coef": 1.0
     },
     "sampler": {
       "type": "trajectory_batch",
       "batch_size": 256,
-      "horizon": 6,
+      "horizon": 3,
       "min_buffer_size": 2500
     },
     "state_labels": [

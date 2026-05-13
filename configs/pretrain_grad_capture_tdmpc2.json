@@ -1,8 +1,8 @@
 {
   "training": {
-    "wandb_project": "cheetah_ft_latent",
+    "wandb_project": "subspace_alignment",
     "seed": 44,
-    "save_dir": "./data/models/cheetah_bgd_fomaml",
+    "save_dir": "./data/models/cheetah/grad_capture",
     "checkpoint_freq": 100000,
     "num_agents": 1,
     "max_steps": 1000000,
@@ -17,6 +17,9 @@
     "eval_freq": 10000,
     "chunk_size": 1000,
     "plot_eval": false,
+    "visualizer": {
+      "type": "cheetah"
+    },
     "evaluator": {
       "seed": 123,
       "max_steps": 500,
@@ -43,7 +46,7 @@
       "frozen": false
     },
     "dynamics": {
-      "type": "dense_lora_xs",
+      "type": "dense",
       "dynamics_features": [
         512,
         512,
@@ -52,14 +55,7 @@
       ],
       "simnorm_dim_v": 8,
       "simnorm_tau": 1.0,
-      "rank": 48,
-      "r_init_std": 1e-05,
-      "adapt_layers": [
-        0,
-        1,
-        2,
-        3
-      ]
+      "frozen": false
     },
     "critic": {
       "type": "ensemble",
@@ -103,9 +99,9 @@
       "cheetah_mass_scale": 1.0
     },
     "trainer": {
-      "type": "bgd_fomaml_tdmpc2",
+      "type": "tdmpc2",
       "lr": 0.0003,
-      "encoder_lr": 0.0001,
+      "encoder_lr": 9e-05,
       "policy_lr": 0.0003,
       "grad_clip_norm": 20,
       "horizon": 3,
@@ -115,13 +111,12 @@
       "consistency_coef": 20.0,
       "reward_coef": 0.1,
       "value_coef": 0.1,
-      "entropy_coef": 0.0001,
-      "meta_lr_inner": 0.0001
+      "entropy_coef": 0.0001
     },
     "sampler": {
       "type": "trajectory_batch",
       "batch_size": 256,
-      "horizon": 6,
+      "horizon": 3,
       "min_buffer_size": 2500
     },
     "state_labels": [
