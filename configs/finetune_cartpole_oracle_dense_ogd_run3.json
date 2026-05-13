@@ -131,10 +131,10 @@
     },
     "pretrained_path": "./data/models/cartpole/baseline_new/run_3/final.pkl",
     "save_checkpoints": false,
-    "save_final": true,
+    "save_final": false,
     "finetune": {
       "buffer_path": "./data/collect/cartpole_oracle/20260512_023528/buffer.npz",
-      "max_steps": 300000
+      "max_steps": 400000
     },
     "wandb_group": "oracle_300k"
   }

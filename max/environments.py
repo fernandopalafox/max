@@ -12,8 +12,28 @@ def init_env(config: Dict[str, Any]):
     env_type = config["environment"]["type"]
     if env_type == "cheetah":
         return _make_cheetah_env(config)
+    elif env_type == "humanoid":
+        return _make_humanoid_env(config)
+    elif env_type == "quadruped":
+        return _make_quadruped_env(config)
+    elif env_type == "walker":
+        return _make_walker_env(config)
+    elif env_type == "walker_run":
+        return _make_walker_run_env(config)
+    elif env_type == "ball_in_cup":
+        return _make_ball_in_cup_env(config)
     elif env_type == "cartpole_balance":
         return _make_cartpole_balance_env(config)
+    elif env_type == "cartpole_swingup":
+        return _make_cartpole_env(config, "CartpoleSwingup")
+    elif env_type == "finger_spin":
+        return _make_finger_spin_env(config)
+    elif env_type == "hopper_hop":
+        return _make_hopper_hop_env(config)
+    elif env_type == "reacher_easy":
+        return _make_reacher_env(config, "ReacherEasy")
+    elif env_type == "reacher_hard":
+        return _make_reacher_env(config, "ReacherHard")
     else:
         raise ValueError(f"Unknown environment: {env_type!r}")
 
