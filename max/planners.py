@@ -70,6 +70,18 @@ def init_planner(
         )
         action_proposal_fn = make_tdmpc2_action_proposal_fn(dynamics, policy, horizon)
         planner, state = create_mppi_planner(config, encode_fn, traj_value_fn, key, action_proposal_fn)
+    elif planner_type == "mppi_ig_animals":
+        pp = config["planner"]
+        horizon = pp["horizon"]
+        dim_a = pp["dim_control"]
+        encode_fn = _make_identity_encode_fn()
+        traj_value_fn = make_animals_trajectory_value_fn_ig(
+            dynamics, reward, horizon,
+            sigma_v_sq=pp["sigma_v_sq"],
+            info_weight=pp["info_weight"],
+        )
+        action_proposal_fn = _make_noop_action_proposal_fn(horizon, dim_a)
+        planner, state = create_mppi_planner(config, encode_fn, traj_value_fn, key, action_proposal_fn)
     else:
         raise ValueError(f"Unknown planner type: {planner_type!r}")
 
@@ -111,7 +123,7 @@ def make_tdmpc2_trajectory_value_fn_ig(
     dynamics, reward, critic, policy, horizon, discount_factor, meas_noise_scale, info_weight,
     info_horizon,
 ):
-    """MPPI trajectory value with analytical info-gathering bonus for the first info_horizon steps.
+    """MPPI trajectory value with analytical per-step info-gathering bonus for the first info_horizon steps.
     Terminal Q-value is task-only and untouched."""
     def trajectory_value_fn(cost_params, z0, action_seqs, key):
         key_pi, key_q = jax.random.split(key)
@@ -121,19 +133,13 @@ def make_tdmpc2_trajectory_value_fn_ig(
         P = cost_params["covariance"]
         R = meas_noise_scale * jnp.eye(z0.shape[0])
 
-        def compute_info_gain(actions):
-            J = jax.jacrev(lambda fp: dynamics.predict(unflatten(fp), z0, actions[0]))(flat_params)
-            S = J @ P @ J.T + R
-            return 0.5 * (jnp.linalg.slogdet(S)[1] - jnp.linalg.slogdet(R)[1])
-
-        info_gains = jax.vmap(compute_info_gain)(action_seqs)  # (N,)
-
-        def eval_traj(args):
-            actions, info_gain = args
-
+        def eval_traj(actions):
             def step(z, step_and_action):
                 t, a = step_and_action
                 r = reward.predict(cost_params["mean"]["reward"], z, a)
+                J = jax.jacrev(lambda fp: dynamics.predict(unflatten(fp), z, a))(flat_params)
+                S = J @ P @ J.T + R
+                info_gain = 0.5 * (jnp.linalg.slogdet(S)[1] - jnp.linalg.slogdet(R)[1])
                 info_bonus = jnp.where(t < info_horizon, info_weight * info_gain, 0.0)
                 z_next = dynamics.predict(dyn_params, z, a)
                 return z_next, r + info_bonus
@@ -143,9 +149,49 @@ def make_tdmpc2_trajectory_value_fn_ig(
             discounts = discount_factor ** jnp.arange(horizon)
             return jnp.dot(discounts, rewards) + (discount_factor ** horizon) * v
 
-        return jax.vmap(eval_traj)((action_seqs, info_gains))
+        return jax.vmap(eval_traj)(action_seqs)
 
     return trajectory_value_fn
+
+
+def make_animals_trajectory_value_fn_ig(dynamics, reward, horizon, sigma_v_sq, info_weight):
+    """Animals dominance contest trajectory value: per-step info gain, fixed P through horizon.
+
+    J = [[0,0],[q̂−x1_t, K̂]] changes as x1 evolves along the rollout, so the planner
+    naturally favours action sequences that move x1 toward more informative states.
+    """
+    def trajectory_value_fn(cost_params, z0, action_seqs, key):
+        dyn_params = cost_params["mean"]["dynamics"]
+        flat_params, unflatten = jax.flatten_util.ravel_pytree(dyn_params)
+        P = cost_params["covariance"]
+        R = sigma_v_sq * jnp.eye(z0.shape[0])
+
+        def eval_traj(actions):
+            def step(z, a):
+                r = reward.predict(cost_params["mean"]["reward"], z, a)
+                J = jax.jacrev(lambda fp: dynamics.predict(unflatten(fp), z, a))(flat_params)
+                S = J @ P @ J.T + R
+                info_gain = 0.5 * (jnp.linalg.slogdet(S)[1] - jnp.linalg.slogdet(R)[1])
+                z_next = dynamics.predict(dyn_params, z, a)
+                return z_next, r + info_weight * info_gain
+            _, rewards = jax.lax.scan(step, z0, actions)
+            return jnp.sum(rewards)
+
+        return jax.vmap(eval_traj)(action_seqs)
+
+    return trajectory_value_fn
+
+
+def _make_identity_encode_fn():
+    def encode_fn(cost_params, obs):
+        return obs
+    return encode_fn
+
+
+def _make_noop_action_proposal_fn(horizon, dim_a):
+    def action_proposal_fn(cost_params, z0, key, n):
+        return jnp.zeros((0, horizon, dim_a))
+    return action_proposal_fn
 
 
 def make_tdmpc2_action_proposal_fn(dynamics, policy, horizon):

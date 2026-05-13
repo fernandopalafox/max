@@ -54,17 +54,17 @@ class Trainer(NamedTuple):
 def init_trainer(
     key: jax.Array,
     config: dict,
-    encoder: Encoder,
-    dynamics,
-    critic: Critic,
-    policy: Policy,
-    reward,
-    init_params: dict,
+    encoder: Encoder = None,
+    dynamics=None,
+    critic: Critic = None,
+    policy: Policy = None,
+    reward=None,
+    init_params: dict = None,
 ) -> tuple[Trainer, TrainState]:
     """
     Initialize a trainer based on config["trainer"].
 
-    Currently supported: "tdmpc2", "ogd"
+    Currently supported: "tdmpc2", "ogd", "ekf_efficient", "animals_ekf"
     """
     trainer_type = config["trainer"]["type"]
 
@@ -93,6 +93,8 @@ def init_trainer(
         return init_ekf_efficient_trainer(key, config, encoder, dynamics, init_params)
     if trainer_type == "ogd":
         return init_ogd_trainer(key, config, encoder, dynamics, init_params)
+    if trainer_type == "animals_ekf":
+        return init_animals_ekf_trainer(key, config, dynamics, init_params)
     raise ValueError(f"Unknown trainer: {trainer_type!r}")
 
 
@@ -1534,3 +1536,69 @@ def init_ekf_efficient_trainer(
 
     trainer = Trainer(train_fn=train_step)
     return trainer, train_state
+
+
+def init_animals_ekf_trainer(
+    key: jax.Array,
+    config: dict,
+    dynamics,
+    init_params: dict,
+) -> tuple[Trainer, TrainState]:
+    """EKF trainer for dominance contest: estimates θ = [q, K] from y_t = K*(q - x1_t).
+
+    Covariance lives in parameters["covariance"] (mutated here at construction time).
+    train_step returns updated parameters containing new θ̂ and P.
+
+    config["trainer"]:
+        sigma_v_sq:     float, measurement noise variance σ²_v
+        jitter:         float, regularisation added to innovation covariance
+        init_cov_diag: list[float], per-parameter initial variances [var_K, var_q]
+    """
+    tp = config["trainer"]
+    sigma_v_sq: float = tp["sigma_v_sq"]
+    jitter: float = tp["jitter"]
+    init_cov_diag = tp["init_cov_diag"]
+
+    flat_dyn_init, unflatten_fn = jax.flatten_util.ravel_pytree(
+        init_params["mean"]["dynamics"]
+    )
+    dim_dyn_params: int = flat_dyn_init.shape[0]  # 2 for [K, q] (alphabetical)
+
+    init_params["covariance"] = jnp.diag(jnp.array(init_cov_diag, dtype=jnp.float32))
+
+    def observation_fn(flat_theta, x):
+        theta = unflatten_fn(flat_theta)
+        return jnp.array([theta["K"] * (theta["q"] - x[0])])
+
+    meas_cov = jnp.array([[sigma_v_sq]])
+
+    estimator = EKFEfficient(
+        dynamics_fn=lambda params, _: params,  # θ is constant
+        observation_fn=observation_fn,
+        meas_cov=meas_cov,
+        jitter=jitter,
+    )
+
+    train_state = TrainState(opt_state=None)
+
+    @jax.jit
+    def train_step(train_state, batch, parameters, key):
+        x1 = batch["x1"]
+        y_obs = jnp.array([batch["y_obs"]])
+        ekf_inp = jnp.array([x1])
+
+        flat_dyn, _ = jax.flatten_util.ravel_pytree(parameters["mean"]["dynamics"])
+        cov = parameters["covariance"]
+        flat_dyn_new, cov_new, _ = estimator.estimate(flat_dyn, cov, ekf_inp, y_obs)
+
+        loss = jnp.mean((y_obs - observation_fn(flat_dyn, ekf_inp)) ** 2)
+        new_parameters = parameters | {
+            "mean": parameters["mean"] | {"dynamics": unflatten_fn(flat_dyn_new)},
+            "covariance": cov_new,
+        }
+        return train_state, new_parameters, {
+            "losses/ekf_loss": loss,
+            "losses/cov_trace": jnp.trace(cov_new),
+        }
+
+    return Trainer(train_fn=train_step), train_state

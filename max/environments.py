@@ -5,12 +5,52 @@ import jax.numpy as jnp
 from typing import Dict, Any
 
 
+def make_dominance_contest_env(config: Dict[str, Any]):
+    """Dominance contest environment for animals active-info-gathering example.
+
+    State:  x = [x1, x2] (ego and opponent escalation levels)
+    Action: u  (scalar ego escalation change)
+    Opponent dynamics (mean, noise added externally): x2_{t+1} = x2_t + true_K*(true_q - x1)
+    Observation: full state (planner estimates θ = [q, K] via EKF)
+    """
+    ep = config["environment"]
+    true_q = ep["true_q"]
+    true_K = ep["true_K"]
+    max_episode_steps = ep["max_episode_steps"]
+    action_min = ep["action_min"]
+    action_max = ep["action_max"]
+
+    @jax.jit
+    def reset_fn(key):
+        return jnp.zeros(2, dtype=jnp.float32)
+
+    @jax.jit
+    def get_obs_fn(state):
+        return state
+
+    @jax.jit
+    def step_fn(state, step_count, action):
+        u = action_min + (action.squeeze() + 1.0) * 0.5 * (action_max - action_min)
+        x1, x2 = state[0], state[1]
+        x1_next = x1 + u
+        x2_next = x2 + true_K * (true_q - x1)  # mean dynamics; noise added externally
+        next_state = jnp.array([x1_next, x2_next])
+        reward = jnp.array([-x1_next])
+        truncated = step_count >= max_episode_steps
+        info = {"x1_pre": x1, "true_K": jnp.array(true_K), "true_q": jnp.array(true_q)}
+        return next_state, get_obs_fn(next_state), reward, False, truncated, info
+
+    return reset_fn, step_fn, get_obs_fn
+
+
 def init_env(config: Dict[str, Any]):
     """
     Initialize environment functions based on config["environment"]["type"].
     """
     env_type = config["environment"]["type"]
-    if env_type == "cheetah":
+    if env_type == "dominance_contest":
+        return make_dominance_contest_env(config)
+    elif env_type == "cheetah":
         return _make_cheetah_env(config)
     elif env_type == "humanoid":
         return _make_humanoid_env(config)

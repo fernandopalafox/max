@@ -1,0 +1,43 @@
+{
+  "seed": 42,
+  "total_steps": 200,
+  "dim_state": 2,
+  "dim_action": 1,
+  "environment": {
+    "type": "dominance_contest",
+    "true_q": 5.0,
+    "true_K": 1.0,
+    "sigma_v": 0.5,
+    "max_episode_steps": 200,
+    "action_min": 0.0,
+    "action_max": 2.0
+  },
+  "ekf": {
+    "theta_hat_init": [0.0, 0.2]
+  },
+  "trainer": {
+    "type": "animals_ekf",
+    "sigma_v_sq": 0.25,
+    "jitter": 1e-6,
+    "init_cov_diag": [0.64, 4.0]
+  },
+  "planner": {
+    "type": "mppi_ig_animals",
+    "horizon": 10,
+    "dim_control": 1,
+    "num_iterations": 3,
+    "batch_size": 500,
+    "num_elites": 50,
+    "num_pi_trajs": 0,
+    "temperature": 0.5,
+    "min_std": 0.1,
+    "max_std": 2.0,
+    "info_weight": 0.5,
+    "sigma_v_sq": 0.25
+  },
+  "reward": {
+    "escalation_weight": 1.0
+  },
+  "wandb_project": "animals",
+  "wandb_run_name": "animals_run"
+}

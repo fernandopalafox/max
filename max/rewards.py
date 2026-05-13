@@ -20,6 +20,22 @@ class Reward(NamedTuple):
     logits: Callable   # (reward_params, z, action) -> (num_bins,)
 
 
+def init_animals_reward(config: dict) -> tuple["Reward", dict]:
+    """Task cost for dominance contest: reward = -c * x1 (penalise ego escalation).
+
+    Returns (Reward, {}) — no trainable parameters.
+    """
+    c = config["reward"]["escalation_weight"]
+
+    def predict(params, state, action):
+        return -c * state[0]
+
+    def logits(params, state, action):
+        return jnp.array([predict(params, state, action)])
+
+    return Reward(predict=predict, logits=logits), {}
+
+
 def init_reward_model(config: dict, pretrained: dict = None) -> tuple["Reward", dict]:
     """
     Initialize the TDMPC2 learned reward head.

@@ -49,6 +49,27 @@ def init_dynamics(
     raise ValueError(f"Unknown dynamics: {variant!r}")
 
 
+def create_animals_dynamics(config):
+    """Analytical dominance contest dynamics with estimated θ = [q̂, K̂].
+
+    Returns (Dynamics, init_dyn_params) where init_dyn_params = {"q": q̂, "K": K̂}.
+    Dynamics.predict(params, state, action) -> next_state
+    """
+    q_hat_init, K_hat_init = config["ekf"]["theta_hat_init"]
+    init_dyn_params = {"q": jnp.array(q_hat_init), "K": jnp.array(K_hat_init)}
+    action_min = config["environment"]["action_min"]
+    action_max = config["environment"]["action_max"]
+
+    def predict(params, state, action):
+        q_hat = params["q"]
+        K_hat = params["K"]
+        x1, x2 = state[0], state[1]
+        u = action_min + (action[0] + 1.0) * 0.5 * (action_max - action_min)
+        return jnp.array([x1 + u, x2 + K_hat * (q_hat - x1)])
+
+    return Dynamics(predict=predict), init_dyn_params
+
+
 def _init_dense_dynamics(
     key: jax.Array,
     config: Any,
